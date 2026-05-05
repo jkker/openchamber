@@ -26,6 +26,7 @@ export const resolveUsageTone = (percent: number | null): 'safe' | 'warn' | 'cri
 };
 
 export const formatWindowLabel = (label: string): string => {
+  if (label === 'rolling') return 'Rolling Usage';
   if (label === '5h') return '5-Hour';
   if (label === '7d') return '7-Day Limit';
   if (label === '7d-sonnet') return '7-Day Sonnet Limit';
@@ -83,6 +84,7 @@ export const inferWindowSeconds = (label: string): number | null => {
   const normalized = label.toLowerCase().trim();
   
   // Exact matches
+  if (normalized === 'rolling') return 5 * 3600;
   if (normalized === '5h') return 5 * 3600;
   if (normalized === '7d' || normalized === 'weekly' || normalized === '7d-sonnet' || normalized === '7d-opus') return 7 * 86400;
   if (normalized === 'monthly') return 30 * 86400;

@@ -207,6 +207,12 @@ export const createSettingsHelpers = (dependencies) => {
     if (Array.isArray(candidate.usageDropdownProviders)) {
       result.usageDropdownProviders = normalizeStringArray(candidate.usageDropdownProviders);
     }
+    if (typeof candidate.opencodeGoWorkspaceId === 'string') {
+      result.opencodeGoWorkspaceId = candidate.opencodeGoWorkspaceId.trim();
+    }
+    if (typeof candidate.opencodeGoSessionCookie === 'string') {
+      result.opencodeGoSessionCookie = candidate.opencodeGoSessionCookie.trim();
+    }
     if (typeof candidate.autoDeleteEnabled === 'boolean') {
       result.autoDeleteEnabled = candidate.autoDeleteEnabled;
     }
