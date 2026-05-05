@@ -119,39 +119,51 @@ const parseResetDurationSeconds = (value) => {
   return total > 0 ? total : null;
 };
 
+const stripHtmlComments = (value) => value.replace(/<!--[^]*?-->/g, '');
+
+const normalizeText = (value) => value.replace(/\s+/g, ' ').trim();
+
 const parseSubscriptionFromDashboardHtml = (html) => {
   if (typeof html !== 'string' || !html.includes('You are subscribed to OpenCode Go.')) {
     return null;
   }
 
-  const sectionMatch = html.match(/<div data-slot="usage">([\s\S]*?)<\/div><form action=/);
+  const sanitizedHtml = stripHtmlComments(html);
+  const sectionMatch = sanitizedHtml.match(/<div data-slot="usage">([\s\S]*?)<\/div><form action=/);
   const section = sectionMatch?.[1] ?? null;
   if (!section) {
     return null;
   }
 
-  const itemMatches = Array.from(section.matchAll(/<div data-slot="usage-item">([\s\S]*?)<span data-slot="reset-time"><!--\$-->Resets in<!--\/--> <!--\$-->([^<]+)<!--\/--><\/span><\/div>/g));
-  if (itemMatches.length < 3) {
-    return null;
-  }
+  const usageByKey = {};
+  const usageMatches = Array.from(section.matchAll(
+    /<div data-slot="usage-item">[\s\S]*?<span data-slot="usage-label">([^<]+)<\/span><span data-slot="usage-value">(\d+)%<\/span>[\s\S]*?<span data-slot="reset-time">\s*Resets in\s*([^<]+)<\/span>[\s\S]*?<\/div>/g
+  ));
 
-  const parseItem = (match) => {
-    const chunk = typeof match?.[1] === 'string' ? match[1] : '';
-    const percentMatch = chunk.match(/data-slot="usage-value"><!--\$-->(\d+)<!--\/-->%/);
-    const resetText = typeof match?.[2] === 'string' ? match[2] : null;
-    const usedPercent = percentMatch ? Number.parseInt(percentMatch[1], 10) : null;
-    const resetSeconds = resetText ? parseResetDurationSeconds(resetText) : null;
-    return {
+  for (const match of usageMatches) {
+    const label = normalizeText(match?.[1] ?? '').toLowerCase();
+
+    let key = null;
+    if (label === 'rolling usage') key = 'rollingUsage';
+    if (label === 'weekly usage') key = 'weeklyUsage';
+    if (label === 'monthly usage') key = 'monthlyUsage';
+    if (!key) {
+      continue;
+    }
+
+    const usedPercent = Number.parseInt(match[2], 10);
+    const resetSeconds = parseResetDurationSeconds(normalizeText(match[3] ?? ''));
+    usageByKey[key] = {
       usedPercent: Number.isFinite(usedPercent) ? usedPercent : null,
       resetAt: toResetAt(resetSeconds),
     };
-  };
+  }
 
-  return {
-    rollingUsage: parseItem(itemMatches[0]),
-    weeklyUsage: parseItem(itemMatches[1]),
-    monthlyUsage: parseItem(itemMatches[2]),
-  };
+  if (!usageByKey.rollingUsage || !usageByKey.weeklyUsage || !usageByKey.monthlyUsage) {
+    return null;
+  }
+
+  return usageByKey;
 };
 
 const buildUsageFromSubscription = (subscription) => {
