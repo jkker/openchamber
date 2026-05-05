@@ -79,8 +79,8 @@ export const usePromptTemplatesStore = create<PromptTemplatesStore>()(
             const payload = await response.json().catch(() => null);
             throw new Error(payload?.error || 'Failed to create prompt template');
           }
-          await get().loadTemplates();
           lastLoadedAt = 0;
+          await get().loadTemplates();
           return true;
         } catch (error) {
           console.error('[PromptTemplatesStore] Failed to create:', error);
@@ -99,8 +99,8 @@ export const usePromptTemplatesStore = create<PromptTemplatesStore>()(
             const payload = await response.json().catch(() => null);
             throw new Error(payload?.error || 'Failed to update prompt template');
           }
-          await get().loadTemplates();
           lastLoadedAt = 0;
+          await get().loadTemplates();
           return true;
         } catch (error) {
           console.error('[PromptTemplatesStore] Failed to update:', error);
@@ -120,8 +120,8 @@ export const usePromptTemplatesStore = create<PromptTemplatesStore>()(
           if (get().selectedTemplateId === id) {
             set({ selectedTemplateId: null });
           }
-          await get().loadTemplates();
           lastLoadedAt = 0;
+          await get().loadTemplates();
           return true;
         } catch (error) {
           console.error('[PromptTemplatesStore] Failed to delete:', error);

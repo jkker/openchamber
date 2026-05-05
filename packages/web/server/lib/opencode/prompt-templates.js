@@ -5,7 +5,7 @@ import {
   CONFIG_FILE,
 } from './shared.js';
 
-const SECTION_KEY = 'promptTemplate';
+const SECTION_KEY = 'promptTemplates';
 
 const DEFAULT_TEMPLATES = {
   simple: {

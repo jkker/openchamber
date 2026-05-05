@@ -26,7 +26,7 @@ export const PromptTemplatesPage: React.FC = () => {
   })));
 
   const selectedTemplate = selectedTemplateId ? getTemplateById(selectedTemplateId) : null;
-  const isNew = Boolean(selectedTemplateId && !selectedTemplate && templates.length >= 0);
+  const isNew = Boolean(selectedTemplateId && !selectedTemplate && templates.length > 0);
 
   const [name, setName] = React.useState('');
   const [body, setBody] = React.useState('');

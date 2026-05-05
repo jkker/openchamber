@@ -16,7 +16,7 @@ import { useProjectsStore } from '@/stores/useProjectsStore';
 import { usePromptTemplatesStore } from '@/stores/usePromptTemplatesStore';
 import { getWorktreeSetupCommands } from '@/lib/openchamberConfig';
 import type { ProjectRef } from '@/lib/openchamberConfig';
-import type { CreateMultiRunParams, MultiRunGroup, MultiRunModelSelection } from '@/types/multirun';
+import type { CreateMultiRunParams, MultiRunGroup } from '@/types/multirun';
 import { ModelMultiSelect, generateInstanceId, type ModelSelectionWithId } from './ModelMultiSelect';
 import { BranchSelector, useBranchOptions } from './BranchSelector';
 import { AgentSelector } from './AgentSelector';
@@ -371,7 +371,7 @@ export const MultiRunLauncher: React.FC<MultiRunLauncherProps> = ({
 
       const groups: MultiRunGroup[] = validGroups.map((g) => ({
         prompt: g.prompt.trim(),
-        models: g.models.map(({ instanceId: _iid, ...rest }) => rest),
+        models: g.models.map((m) => ({ providerID: m.providerID, modelID: m.modelID, displayName: m.displayName, variant: m.variant })),
         templateId: g.templateId || undefined,
       }));
 

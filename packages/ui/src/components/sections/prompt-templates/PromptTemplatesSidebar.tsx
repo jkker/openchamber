@@ -57,7 +57,7 @@ export const PromptTemplatesSidebar: React.FC<PromptTemplatesSidebarProps> = ({ 
     loadTemplates();
   }, [loadTemplates]);
 
-  const handleCreateNew = () => {
+  const handleCreateNew = async () => {
     const baseName = 'new-template';
     let newName = baseName;
     let counter = 1;
@@ -68,8 +68,12 @@ export const PromptTemplatesSidebar: React.FC<PromptTemplatesSidebarProps> = ({ 
     }
 
     const slug = newName.replace(/\s+/g, '-').toLowerCase();
+    const success = await usePromptTemplatesStore.getState().createTemplate(slug, newName, '');
+    if (!success) {
+      toast.error(t('settings.promptTemplates.page.toast.createFailed'));
+      return;
+    }
     usePromptTemplatesStore.getState().setSelectedTemplate(slug);
-    usePromptTemplatesStore.getState().createTemplate(slug, newName, '');
     onItemSelect?.();
   };
 
