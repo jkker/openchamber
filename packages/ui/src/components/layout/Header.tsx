@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { SortableTabsStrip, type SortableTabsStripItem } from '@/components/ui/sortable-tabs-strip';
 
-import { RiArrowLeftSLine, RiChat4Line, RiChatNewLine, RiCheckLine, RiCloseLine, RiCommandLine, RiFileTextLine, RiFolder6Line, RiGitBranchLine, RiGithubFill, RiLayoutLeftLine, RiLayoutRightLine, RiPictureInPicture2Line, RiPlayListAddLine, RiRefreshLine, RiServerLine, RiStackLine, RiTerminalBoxLine, RiTimerLine, RiAlertLine, RiWindowLine, type RemixiconComponentType } from '@remixicon/react';
+import { RiArrowLeftSLine, RiChat4Line, RiChatNewLine, RiCheckLine, RiCloseLine, RiCommandLine, RiFileTextLine, RiFolder6Line, RiGitBranchLine, RiGithubFill, RiLayoutLeftLine, RiLayoutRightLine, RiPictureInPicture2Line, RiPlayListAddLine, RiRefreshLine, RiServerLine, RiStackLine, RiTerminalBoxLine, RiTimerLine, RiAlertLine, type RemixiconComponentType } from '@remixicon/react';
 import { DiffIcon } from '@/components/icons/DiffIcon';
 import { useUIStore, type MainTab } from '@/stores/useUIStore';
 import { useShallow } from 'zustand/react/shallow';
@@ -1362,7 +1362,12 @@ export const Header: React.FC<HeaderProps> = ({
     });
   }, [activeProject?.id, activeProject?.path, openDirectory]);
 
-  const handleOpenCurrentSessionMiniChat = React.useCallback(() => {
+  const handleOpenCurrentMiniChat = React.useCallback(() => {
+    if (isNewSessionDraftOpen) {
+      handleOpenDraftMiniChat();
+      return;
+    }
+
     if (!currentSessionId) {
       return;
     }
@@ -1372,7 +1377,7 @@ export const Header: React.FC<HeaderProps> = ({
     }).catch((error) => {
       console.warn('[header] failed to open session mini chat window', error);
     });
-  }, [activeProject?.path, currentSessionId, openDirectory]);
+  }, [activeProject?.path, currentSessionId, handleOpenDraftMiniChat, isNewSessionDraftOpen, openDirectory]);
 
   const handleOpenContextPanel = React.useCallback(() => {
     const directory = normalize(openDirectory || '');
@@ -1896,6 +1901,7 @@ export const Header: React.FC<HeaderProps> = ({
   );
 
   const desktopSidebarActionsInline = !isRightSidebarOpen || !desktopRightSidebarActionsHost;
+  const showMiniChatHeaderAction = hasElectronDesktopIPC && (isNewSessionDraftOpen || Boolean(currentSessionId));
 
   const renderDesktop = () => (
     <div
@@ -1933,23 +1939,6 @@ export const Header: React.FC<HeaderProps> = ({
             </TooltipTrigger>
             <TooltipContent>
               <p>{t('header.actions.newSessionWithShortcut', { shortcut: shortcutLabel('new_chat') })}</p>
-            </TooltipContent>
-          </Tooltip>
-        ) : null}
-        {hasElectronDesktopIPC && !isLeftSidebarOpen ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                aria-label={t('header.actions.newMiniChatAria')}
-                onClick={handleOpenDraftMiniChat}
-                className={cn(desktopHeaderIconButtonClass, 'mr-6 shrink-0')}
-              >
-                <RiWindowLine className="h-[18px] w-[18px]" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{t('header.actions.newMiniChat')}</p>
             </TooltipContent>
           </Tooltip>
         ) : null}
@@ -2025,14 +2014,6 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex-1" />
 
         <div className="flex shrink-0 items-center gap-1">
-          <HeaderIconActionButton
-            visible={hasElectronDesktopIPC && !isNewSessionDraftOpen && Boolean(currentSessionId)}
-            title={t('header.actions.openSessionMiniChat')}
-            ariaLabel={t('header.actions.openSessionMiniChatAria')}
-            onClick={handleOpenCurrentSessionMiniChat}
-            className={`${desktopHeaderIconButtonClass} mr-1`}
-            Icon={RiPictureInPicture2Line}
-          />
           {showDesktopHeaderContextUsage && stableDesktopContextUsage ? (
             <ContextUsageDisplay
               totalTokens={stableDesktopContextUsage.totalTokens}
@@ -2045,11 +2026,19 @@ export const Header: React.FC<HeaderProps> = ({
               showPercentIcon
               onClick={handleOpenContextPanel}
               pressed={isContextPanelActive}
-              className={desktopSidebarActionsInline ? 'mr-3.5' : ''}
+              className={desktopSidebarActionsInline && !showMiniChatHeaderAction ? 'mr-3.5' : ''}
               valueClassName="typography-ui-label font-medium leading-none text-foreground"
               percentIconClassName="h-5 w-5"
             />
           ) : null}
+          <HeaderIconActionButton
+            visible={showMiniChatHeaderAction}
+            title={isNewSessionDraftOpen ? t('header.actions.newMiniChat') : t('header.actions.openSessionMiniChat')}
+            ariaLabel={isNewSessionDraftOpen ? t('header.actions.newMiniChatAria') : t('header.actions.openSessionMiniChatAria')}
+            onClick={handleOpenCurrentMiniChat}
+            className={cn(desktopHeaderIconButtonClass, desktopSidebarActionsInline && showDesktopHeaderContextUsage ? 'mr-3.5' : 'mr-1')}
+            Icon={RiPictureInPicture2Line}
+          />
           {desktopSidebarActionsInline ? desktopSidebarActions : null}
           {!desktopSidebarActionsInline && desktopRightSidebarActionsHost
             ? createPortal(desktopSidebarActions, desktopRightSidebarActionsHost)

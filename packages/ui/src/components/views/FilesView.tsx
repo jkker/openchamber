@@ -665,6 +665,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   const [isSaving, setIsSaving] = React.useState(false);
   const autoSaveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLoadedFileStatRef = React.useRef<FileStatSnapshot | null>(null);
+  const activeFileLoadIdRef = React.useRef(0);
   const [autoSaveStatus, setAutoSaveStatus] = React.useState<'idle' | 'saved'>('idle');
   const [autoSaveEnabled, setAutoSaveEnabled] = React.useState(getInitialAutoSaveEnabled);
 
@@ -1312,37 +1313,37 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   const saveDraft = React.useCallback(async () => {
     if (!selectedFile || !files.writeFile) {
       toast.error(t('filesView.toast.savingNotSupported'));
-      return;
+      return false;
     }
 
     if (!isDirty) {
-      return;
+      return true;
     }
 
     setIsSaving(true);
 
-    await files.writeFile(selectedFile.path, draftContent)
-      .then((result) => {
-        if (!result?.success) {
-          toast.error(t('filesView.toast.writeFileFailed'));
-          return;
-        }
-        setFileContent(draftContent);
-        // Refresh stat after write so polling doesn't see a stale metadata change.
-        void readFileStat(selectedFile.path)
-          .then((stat) => {
-            if (stat) {
-              lastLoadedFileStatRef.current = stat;
-            }
-          })
-          .catch(() => {});
-      })
-      .catch((error) => {
-        toast.error(error instanceof Error ? error.message : t('filesView.toast.saveFailed'));
-      })
-      .finally(() => {
-        setIsSaving(false);
-      });
+    try {
+      const result = await files.writeFile(selectedFile.path, draftContent);
+      if (!result?.success) {
+        toast.error(t('filesView.toast.writeFileFailed'));
+        return false;
+      }
+      setFileContent(draftContent);
+      // Refresh stat after write so polling doesn't see a stale metadata change.
+      void readFileStat(selectedFile.path)
+        .then((stat) => {
+          if (stat) {
+            lastLoadedFileStatRef.current = stat;
+          }
+        })
+        .catch(() => {});
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('filesView.toast.saveFailed'));
+      return false;
+    } finally {
+      setIsSaving(false);
+    }
   }, [draftContent, files, isDirty, readFileStat, selectedFile, t]);
 
   React.useEffect(() => {
@@ -1401,7 +1402,8 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     }
 
     autoSaveTimerRef.current = setTimeout(() => {
-      void saveDraft().then(() => {
+      void saveDraft().then((saved) => {
+        if (!saved) return;
         setAutoSaveStatus('saved');
         setTimeout(() => setAutoSaveStatus('idle'), 2000);
       });
@@ -1434,7 +1436,8 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
           autoSaveTimerRef.current = null;
         }
         if (!isSaving) {
-          void saveDraft().then(() => {
+          void saveDraft().then((saved) => {
+            if (!saved) return;
             setAutoSaveStatus('saved');
             setTimeout(() => setAutoSaveStatus('idle'), 2000);
           });
@@ -1450,6 +1453,15 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   }, [isSaving, saveDraft]);
 
   const loadSelectedFile = React.useCallback(async (node: FileNode) => {
+    const loadId = activeFileLoadIdRef.current + 1;
+    activeFileLoadIdRef.current = loadId;
+    const isCurrentLoad = () => {
+      if (!root) return false;
+      const rootState = useFilesViewTabsStore.getState().byRoot[root];
+      const currentPath = rootState?.selectedPath ?? rootState?.openPaths[0] ?? null;
+      return activeFileLoadIdRef.current === loadId && currentPath === node.path;
+    };
+
     setFileError(null);
     setDesktopImageSrc('');
     setLoadedFilePath(null);
@@ -1484,6 +1496,9 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
 
     await readFile(node.path, readOptions)
       .then((content) => {
+        if (!isCurrentLoad()) {
+          return;
+        }
         setFileContent(content);
         setDraftContent(content.length > MAX_VIEW_CHARS
           ? `${content.slice(0, MAX_VIEW_CHARS)}\n\n… truncated …`
@@ -1491,14 +1506,18 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
         setLoadedFilePath(node.path);
         void readFileStat(node.path, readOptions)
           .then((stat) => {
-            if (stat) {
+            if (stat && isCurrentLoad()) {
               lastLoadedFileStatRef.current = stat;
             }
           })
           .catch(() => {});
       })
       .catch((error) => {
+        if (!isCurrentLoad()) {
+          return;
+        }
         if (isDirectoryReadError(error)) {
+          setFileLoading(false);
           if (root) {
             setSelectedPath(root, null);
           }
@@ -1533,7 +1552,9 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
         lastLoadedFileStatRef.current = null;
       })
       .finally(() => {
-        setFileLoading(false);
+        if (isCurrentLoad()) {
+          setFileLoading(false);
+        }
       });
   }, [expandPaths, isMobile, loadDirectory, mode, readFile, readFileStat, root, runtime.isDesktop, searchQuery, setSelectedPath, t]);
 
@@ -1599,6 +1620,8 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
 
   React.useEffect(() => {
     if (!selectedFile) {
+      activeFileLoadIdRef.current += 1;
+      setFileLoading(false);
       return;
     }
 
@@ -1723,6 +1746,12 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     const nextTab = pendingTabRef.current;
     const closePath = pendingClosePathRef.current;
 
+    const saved = await saveDraft();
+    if (!saved) {
+      skipDirtyOnceRef.current = false;
+      return;
+    }
+
     pendingSelectFileRef.current = null;
     pendingTabRef.current = null;
     pendingClosePathRef.current = null;
@@ -1731,8 +1760,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     skipDirtyOnceRef.current = true;
 
     setConfirmDiscardOpen(false);
-
-    await saveDraft();
 
     if (closePath) {
       if (root) {
@@ -2111,9 +2138,10 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     }
 
     if (selectedFile?.path !== targetPath) {
-      if (selectedPath !== targetPath) {
-        setSelectedPath(root, targetPath);
+      if (confirmDiscardOpen) {
+        return;
       }
+      void handleSelectFile(toFileNode(targetPath));
       return;
     }
 
@@ -2186,19 +2214,20 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     pendingNavigationCycleRef.current = { key: '', attempts: 0 };
   }, [
     canEdit,
+    confirmDiscardOpen,
     draftContent,
     editorViewReadyNonce,
     fileError,
     fileLoading,
     isSelectedImage,
     loadedFilePath,
+    handleSelectFile,
     pendingFileNavigation,
     root,
     selectedFile?.path,
-    selectedPath,
     setPendingFileNavigation,
-    setSelectedPath,
     textViewMode,
+    toFileNode,
   ]);
 
   React.useEffect(() => {
@@ -2213,9 +2242,10 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     }
 
     if (selectedFile?.path !== targetPath) {
-      if (selectedPath !== targetPath) {
-        setSelectedPath(root, targetPath);
+      if (confirmDiscardOpen) {
+        return;
       }
+      void handleSelectFile(toFileNode(targetPath));
       return;
     }
 
@@ -2234,17 +2264,18 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     setPendingFileFocusPath(null);
   }, [
     canEdit,
+    confirmDiscardOpen,
     fileError,
     fileLoading,
+    handleSelectFile,
     isSelectedImage,
     loadedFilePath,
     pendingFileFocusPath,
     root,
     selectedFile?.path,
-    selectedPath,
     setPendingFileFocusPath,
-    setSelectedPath,
     textViewMode,
+    toFileNode,
   ]);
 
   const nudgeEditorSelectionAboveKeyboard = React.useCallback((view: EditorView | null) => {
