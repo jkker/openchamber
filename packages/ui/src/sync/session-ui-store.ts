@@ -618,7 +618,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       if (!tokens) continue
       const total = typeof tokens.total === 'number' && tokens.total > 0
         ? tokens.total
-        : tokens.input + tokens.output + tokens.reasoning + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
+        : tokens.input + tokens.output + tokens.reasoning + (tokens.cache?.write ?? 0)
       if (total > 0) {
         lastTokens = tokens
         lastMessageId = msg.id
@@ -630,8 +630,11 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
     const totalTokens = typeof lastTokens.total === 'number' && lastTokens.total > 0
       ? lastTokens.total
-      : lastTokens.input + lastTokens.output + lastTokens.reasoning + (lastTokens.cache?.read ?? 0) + (lastTokens.cache?.write ?? 0)
-    const effectiveContextLimit = contextLimit > 0 ? contextLimit : (typeof lastTokens.contextWindow === 'number' ? lastTokens.contextWindow : 0)
+      : lastTokens.input + lastTokens.output + lastTokens.reasoning + (lastTokens.cache?.write ?? 0)
+    const tokenContextWindow = typeof lastTokens.contextWindow === 'number' && lastTokens.contextWindow > 0
+      ? lastTokens.contextWindow
+      : 0
+    const effectiveContextLimit = tokenContextWindow > 0 ? tokenContextWindow : contextLimit
     const thresholdLimit = effectiveContextLimit > 0 ? effectiveContextLimit : 200000
     const percentage = effectiveContextLimit > 0 ? Math.round((totalTokens / effectiveContextLimit) * 100) : 0
     const normalizedOutput = outputLimit > 0 ? Math.round((lastTokens.output / outputLimit) * 100) : undefined
