@@ -52,6 +52,7 @@ import { BackendIcon } from '@/components/ui/BackendIcon';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { ProviderLogo } from '@/components/ui/ProviderLogo';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
+import { SortableTabsStrip, type SortableTabsStripItem } from '@/components/ui/sortable-tabs-strip';
 import { TextLoop } from '@/components/ui/TextLoop';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useIsVSCodeRuntime } from '@/hooks/useRuntimeAPIs';
@@ -376,6 +377,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const setAgent = useConfigStore((state) => state.setAgent);
     const setCurrentAgentName = useConfigStore((state) => state.setCurrentAgentName);
     const getModelMetadata = useConfigStore((state) => state.getModelMetadata);
+    const modelsMetadataSize = useConfigStore((state) => state.modelsMetadata.size);
+    void modelsMetadataSize;
     const getCurrentAgent = useConfigStore((state) => state.getCurrentAgent);
     const getVisibleAgents = useConfigStore((state) => state.getVisibleAgents);
 
@@ -471,10 +474,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const currentBackendId = currentSessionId
         ? (authoritativeSessionBackendId || sessionSavedBackendId || defaultBackendId || '')
         : (draftBackendId || lastUsedBackendId || defaultBackendId || '');
-    const currentBackend = React.useMemo(
-        () => availableBackends.find((backend) => backend.id === currentBackendId) || null,
-        [availableBackends, currentBackendId],
-    );
     const usingExternalMobilePanel = mobilePanel !== undefined && typeof onMobilePanelChange === 'function';
     const activeMobilePanel = usingExternalMobilePanel ? mobilePanel : localMobilePanel;
     const setActiveMobilePanel = usingExternalMobilePanel ? onMobilePanelChange : setLocalMobilePanel;
@@ -649,10 +648,15 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const backendModelSelector = backendControlSurface?.modelSelector ?? null;
     const backendEffortSelector = backendControlSurface?.effortSelector ?? null;
     const providerSnapshot = backendControlSurface?.providerSnapshot ?? null;
-    const primarySelectorKind = backendModeSelector?.kind ?? (currentBackendId === 'opencode' ? 'agent' : 'mode');
+    const catalogBackendId = backendControlSurface?.backendId || currentBackendId;
+    const catalogBackend = React.useMemo(
+        () => availableBackends.find((backend) => backend.id === catalogBackendId) || null,
+        [availableBackends, catalogBackendId],
+    );
+    const primarySelectorKind = backendModeSelector?.kind ?? (catalogBackendId === 'opencode' ? 'agent' : 'mode');
     const primarySelectorLabel = backendModeSelector?.label ?? (primarySelectorKind === 'agent' ? 'Agent' : 'Mode');
     const effortSelectorLabel = backendEffortSelector?.label ?? 'Thinking';
-    const backendModelProviderId = backendModelSelector?.providerId || currentBackendId || 'backend';
+    const backendModelProviderId = backendModelSelector?.providerId || catalogBackendId || 'backend';
     const backendModeItems = React.useMemo<BackendControlSurfaceOption[]>(() => {
         if (backendModeSelector?.items?.length) {
             return backendModeSelector.items;
@@ -692,7 +696,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             list.push({
                 id: option.id,
                 providerID: providerId,
-                api: { id: currentBackendId || 'backend', url: '', npm: '' },
+                api: { id: catalogBackendId || 'backend', url: '', npm: '' },
                 name: option.label,
                 family: undefined,
                 capabilities: {
@@ -722,7 +726,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             options: {},
             models,
         }));
-    }, [backendEffortSelector?.options, backendModelProviderId, backendModelSelector?.source, currentBackendId, getSnapshotModelOptionDescriptor, providerSnapshot?.models]);
+    }, [backendEffortSelector?.options, backendModelProviderId, backendModelSelector?.source, catalogBackendId, getSnapshotModelOptionDescriptor, providerSnapshot?.models]);
 
     const backendModelOptions = React.useMemo<ProviderModel[]>(() => {
         if (
@@ -748,7 +752,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                 id: option.id,
             providerID: backendModelProviderId,
             api: {
-                id: currentBackendId || 'backend',
+                id: catalogBackendId || 'backend',
                 url: '',
                 npm: '',
             },
@@ -794,10 +798,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             ...(variants ? { variants } : {}),
             };
         });
-    }, [backendEffortSelector?.options, backendModelProviderId, backendModelSelector, currentBackendId]);
+    }, [backendEffortSelector?.options, backendModelProviderId, backendModelSelector, catalogBackendId]);
     const usesBackendModelCatalog = backendModelSelector?.source === 'backend'
         ? backendModelOptions.length > 0
-        : currentBackendId !== 'opencode' && backendModelSelector?.source === 'provider-snapshot' && backendSnapshotProviders.length > 0;
+        : catalogBackendId !== 'opencode' && backendModelSelector?.source === 'provider-snapshot' && backendSnapshotProviders.length > 0;
     const effectiveProviders = React.useMemo(() => {
         if (!usesBackendModelCatalog) {
             return providers;
@@ -809,13 +813,13 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 
         return [{
             id: backendModelProviderId,
-            name: currentBackend?.label || currentBackendId || 'Backend',
+            name: catalogBackend?.label || catalogBackendId || 'Backend',
             source: 'custom' as const,
             env: [],
             options: {},
             models: backendModelOptions,
         }];
-    }, [backendModelOptions, backendModelProviderId, backendModelSelector?.source, backendSnapshotProviders, currentBackend, currentBackendId, providers, usesBackendModelCatalog]);
+    }, [backendModelOptions, backendModelProviderId, backendModelSelector?.source, backendSnapshotProviders, catalogBackend, catalogBackendId, providers, usesBackendModelCatalog]);
 
     React.useEffect(() => {
         setVirtualProviders(usesBackendModelCatalog ? effectiveProviders : []);
@@ -2073,7 +2077,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         );
     };
 
-    const renderBackendSelector = () => {
+    const backendTabItems = React.useMemo<SortableTabsStripItem[]>(() => {
         const backends = availableBackends.length > 0 ? availableBackends : [{
             id: defaultBackendId || 'default',
             label: defaultBackendId ? (defaultBackendId.charAt(0).toUpperCase() + defaultBackendId.slice(1)) : 'Backend',
@@ -2090,94 +2094,33 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             },
         } satisfies BackendDescriptor];
 
-        const displayLabel = currentBackend?.label || currentBackendId || 'Backend';
-        const isLockedToSession = Boolean(currentSessionId);
+        return backends.map((backend) => ({
+            id: backend.id,
+            label: backend.label,
+            icon: <BackendMenuLogo backendId={backend.id} className={cn('h-3.5 w-3.5', !backend.available && 'opacity-50')} />,
+            title: backend.comingSoon ? `${backend.label} · Coming soon` : backend.label,
+            disabled: !backend.available || (Boolean(currentSessionId) && backend.id !== currentBackendId),
+        }));
+    }, [availableBackends, currentBackendId, currentSessionId, defaultBackendId]);
 
-        if (isLockedToSession) {
-            return (
-                <div
-                    className={cn(
-                        'model-controls__backend-trigger flex items-center gap-1.5 min-w-0',
-                        buttonHeight,
-                        'cursor-default opacity-70',
-                    )}
-                    aria-label={`Backend: ${displayLabel}`}
-                    title={`Backend: ${displayLabel}`}
-                >
-                    <RiArrowGoBackLine className={cn(controlIconSize, 'flex-shrink-0 text-muted-foreground')} />
-                    <span
-                        className={cn(
-                            'model-controls__backend-label',
-                            controlTextSize,
-                            'font-medium min-w-0 truncate text-foreground',
-                            isDesktop ? 'max-w-[140px]' : undefined,
-                        )}
-                    >
-                        {displayLabel}
-                    </span>
-                </div>
-            );
+    const renderBackendTabsFooter = () => {
+        if (backendTabItems.length <= 1) {
+            return null;
         }
 
         return (
-            <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                    <button
-                        type="button"
-                        className={cn(
-                            'model-controls__backend-trigger flex items-center gap-1.5 transition-colors min-w-0 focus:outline-none',
-                            buttonHeight,
-                            'cursor-pointer hover:bg-transparent hover:opacity-70',
-                        )}
-                    >
-                        <RiArrowGoBackLine className={cn(controlIconSize, 'flex-shrink-0 text-muted-foreground')} />
-                        <span
-                            className={cn(
-                                'model-controls__backend-label',
-                                controlTextSize,
-                                'font-medium min-w-0 truncate text-foreground',
-                                isDesktop ? 'max-w-[140px]' : undefined,
-                            )}
-                        >
-                            {displayLabel}
-                        </span>
-                    </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" alignOffset={-40} className="w-[min(220px,calc(100vw-2rem))]">
-                    <DropdownMenuLabel className="typography-ui-header font-semibold text-foreground">Backend</DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    {backends.map((backend) => {
-                        const isSelected = backend.id === currentBackendId;
-                        const isDisabled = !backend.available;
-                        return (
-                            <DropdownMenuItem
-                                key={backend.id}
-                                disabled={isDisabled}
-                                onSelect={() => handleBackendChange(backend.id)}
-                                className="typography-meta"
-                            >
-                                <div className="flex w-full items-center justify-between gap-2 min-w-0">
-                                    <div className="flex min-w-0 items-center gap-2.5">
-                                        <BackendMenuLogo
-                                            backendId={backend.id}
-                                            className={cn('h-4.5 w-4.5 flex-shrink-0', isDisabled && 'opacity-80')}
-                                        />
-                                        <span className="truncate font-medium text-foreground">{backend.label}</span>
-                                    </div>
-                                    <div className="flex flex-shrink-0 items-center gap-1.5">
-                                        {backend.comingSoon && (
-                                            <span className="inline-flex items-center rounded-full border border-border/60 bg-muted/35 px-1.5 py-[1px] text-[9px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                                                Coming soon
-                                            </span>
-                                        )}
-                                        {isSelected && <RiCheckLine className="h-4 w-4 text-primary flex-shrink-0" />}
-                                    </div>
-                                </div>
-                            </DropdownMenuItem>
-                        );
-                    })}
-                </DropdownMenuContent>
-            </DropdownMenu>
+            <div className="h-8 min-w-0 px-px">
+                <SortableTabsStrip
+                    items={backendTabItems}
+                    activeId={currentBackendId || defaultBackendId || null}
+                    onSelect={handleBackendChange}
+                    layoutMode="scrollable"
+                    variant="active-pill"
+                    activePillButtonClassName="h-6 typography-micro"
+                    activePillLowercase={false}
+                    className="h-full"
+                />
+            </div>
         );
     };
 
@@ -3471,8 +3414,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                             </ScrollableOverlay>
 
                             {/* Keyboard hints footer */}
-                            <div className="px-3 pt-1 pb-1.5 border-t border-border/40 typography-micro text-muted-foreground">
-                                <div className="flex items-center gap-x-2 whitespace-nowrap overflow-hidden">
+                            <div className="pt-1.5 pb-1.5 border-t border-border/40 typography-micro text-muted-foreground space-y-1.5">
+                                {renderBackendTabsFooter()}
+                                <div className="flex items-center gap-x-2 whitespace-nowrap overflow-hidden px-3">
                                     <span>{t('chat.modelControls.keyboardHintNavigate')}</span>
                                     <span>{t('chat.modelControls.keyboardHintSwitchAgent')}</span>
                                     <span className={cn(!highlightedSupportsThinking && 'invisible')}>
@@ -3963,7 +3907,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                     )}
                 >
                     {renderVariantSelector()}
-                    {renderBackendSelector()}
                     {renderModelSelector()}
                     {renderAgentSelector()}
                 </div>

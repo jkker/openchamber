@@ -264,6 +264,79 @@ const codexThreadItemToPart = (sessionId, messageId, item, sequence) => {
   return null;
 };
 
+const toFiniteTokenNumber = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+
+const normalizeCodexTokenUsageBreakdown = (value) => {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  return {
+    input: toFiniteTokenNumber(value.inputTokens ?? value.input_tokens),
+    output: toFiniteTokenNumber(value.outputTokens ?? value.output_tokens),
+    reasoning: toFiniteTokenNumber(value.reasoningOutputTokens ?? value.reasoning_output_tokens),
+    cache: {
+      read: toFiniteTokenNumber(value.cachedInputTokens ?? value.cached_input_tokens),
+      write: 0,
+    },
+    total: toFiniteTokenNumber(value.totalTokens ?? value.total_tokens),
+  };
+};
+
+const normalizeCodexMessageTokens = (usage) => {
+  const last = normalizeCodexTokenUsageBreakdown(usage?.last);
+  if (!last) {
+    return null;
+  }
+
+  const contextWindow = toFiniteTokenNumber(usage?.modelContextWindow ?? usage?.model_context_window);
+  return {
+    input: last.input,
+    output: last.output,
+    reasoning: last.reasoning,
+    cache: last.cache,
+    ...(last.total > 0 ? { total: last.total } : {}),
+    ...(contextWindow > 0 ? { contextWindow } : {}),
+  };
+};
+
+const hasUsableTokenUsage = (tokens) => {
+  if (!tokens || typeof tokens !== 'object') {
+    return false;
+  }
+  return toFiniteTokenNumber(tokens.total) > 0
+    || toFiniteTokenNumber(tokens.input) > 0
+    || toFiniteTokenNumber(tokens.output) > 0
+    || toFiniteTokenNumber(tokens.reasoning) > 0
+    || toFiniteTokenNumber(tokens?.cache?.read) > 0
+    || toFiniteTokenNumber(tokens.contextWindow) > 0;
+};
+
+const attachTokensToLatestAssistantRecord = (records, tokens) => {
+  if (!hasUsableTokenUsage(tokens)) {
+    return records;
+  }
+
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    if (records[index]?.info?.role === 'assistant') {
+      const existingTokens = records[index].info.tokens;
+      if (hasUsableTokenUsage(existingTokens)) {
+        return records;
+      }
+      const nextRecords = records.slice();
+      nextRecords[index] = {
+        ...records[index],
+        info: {
+          ...records[index].info,
+          tokens,
+        },
+      };
+      return nextRecords;
+    }
+  }
+
+  return records;
+};
+
 const cloneRecord = (record) => {
   const info = {
     ...record.info,
@@ -829,6 +902,9 @@ export const createCodexBackendRuntime = (dependencies) => {
             parentMessageId: turnParams?.parentMessageId,
           });
           assistantRecord.info.id = messageId;
+          if (turnParams?.tokens && typeof turnParams.tokens === 'object') {
+            assistantRecord.info.tokens = turnParams.tokens;
+          }
 
           // Ensure all parts reference the record's message ID
           for (const part of assistantRecord.parts) {
@@ -1104,6 +1180,67 @@ export const createCodexBackendRuntime = (dependencies) => {
       return entry;
     }
 
+    const restoredTokens = appServer.resumeThreadForUsage
+      ? normalizeCodexMessageTokens(await appServer.resumeThreadForUsage({
+          threadId: entry.threadId,
+          directory: entry.session.directory,
+          model: effectiveModelId,
+        }).catch((error) => {
+          console.warn('[codex-backend] thread/resume token usage failed:', error?.message || error);
+          return null;
+        }))
+      : null;
+    if (restoredTokens) {
+      for (let index = records.length - 1; index >= 0; index -= 1) {
+        if (records[index]?.info?.role === 'assistant') {
+          records[index] = {
+            ...records[index],
+            info: {
+              ...records[index].info,
+              tokens: restoredTokens,
+            },
+          };
+          break;
+        }
+      }
+    }
+
+    const nextEntry = {
+      ...entry,
+      modelId: effectiveModelId,
+      records,
+    };
+    await saveEntry(nextEntry);
+    return nextEntry;
+  };
+
+  const ensureEntryTokenUsage = async (entry) => {
+    if (!entry?.threadId || !appServer.resumeThreadForUsage) {
+      return entry;
+    }
+
+    const latestAssistant = [...entry.records].reverse().find((record) => record?.info?.role === 'assistant');
+    if (!latestAssistant || hasUsableTokenUsage(latestAssistant.info?.tokens)) {
+      return entry;
+    }
+
+    const effectiveModelId = typeof entry.modelId === 'string' && entry.modelId.trim().length > 0
+      ? entry.modelId
+      : await resolveDefaultModelId();
+
+    const restoredTokens = normalizeCodexMessageTokens(await appServer.resumeThreadForUsage({
+      threadId: entry.threadId,
+      directory: entry.session.directory,
+      model: effectiveModelId,
+    }).catch((error) => {
+      console.warn('[codex-backend] thread/resume token usage failed:', error?.message || error);
+      return null;
+    }));
+    const records = attachTokensToLatestAssistantRecord(entry.records, restoredTokens);
+    if (records === entry.records) {
+      return entry;
+    }
+
     const nextEntry = {
       ...entry,
       modelId: effectiveModelId,
@@ -1231,6 +1368,7 @@ export const createCodexBackendRuntime = (dependencies) => {
     }
     entry = await hydrateEntryMessagesFromCodexThread(entry);
     entry = await ensureEntryRecordModelAttribution(entry);
+    entry = await ensureEntryTokenUsage(entry);
 
     let records = entry.records.map((record) => cloneRecord(record));
     if (typeof input.before === 'string' && input.before.trim().length > 0) {

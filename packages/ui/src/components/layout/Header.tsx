@@ -702,7 +702,12 @@ export const Header: React.FC<HeaderProps> = ({
   })));
   const { t } = useI18n();
 
+  const currentProviderId = useConfigStore((state) => state.currentProviderId);
+  const currentModelId = useConfigStore((state) => state.currentModelId);
   const getCurrentModel = useConfigStore((state) => state.getCurrentModel);
+  const getModelMetadata = useConfigStore((state) => state.getModelMetadata);
+  const modelsMetadataSize = useConfigStore((state) => state.modelsMetadata.size);
+  void modelsMetadataSize;
   const runtimeApis = useRuntimeAPIs();
   const [isDevShutdownInFlight, setIsDevShutdownInFlight] = React.useState(false);
 
@@ -714,6 +719,9 @@ export const Header: React.FC<HeaderProps> = ({
     isNewSessionDraftOpen: Boolean(state.newSessionDraft?.open),
     currentSessionId: state.currentSessionId,
   })));
+  const currentSessionModelSelection = useSelectionStore((state) =>
+    currentSessionId ? state.sessionModelSelections.get(currentSessionId) ?? null : null
+  );
   const currentSessionMessagesResolved = useSessionMessagesResolved(currentSessionId ?? '');
   const currentSyncedSession = useSession(currentSessionId ?? null);
   const globalActiveSessions = useGlobalSessionsStore((state) => state.activeSessions);
@@ -812,9 +820,18 @@ export const Header: React.FC<HeaderProps> = ({
   }, []);
 
   const currentModel = getCurrentModel();
-  const limit = currentModel && typeof currentModel.limit === 'object' && currentModel.limit !== null
+  const limitProviderId = currentSessionModelSelection?.providerId || currentProviderId;
+  const limitModelId = currentSessionModelSelection?.modelId || currentModelId;
+  const currentModelMetadata = limitProviderId && limitModelId
+    ? getModelMetadata(limitProviderId, limitModelId)
+    : undefined;
+  const metadataLimit = currentModelMetadata?.limit && typeof currentModelMetadata.limit === 'object'
+    ? currentModelMetadata.limit
+    : null;
+  const modelLimit = currentModel && typeof currentModel.limit === 'object' && currentModel.limit !== null
     ? (currentModel.limit as Record<string, unknown>)
     : null;
+  const limit = metadataLimit ?? modelLimit;
   const contextLimit = (limit && typeof limit.context === 'number' ? limit.context : 0);
   const outputLimit = (limit && typeof limit.output === 'number' ? limit.output : 0);
   const contextUsage = getContextUsage(contextLimit, outputLimit);

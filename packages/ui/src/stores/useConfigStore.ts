@@ -278,6 +278,21 @@ const buildModelMetadataKey = (providerId: string, modelId: string) => {
     return `${normalizedProvider}/${modelId}`;
 };
 
+const getModelMetadataKeys = (providerId: string, modelId: string) => {
+    const normalizedProvider = normalizeProviderId(providerId);
+    if (!normalizedProvider || !modelId) {
+        return [];
+    }
+
+    const providerAliases = normalizedProvider === 'codex'
+        ? ['codex', 'openai']
+        : [normalizedProvider];
+
+    return providerAliases
+        .map((candidateProviderId) => buildModelMetadataKey(candidateProviderId, modelId))
+        .filter(Boolean);
+};
+
 const mapModalities = (cap: { text: boolean; audio: boolean; image: boolean; video: boolean; pdf: boolean } | undefined): string[] => {
     if (!cap) return [];
     const result: string[] = [];
@@ -2269,14 +2284,20 @@ export const useConfigStore = create<ConfigStore>()(
                     return agents.find((a) => a.name === currentAgentName);
                 },
                 getModelMetadata: (providerId: string, modelId: string) => {
-                    const key = buildModelMetadataKey(providerId, modelId);
-                    if (!key) {
+                    const keys = getModelMetadataKeys(providerId, modelId);
+                    if (keys.length === 0) {
                         return undefined;
                     }
+                    ensureModelsMetadataFetch(
+                        () => get().modelsMetadata,
+                        (metadata) => set({ modelsMetadata: metadata }),
+                    );
                     const { modelsMetadata } = get();
-                    const cached = modelsMetadata.get(key);
-                    if (cached) {
-                        return cached;
+                    for (const key of keys) {
+                        const cached = modelsMetadata.get(key);
+                        if (cached) {
+                            return { ...cached, providerId, id: modelId };
+                        }
                     }
 
                     // Fallback: derive metadata from provider model data (covers custom providers not in models.dev)

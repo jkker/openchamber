@@ -608,7 +608,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     const messages = getSyncMessages(sessionId)
     if (messages.length === 0) return null
 
-    type AssistantTokens = { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
+    type AssistantTokens = { input: number; output: number; reasoning: number; cache: { read: number; write: number }; total?: number; contextWindow?: number }
     let lastTokens: AssistantTokens | undefined
     let lastMessageId: string | undefined
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -616,7 +616,9 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       if (msg.role !== "assistant") continue
       const tokens = (msg as { tokens?: AssistantTokens }).tokens
       if (!tokens) continue
-      const total = tokens.input + tokens.output + tokens.reasoning + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
+      const total = typeof tokens.total === 'number' && tokens.total > 0
+        ? tokens.total
+        : tokens.input + tokens.output + tokens.reasoning + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
       if (total > 0) {
         lastTokens = tokens
         lastMessageId = msg.id
@@ -626,15 +628,18 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
     if (!lastTokens) return null
 
-    const totalTokens = lastTokens.input + lastTokens.output + lastTokens.reasoning + (lastTokens.cache?.read ?? 0) + (lastTokens.cache?.write ?? 0)
-    const thresholdLimit = contextLimit > 0 ? contextLimit : 200000
-    const percentage = contextLimit > 0 ? Math.round((totalTokens / contextLimit) * 100) : 0
+    const totalTokens = typeof lastTokens.total === 'number' && lastTokens.total > 0
+      ? lastTokens.total
+      : lastTokens.input + lastTokens.output + lastTokens.reasoning + (lastTokens.cache?.read ?? 0) + (lastTokens.cache?.write ?? 0)
+    const effectiveContextLimit = contextLimit > 0 ? contextLimit : (typeof lastTokens.contextWindow === 'number' ? lastTokens.contextWindow : 0)
+    const thresholdLimit = effectiveContextLimit > 0 ? effectiveContextLimit : 200000
+    const percentage = effectiveContextLimit > 0 ? Math.round((totalTokens / effectiveContextLimit) * 100) : 0
     const normalizedOutput = outputLimit > 0 ? Math.round((lastTokens.output / outputLimit) * 100) : undefined
 
     return {
       totalTokens,
       percentage,
-      contextLimit: contextLimit || 0,
+      contextLimit: effectiveContextLimit || 0,
       outputLimit: outputLimit || undefined,
       normalizedOutput,
       thresholdLimit,

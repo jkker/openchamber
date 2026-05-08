@@ -480,6 +480,66 @@ export function createCodexAppServerAdapter({ crypto, emitEvent, onTurnCompleted
     }
   }
 
+  async function resumeThreadForUsage({ threadId, directory, model } = {}) {
+    if (!codexPath || typeof threadId !== 'string' || threadId.trim().length === 0) {
+      return null;
+    }
+
+    let restoredUsage = null;
+    const rpc = createJsonRpcSubprocess({
+      command: codexPath,
+      args: ['app-server'],
+      cwd: typeof directory === 'string' && directory.trim().length > 0 ? directory.trim() : undefined,
+      requestTimeout: INIT_TIMEOUT_MS,
+      onRequest: (id, method) => {
+        rpc.sendResponse(id, null, { code: -32601, message: `Method not found: ${method}` });
+      },
+      onNotification: (method, params) => {
+        if (method === 'thread/tokenUsage/updated') {
+          restoredUsage = params?.tokenUsage || params?.token_usage || null;
+        }
+      },
+      onError: (err) => {
+        const msg = err?.message || '';
+        if (msg.includes('state db missing rollout path')
+          || msg.includes('state db record_discrepancy')) {
+          return;
+        }
+        console.warn(`[codex-appserver:thread-resume] ${msg}`);
+      },
+    });
+
+    try {
+      await rpc.sendRequest('initialize', {
+        clientInfo: CLIENT_INFO,
+        capabilities: CAPABILITIES,
+      }, { timeout: INIT_TIMEOUT_MS });
+      rpc.sendNotification('initialized');
+
+      const params = {
+        threadId: threadId.trim(),
+        approvalPolicy: 'on-request',
+        sandbox: 'workspace-write',
+      };
+      if (typeof directory === 'string' && directory.trim().length > 0) {
+        params.cwd = directory.trim();
+      }
+      if (typeof model === 'string' && model.trim().length > 0) {
+        params.model = model.trim();
+      }
+
+      await rpc.sendRequest('thread/resume', params, { timeout: INIT_TIMEOUT_MS });
+      if (!restoredUsage) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, 50);
+        });
+      }
+      return restoredUsage;
+    } finally {
+      rpc.kill();
+    }
+  }
+
   /**
    * Start or resume a thread on the process.
    */
@@ -728,6 +788,10 @@ export function createCodexAppServerAdapter({ crypto, emitEvent, onTurnCompleted
 
       case 'turn/completed':
         handleTurnCompleted(proc, params);
+        break;
+
+      case 'thread/tokenUsage/updated':
+        handleTokenUsageUpdated(proc, params);
         break;
 
       case 'turn/aborted':
@@ -1233,10 +1297,64 @@ export function createCodexAppServerAdapter({ crypto, emitEvent, onTurnCompleted
         ...(params && typeof params === 'object' ? params : {}),
         messageId: proc.activeMessage?.record?.info?.id,
         parentMessageId: proc.activeMessage?.record?.info?.parentID,
+        tokens: proc.activeMessage?.record?.info?.tokens,
       }, finalParts);
     }
 
     proc.activeMessage = null;
+  }
+
+  const toFiniteNumber = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+
+  function normalizeTokenUsageBreakdown(value) {
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+    return {
+      input: toFiniteNumber(value.inputTokens ?? value.input_tokens),
+      output: toFiniteNumber(value.outputTokens ?? value.output_tokens),
+      reasoning: toFiniteNumber(value.reasoningOutputTokens ?? value.reasoning_output_tokens),
+      cache: {
+        read: toFiniteNumber(value.cachedInputTokens ?? value.cached_input_tokens),
+        write: 0,
+      },
+      total: toFiniteNumber(value.totalTokens ?? value.total_tokens),
+    };
+  }
+
+  function handleTokenUsageUpdated(proc, params) {
+    if (!proc.activeMessage?.record?.info) {
+      return;
+    }
+
+    const usage = params?.tokenUsage || params?.token_usage;
+    const last = normalizeTokenUsageBreakdown(usage?.last);
+    if (!last) {
+      return;
+    }
+
+    const contextWindow = toFiniteNumber(usage?.modelContextWindow ?? usage?.model_context_window);
+    const tokens = {
+      input: last.input,
+      output: last.output,
+      reasoning: last.reasoning,
+      cache: last.cache,
+      ...(last.total > 0 ? { total: last.total } : {}),
+      ...(contextWindow > 0 ? { contextWindow } : {}),
+    };
+
+    proc.activeMessage.record.info = {
+      ...proc.activeMessage.record.info,
+      tokens,
+    };
+
+    emitEvent(proc.directory, {
+      type: 'message.updated',
+      properties: {
+        info: proc.activeMessage.record.info,
+        directory: proc.directory,
+      },
+    });
   }
 
   function handleTurnAborted(proc, params) {
@@ -1754,6 +1872,9 @@ export function createCodexAppServerAdapter({ crypto, emitEvent, onTurnCompleted
     },
     async readThread(options = {}) {
       return readThread(options);
+    },
+    async resumeThreadForUsage(options = {}) {
+      return resumeThreadForUsage(options);
     },
 
     /**
