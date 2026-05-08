@@ -13,6 +13,7 @@ export type SelectionState = {
   sessionRunConfigs: Map<string, HarnessRunConfig>
   sessionBackendSelections: Map<string, string>
   lastUsedProvider: { providerID: string; modelID: string } | null
+  lastUsedProviderByBackend: Map<string, { providerId: string; modelId: string }>
   draftBackendId: string | null
   lastUsedBackendId: string | null
 
@@ -29,6 +30,8 @@ export type SelectionState = {
   saveSessionRunConfig: (sessionId: string, runConfig: HarnessRunConfig) => void
   getSessionRunConfig: (sessionId: string) => HarnessRunConfig | null
   setDraftBackendId: (backendId: string | null) => void
+  saveBackendModelSelection: (backendId: string, providerId: string, modelId: string) => void
+  getBackendModelSelection: (backendId: string) => { providerId: string; modelId: string } | null
 }
 
 // In-memory variant storage (not persisted)
@@ -41,6 +44,7 @@ export const useSelectionStore = create<SelectionState>()((set, get) => ({
   sessionRunConfigs: new Map(),
   sessionBackendSelections: new Map(),
   lastUsedProvider: null,
+  lastUsedProviderByBackend: new Map(),
   draftBackendId: null,
   lastUsedBackendId: null,
 
@@ -139,4 +143,16 @@ export const useSelectionStore = create<SelectionState>()((set, get) => ({
       draftBackendId: backendId,
       lastUsedBackendId: backendId,
     })),
+
+  saveBackendModelSelection: (backendId, providerId, modelId) =>
+    set((s) => {
+      if (!backendId || !providerId || !modelId) return s
+      const existing = s.lastUsedProviderByBackend.get(backendId)
+      if (existing?.providerId === providerId && existing?.modelId === modelId) return s
+      const map = new Map(s.lastUsedProviderByBackend)
+      map.set(backendId, { providerId, modelId })
+      return { lastUsedProviderByBackend: map }
+    }),
+
+  getBackendModelSelection: (backendId) => get().lastUsedProviderByBackend.get(backendId) ?? null,
 }))
