@@ -364,7 +364,11 @@ export const ContextPanelContent: React.FC = () => {
       ? getModelMetadata(latestAssistantInfo.providerID, latestAssistantInfo.modelID)
       : undefined;
     const metadataContextLimit = typeof metadata?.limit?.context === 'number' ? metadata.limit.context : null;
-    const contextLimit = tokenBreakdown.contextWindow || metadataContextLimit || providerModel.contextLimit;
+    const isOpenCodeSession = (currentSession as { backendId?: string | null } | null)?.backendId === 'opencode';
+    const fallbackContextLimit = isOpenCodeSession
+      ? (providerModel.contextLimit || metadataContextLimit)
+      : (metadataContextLimit || providerModel.contextLimit);
+    const contextLimit = tokenBreakdown.contextWindow || fallbackContextLimit;
     const usagePercent = contextLimit && contextLimit > 0
       ? Math.min(999, (tokenBreakdown.total / contextLimit) * 100)
       : 0;

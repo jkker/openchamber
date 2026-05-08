@@ -831,7 +831,8 @@ export const Header: React.FC<HeaderProps> = ({
   const modelLimit = currentModel && typeof currentModel.limit === 'object' && currentModel.limit !== null
     ? (currentModel.limit as Record<string, unknown>)
     : null;
-  const limit = metadataLimit ?? modelLimit;
+  const isOpenCodeSession = (currentSyncedSession as { backendId?: string | null } | null)?.backendId === 'opencode';
+  const limit = isOpenCodeSession ? (modelLimit ?? metadataLimit) : (metadataLimit ?? modelLimit);
   const contextLimit = (limit && typeof limit.context === 'number' ? limit.context : 0);
   const outputLimit = (limit && typeof limit.output === 'number' ? limit.output : 0);
   const contextUsage = getContextUsage(contextLimit, outputLimit);
