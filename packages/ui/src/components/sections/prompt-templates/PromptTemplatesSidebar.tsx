@@ -90,7 +90,7 @@ export const PromptTemplatesSidebar: React.FC<PromptTemplatesSidebarProps> = ({ 
     setIsDeletePending(false);
   };
 
-  const handleDuplicate = (template: PromptTemplate) => {
+  const handleDuplicate = async (template: PromptTemplate) => {
     let copyName = `${template.name} Copy`;
     let copyId = `${template.id}-copy`;
     let counter = 1;
@@ -100,7 +100,11 @@ export const PromptTemplatesSidebar: React.FC<PromptTemplatesSidebarProps> = ({ 
       copyId = `${template.id}-copy-${counter}`;
       counter++;
     }
-    usePromptTemplatesStore.getState().createTemplate(copyId, copyName, template.body);
+    const success = await usePromptTemplatesStore.getState().createTemplate(copyId, copyName, template.body);
+    if (!success) {
+      toast.error(t('settings.promptTemplates.page.toast.createFailed'));
+      return;
+    }
     setSelectedTemplate(copyId);
     onItemSelect?.();
   };
