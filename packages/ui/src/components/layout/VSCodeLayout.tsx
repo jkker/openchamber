@@ -307,10 +307,10 @@ export const VSCodeLayout: React.FC = () => {
 
     const { archivedIds, failedIds } = await store.archiveSessions(allIds);
     if (archivedIds.length > 0) {
-      toast.success(`Archived ${archivedIds.length} session(s)`);
+      toast.success(t('vscodeLayout.actions.archiveAllSuccess', { count: archivedIds.length }));
     }
     if (failedIds.length > 0) {
-      toast.error(`Failed to archive ${failedIds.length} session(s)`);
+      toast.error(t('vscodeLayout.actions.archiveAllError', { count: failedIds.length }));
     }
   }, [collectSessionIdsWithDescendants, isSessionInActiveWorkspace, traversalSessions]);
 
