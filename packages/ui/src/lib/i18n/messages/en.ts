@@ -2119,6 +2119,8 @@ export const dict = {
   'vscodeLayout.actions.backToSessionsAria': 'Back to sessions',
   'vscodeLayout.actions.archiveAllAria': 'Archive all sessions',
   'vscodeLayout.actions.archiveAllConfirm': 'Archive all',
+  'vscodeLayout.actions.archiveAllSuccess': 'Archived {count} session(s)',
+  'vscodeLayout.actions.archiveAllError': 'Failed to archive {count} session(s)',
   'vscodeLayout.actions.cancel': 'Cancel',
   'vscodeLayout.actions.newSessionAria': 'New session',
   'vscodeLayout.actions.openAgentManagerAria': 'Open Agent Manager',

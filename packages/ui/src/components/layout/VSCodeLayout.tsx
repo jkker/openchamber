@@ -317,7 +317,7 @@ export const VSCodeLayout: React.FC = () => {
     if (failedIds.length > 0) {
       toast.error(t('vscodeLayout.actions.archiveAllError', { count: failedIds.length }));
     }
-  }, [collectSessionIdsWithDescendants, isSessionInActiveWorkspace, traversalSessions]);
+  }, [collectSessionIdsWithDescendants, isSessionInActiveWorkspace, traversalSessions, t]);
 
 
   // Listen for connection status changes

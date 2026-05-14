@@ -2133,6 +2133,8 @@ export const dict: Record<I18nKey, string> = {
   'vscodeLayout.actions.backToSessionsAria': 'Powrót do sesji',
   'vscodeLayout.actions.archiveAllAria': 'Archiwizuj wszystkie sesje',
   'vscodeLayout.actions.archiveAllConfirm': 'Archiwizować wszystko',
+  'vscodeLayout.actions.archiveAllSuccess': 'Zarchiwizowano {count} sesji',
+  'vscodeLayout.actions.archiveAllError': 'Nie udało się zarchiwizować {count} sesji',
   'vscodeLayout.actions.cancel': 'Anuluj',
   'vscodeLayout.actions.newSessionAria': 'Nowa sesja',
   'vscodeLayout.actions.openAgentManagerAria': 'Otwórz menedżer agentów',

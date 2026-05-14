@@ -2119,6 +2119,8 @@ export const dict: Record<I18nKey, string> = {
   'vscodeLayout.actions.backToSessionsAria': '세션으로 돌아가기',
   'vscodeLayout.actions.archiveAllAria': '모든 세션 보관',
   'vscodeLayout.actions.archiveAllConfirm': '모두 보관',
+  'vscodeLayout.actions.archiveAllSuccess': '{count}개 세션 보관됨',
+  'vscodeLayout.actions.archiveAllError': '{count}개 세션 보관 실패',
   'vscodeLayout.actions.cancel': '취소',
   'vscodeLayout.actions.newSessionAria': '새 세션',
   'vscodeLayout.actions.openAgentManagerAria': '에이전트 관리자 열기',

@@ -2086,6 +2086,8 @@ export const dict: Record<I18nKey, string> = {
   "vscodeLayout.actions.newSessionAria": "Nueva sesión",
   "vscodeLayout.actions.archiveAllAria": "Archivar todas las sesiones",
   "vscodeLayout.actions.archiveAllConfirm": "Archivar todo",
+  "vscodeLayout.actions.archiveAllSuccess": "{count} sesión(es) archivada(s)",
+  "vscodeLayout.actions.archiveAllError": "Error al archivar {count} sesión(es)",
   "vscodeLayout.actions.cancel": "Cancelar",
   "vscodeLayout.actions.openAgentManagerAria": "Abrir gestor de agentes",
   "vscodeLayout.actions.resizeSessionsSidebarAria": "Ajustar tamaño del panel de sesiones",
