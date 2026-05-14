@@ -856,12 +856,14 @@ const buildMarkdownComponents = ({
   previewLabel,
   previewTitle,
   effectiveDirectory = '',
+  onShowPopup,
 }: {
   syntaxTheme: { [key: string]: React.CSSProperties };
   onPreviewLoopback?: (url: string) => void;
   previewLabel?: string;
   previewTitle?: string;
   effectiveDirectory?: string;
+  onShowPopup?: (content: ToolPopupContent) => void;
 }): Components => ({
   table({ children, ...props }) {
     return <TableWrapper className={props.className}>{children}</TableWrapper>;
@@ -976,7 +978,23 @@ const buildMarkdownComponents = ({
     const apiSrc = resolvedSrc.startsWith('http')
       ? resolvedSrc
       : `/api/fs/raw?path=${encodeURIComponent(resolvedSrc)}`;
-    return <img src={apiSrc} alt={alt || ''} className="max-w-full rounded-lg my-2" loading="lazy" />;
+    const handleDblClick = onShowPopup ? () => {
+      onShowPopup({
+        open: true,
+        title: alt || 'Image',
+        content: '',
+        image: { url: apiSrc },
+      });
+    } : undefined;
+    return (
+      <img
+        src={apiSrc}
+        alt={alt || ''}
+        className="max-w-full h-auto max-h-[75vh] rounded-lg my-2 cursor-zoom-in"
+        loading="lazy"
+        onDoubleClick={handleDblClick}
+      />
+    );
   },
 });
 
@@ -1639,8 +1657,9 @@ const MarkdownRendererImpl: React.FC<MarkdownRendererProps> = ({
       previewLabel,
       previewTitle,
       effectiveDirectory,
+      onShowPopup,
     }),
-    [syntaxTheme, effectiveDirectory, handlePreviewLoopback, previewLabel, previewTitle],
+    [syntaxTheme, effectiveDirectory, handlePreviewLoopback, previewLabel, previewTitle, onShowPopup],
   );
   const componentKey = `markdown-${part?.id ? `part-${part.id}` : `message-${messageId}`}`;
   const markdownBlocks = useStableMarkdownBlocks(content, isStreaming && !disableStreamAnimation, componentKey);
@@ -1729,7 +1748,7 @@ const SimpleMarkdownRendererImpl: React.FC<{
   });
   useExternalLinkInteractions({ containerRef, enabled: !disableLinkSafety });
   const syntaxTheme = React.useMemo(() => generateSyntaxTheme(currentTheme), [currentTheme]);
-  const markdownComponents = React.useMemo(() => buildMarkdownComponents({ syntaxTheme, effectiveDirectory }), [syntaxTheme, effectiveDirectory]);
+  const markdownComponents = React.useMemo(() => buildMarkdownComponents({ syntaxTheme, effectiveDirectory, onShowPopup }), [syntaxTheme, effectiveDirectory, onShowPopup]);
   const markdownBlocks = useStableMarkdownBlocks(renderedContent, false, `simple:${variant}`);
 
   const markdownClassName = variant === 'tool'
