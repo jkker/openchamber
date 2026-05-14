@@ -855,11 +855,13 @@ const buildMarkdownComponents = ({
   onPreviewLoopback,
   previewLabel,
   previewTitle,
+  effectiveDirectory = '',
 }: {
   syntaxTheme: { [key: string]: React.CSSProperties };
   onPreviewLoopback?: (url: string) => void;
   previewLabel?: string;
   previewTitle?: string;
+  effectiveDirectory?: string;
 }): Components => ({
   table({ children, ...props }) {
     return <TableWrapper className={props.className}>{children}</TableWrapper>;
@@ -965,6 +967,16 @@ const buildMarkdownComponents = ({
         ) : null}
       </>
     );
+  },
+  img({ src, alt }) {
+    if (!src) return null;
+    const resolvedSrc = src.startsWith('/') || src.startsWith('http')
+      ? src
+      : `${effectiveDirectory}/${src}`;
+    const apiSrc = resolvedSrc.startsWith('http')
+      ? resolvedSrc
+      : `/api/fs/raw?path=${encodeURIComponent(resolvedSrc)}`;
+    return <img src={apiSrc} alt={alt || ''} className="max-w-full rounded-lg my-2" loading="lazy" />;
   },
 });
 
@@ -1626,6 +1638,7 @@ const MarkdownRendererImpl: React.FC<MarkdownRendererProps> = ({
       onPreviewLoopback: effectiveDirectory ? handlePreviewLoopback : undefined,
       previewLabel,
       previewTitle,
+      effectiveDirectory,
     }),
     [syntaxTheme, effectiveDirectory, handlePreviewLoopback, previewLabel, previewTitle],
   );
@@ -1716,7 +1729,7 @@ const SimpleMarkdownRendererImpl: React.FC<{
   });
   useExternalLinkInteractions({ containerRef, enabled: !disableLinkSafety });
   const syntaxTheme = React.useMemo(() => generateSyntaxTheme(currentTheme), [currentTheme]);
-  const markdownComponents = React.useMemo(() => buildMarkdownComponents({ syntaxTheme }), [syntaxTheme]);
+  const markdownComponents = React.useMemo(() => buildMarkdownComponents({ syntaxTheme, effectiveDirectory }), [syntaxTheme, effectiveDirectory]);
   const markdownBlocks = useStableMarkdownBlocks(renderedContent, false, `simple:${variant}`);
 
   const markdownClassName = variant === 'tool'
