@@ -633,7 +633,7 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
       setIsImportingPlan(true);
       try {
         const response = await fetch(
-          `${window.location.origin}/fs/read?path=${encodeURIComponent(result.path)}`,
+          `/api/fs/read?path=${encodeURIComponent(result.path)}`,
           { cache: 'no-store' }
         );
         if (!response.ok) {
