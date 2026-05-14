@@ -32,6 +32,7 @@ import {
   type OpenChamberProjectTodoItem,
   type ProjectRef,
 } from '@/lib/openchamberConfig';
+import { requestFileAccess } from '@/lib/desktop';
 import { generateBranchName } from '@/lib/git/branchNameGenerator';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useUIStore } from '@/stores/useUIStore';
@@ -580,12 +581,54 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
     [deletingPlanId, projectRef, t]
   );
 
-  const handleTriggerUploadPlan = React.useCallback(() => {
+  const handleTriggerUploadPlan = React.useCallback(async () => {
     if (!projectRef || isImportingPlan) {
       return;
     }
-    planFileInputRef.current?.click();
-  }, [isImportingPlan, projectRef]);
+    const result = await requestFileAccess({
+      defaultPath: projectRef.path,
+      filters: [
+        { name: 'Plan files', extensions: ['md', 'markdown', 'txt'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (result.success && result.path) {
+      setIsImportingPlan(true);
+      try {
+        const response = await fetch(
+          `${window.location.origin}/fs/read?path=${encodeURIComponent(result.path)}`,
+          { cache: 'no-store' }
+        );
+        if (!response.ok) {
+          toast.error(t('rightSidebar.contextNotesTodo.toast.readPlanFileFailed'));
+          return;
+        }
+        const text = await response.text();
+        if (!text.trim()) {
+          toast.error(t('rightSidebar.contextNotesTodo.toast.planFileEmpty'));
+          return;
+        }
+        const fallbackTitle = result.path.split('/').pop()?.replace(/\.(md|markdown|txt)$/i, '').trim() || '';
+        const created = await importProjectPlanFileFromContent(projectRef, text, fallbackTitle);
+        if (!created) {
+          toast.error(t('rightSidebar.contextNotesTodo.toast.importPlanFailed'));
+          return;
+        }
+        window.dispatchEvent(new CustomEvent('openchamber:project-plan-saved', {
+          detail: { projectId: projectRef.id },
+        }));
+        toast.success(t('rightSidebar.contextNotesTodo.toast.planImported'));
+      } catch (error) {
+        const description = error instanceof Error ? error.message : undefined;
+        toast.error(t('rightSidebar.contextNotesTodo.toast.readPlanFileFailed'), description ? { description } : undefined);
+      } finally {
+        setIsImportingPlan(false);
+      }
+    } else if (result.error === 'Native file picker not available') {
+      // Fall back to HTML file input for web/non-desktop runtimes
+      planFileInputRef.current?.click();
+    }
+  }, [isImportingPlan, projectRef, t]);
 
   const handleUploadPlanFile = React.useCallback(
     async (file: File | null) => {

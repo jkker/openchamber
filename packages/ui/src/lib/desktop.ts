@@ -368,7 +368,7 @@ export const requestDirectoryAccess = async (
 };
 
 export const requestFileAccess = async (
-  options?: { filters?: Array<{ name: string; extensions: string[] }> }
+  options?: { filters?: Array<{ name: string; extensions: string[] }>; defaultPath?: string }
 ): Promise<{ success: boolean; path?: string; error?: string }> => {
   if (isTauriShell() && isDesktopLocalOriginActive()) {
     try {
@@ -378,6 +378,7 @@ export const requestFileAccess = async (
         multiple: false,
         title: 'Select File',
         ...(options?.filters ? { filters: options.filters } : {}),
+        ...(options?.defaultPath ? { defaultPath: options.defaultPath } : {}),
       });
       if (!selected || typeof selected !== 'string') {
         return { success: false, error: 'File selection cancelled' };
