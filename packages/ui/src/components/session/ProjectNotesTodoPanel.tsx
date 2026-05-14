@@ -156,10 +156,16 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
   const [contextReloadTick, setContextReloadTick] = React.useState(0);
   const notesHydratedRef = React.useRef(false);
   const lastSavedNotesRef = React.useRef('');
-  const [todoPanelHeight, setTodoPanelHeight] = React.useState(() => getPanelHeightForItems(7, 100));
+  const todoPanelHeight = useUIStore((state) => state.todoPanelHeight);
+  const setTodoPanelHeight = useUIStore((state) => state.setTodoPanelHeight);
+  const notesPanelHeight = useUIStore((state) => state.notesPanelHeight);
+  const setNotesPanelHeight = useUIStore((state) => state.setNotesPanelHeight);
   const [isTodoPanelResizing, setIsTodoPanelResizing] = React.useState(false);
+  const [isNotesPanelResizing, setIsNotesPanelResizing] = React.useState(false);
   const todoPanelStartYRef = React.useRef(0);
   const todoPanelStartHeightRef = React.useRef(todoPanelHeight);
+  const notesPanelStartYRef = React.useRef(0);
+  const notesPanelStartHeightRef = React.useRef(notesPanelHeight);
 
   const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
   const createSession = useSessionUIStore((state) => state.createSession);
@@ -266,14 +272,11 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
       return;
     }
     const targetHeight = getPanelHeightForItems(todos.length, padding);
-    setTodoPanelHeight((prev) => {
-      const minHeight = getEffectiveItemHeight(padding) * TODO_PANEL_MIN_ITEMS;
-      if (prev < minHeight || prev > targetHeight) {
-        return targetHeight;
-      }
-      return prev;
-    });
-  }, [todos.length, padding]);
+    const minHeight = getEffectiveItemHeight(padding) * TODO_PANEL_MIN_ITEMS;
+    if (todoPanelHeight < minHeight || todoPanelHeight > targetHeight) {
+      setTodoPanelHeight(targetHeight);
+    }
+  }, [todos.length, padding, todoPanelHeight, setTodoPanelHeight]);
 
   React.useEffect(() => {
     if (!isTodoPanelResizing) {
@@ -300,7 +303,7 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [isTodoPanelResizing, padding]);
+  }, [isTodoPanelResizing, padding, setTodoPanelHeight]);
 
   const handleTodoPanelResizeStart = React.useCallback((event: React.PointerEvent) => {
     setIsTodoPanelResizing(true);
@@ -308,6 +311,40 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
     todoPanelStartHeightRef.current = todoPanelHeight;
     event.preventDefault();
   }, [todoPanelHeight]);
+
+  React.useEffect(() => {
+    if (!isNotesPanelResizing) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const delta = event.clientY - notesPanelStartYRef.current;
+      const nextHeight = Math.min(
+        480,
+        Math.max(80, notesPanelStartHeightRef.current + delta)
+      );
+      setNotesPanelHeight(nextHeight);
+    };
+
+    const handlePointerUp = () => {
+      setIsNotesPanelResizing(false);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp, { once: true });
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [isNotesPanelResizing, setNotesPanelHeight]);
+
+  const handleNotesPanelResizeStart = React.useCallback((event: React.PointerEvent) => {
+    setIsNotesPanelResizing(true);
+    notesPanelStartYRef.current = event.clientY;
+    notesPanelStartHeightRef.current = notesPanelHeight;
+    event.preventDefault();
+  }, [notesPanelHeight]);
 
   const handleNotesBlur = React.useCallback(() => {
     lastSavedNotesRef.current = notes;
@@ -705,10 +742,21 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
           onChange={(event) => setNotes(event.target.value.slice(0, OPENCHAMBER_PROJECT_NOTES_MAX_LENGTH))}
           onBlur={handleNotesBlur}
           placeholder={t('rightSidebar.contextNotesTodo.notes.placeholder')}
-          className="min-h-28 resize-none"
+          className={cn('resize-none', isNotesPanelResizing && 'transition-none')}
+          style={{ minHeight: `${notesPanelHeight}px` }}
           useScrollShadow
           scrollShadowSize={56}
           disabled={isLoading}
+        />
+        <div
+          className={cn(
+            'h-[3px] w-full cursor-row-resize hover:bg-[var(--interactive-border)]/80 transition-colors',
+            isNotesPanelResizing && 'bg-[var(--interactive-border)]'
+          )}
+          onPointerDown={handleNotesPanelResizeStart}
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label={t('rightSidebar.contextNotesTodo.notes.resizeAria')}
         />
       </div>
 
