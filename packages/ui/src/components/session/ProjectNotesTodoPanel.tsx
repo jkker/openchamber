@@ -1,4 +1,14 @@
 import React from 'react';
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable';
+import { CSS as DndCSS } from '@dnd-kit/utilities';
 import { toast } from '@/components/ui';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -69,6 +79,41 @@ const createTodoId = (): string => {
     return crypto.randomUUID();
   }
   return `todo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+};
+
+type SortableTodoHandleProps = {
+  attributes: ReturnType<typeof useSortable>['attributes'];
+  listeners: ReturnType<typeof useSortable>['listeners'];
+  setActivatorNodeRef: ReturnType<typeof useSortable>['setActivatorNodeRef'];
+  isDragging: boolean;
+};
+
+const SortableTodoItem: React.FC<{
+  id: string;
+  children: (dragHandleProps: SortableTodoHandleProps) => React.ReactNode;
+}> = ({ id, children }) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={{
+        transform: DndCSS.Transform.toString(transform),
+        transition,
+      }}
+      className={cn(isDragging && 'opacity-60')}
+    >
+      {children({ attributes, listeners, setActivatorNodeRef, isDragging })}
+    </li>
+  );
 };
 
 export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
@@ -273,6 +318,28 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
     setTodos(nextTodos);
     void persistProjectData(notes, nextTodos);
   }, [notes, persistProjectData, todos]);
+
+  const handleTodoReorder = React.useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) {
+        return;
+      }
+      const oldIndex = todos.findIndex((todo) => todo.id === active.id);
+      const newIndex = todos.findIndex((todo) => todo.id === over.id);
+      if (oldIndex === -1 || newIndex === -1) {
+        return;
+      }
+      const nextTodos = arrayMove(todos, oldIndex, newIndex);
+      setTodos(nextTodos);
+      void persistProjectData(notes, nextTodos);
+    },
+    [notes, persistProjectData, todos]
+  );
+
+  const todoSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
+  );
 
   const todoInputValue = newTodoText.slice(0, OPENCHAMBER_PROJECT_TODO_TEXT_MAX_LENGTH);
   const completedTodoCount = todos.reduce((count, todo) => count + (todo.completed ? 1 : 0), 0);
@@ -585,78 +652,108 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
               {t('rightSidebar.contextNotesTodo.todo.empty')}
             </p>
           ) : (
-            <ul className="divide-y divide-border/50">
-              {todos.map((todo) => {
-                const isExpandedTodo = expandedTodoIds.has(todo.id);
-                return (
-                  <li key={todo.id} className="flex items-start gap-1.5 px-2.5 py-1.5">
-                    <div className="flex h-6 items-center">
-                      <Checkbox
-                        checked={todo.completed}
-                        onChange={(checked) => handleToggleTodo(todo.id, checked)}
-                        ariaLabel={t('rightSidebar.contextNotesTodo.todo.actions.markComplete', { text: todo.text })}
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleToggleTodoExpanded(todo.id)}
-                      className={cn(
-                        'block min-h-6 min-w-0 flex-1 bg-transparent p-0 text-left typography-ui-label leading-6 text-foreground',
-                        isExpandedTodo ? 'whitespace-normal break-words' : 'overflow-hidden text-ellipsis whitespace-nowrap',
-                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
-                        todo.completed && 'text-muted-foreground line-through'
-                      )}
-                      title={isExpandedTodo ? undefined : todo.text}
-                      aria-label={
-                        isExpandedTodo
-                          ? t('rightSidebar.contextNotesTodo.todo.actions.collapse', { text: todo.text })
-                          : t('rightSidebar.contextNotesTodo.todo.actions.expand', { text: todo.text })
-                      }
-                    >
-                      {todo.text}
-                    </button>
-                    <div className="flex h-6 items-center gap-0.5">
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteTodo(todo.id)}
-                        className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
-                        aria-label={t('rightSidebar.contextNotesTodo.todo.actions.delete', { text: todo.text })}
-                        title={t('rightSidebar.contextNotesTodo.todo.actions.delete', { text: todo.text })}
-                      >
-                        <Icon name="delete-bin" className="h-3.5 w-3.5" />
-                      </button>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <button
-                            type="button"
-                            disabled={sendingTodoId === todo.id}
-                            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
-                            aria-label={t('rightSidebar.contextNotesTodo.todo.actions.send', { text: todo.text })}
-                            title={t('rightSidebar.contextNotesTodo.todo.actions.send', { text: todo.text })}
-                          >
-                            <Icon name="send-plane" className="h-3.5 w-3.5" />
-                          </button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-56">
-                          <DropdownMenuItem onClick={() => handleSendToCurrentSession(todo.text)}>
-                            {t('rightSidebar.contextNotesTodo.todo.sendMenu.currentSession')}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleSendToNewSession(todo.id, todo.text)}>
-                            {t('rightSidebar.contextNotesTodo.todo.sendMenu.newSession')}
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => void handleSendToNewWorktreeSession(todo.id, todo.text)}
-                            disabled={!canCreateWorktree}
-                          >
-                            {t('rightSidebar.contextNotesTodo.todo.sendMenu.newWorktreeSession')}
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
+            <DndContext
+              sensors={todoSensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleTodoReorder}
+            >
+              <SortableContext
+                items={todos.map((todo) => todo.id)}
+                strategy={verticalListSortingStrategy}
+              >
+                <ul className="divide-y divide-border/50">
+                  {todos.map((todo) => {
+                    const isExpandedTodo = expandedTodoIds.has(todo.id);
+                    return (
+                      <SortableTodoItem key={todo.id} id={todo.id}>
+                        {(dragHandleProps) => (
+                          <div className="flex items-start gap-1.5 px-2.5 py-1.5">
+                            <button
+                              type="button"
+                              ref={dragHandleProps.setActivatorNodeRef}
+                              {...dragHandleProps.attributes}
+                              {...dragHandleProps.listeners}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                              }}
+                              className="flex h-6 w-4 flex-shrink-0 items-center justify-center text-muted-foreground hover:text-foreground"
+                              aria-label={t('rightSidebar.contextNotesTodo.todo.actions.reorder', { text: todo.text })}
+                              title={t('rightSidebar.contextNotesTodo.todo.actions.reorder', { text: todo.text })}
+                            >
+                              <Icon name="draggable" className="h-3.5 w-3.5" />
+                            </button>
+                            <div className="flex h-6 items-center">
+                              <Checkbox
+                                checked={todo.completed}
+                                onChange={(checked) => handleToggleTodo(todo.id, checked)}
+                                ariaLabel={t('rightSidebar.contextNotesTodo.todo.actions.markComplete', { text: todo.text })}
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleTodoExpanded(todo.id)}
+                              className={cn(
+                                'block min-h-6 min-w-0 flex-1 bg-transparent p-0 text-left typography-ui-label leading-6 text-foreground',
+                                isExpandedTodo ? 'whitespace-normal break-words' : 'overflow-hidden text-ellipsis whitespace-nowrap',
+                                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
+                                todo.completed && 'text-muted-foreground line-through'
+                              )}
+                              title={isExpandedTodo ? undefined : todo.text}
+                              aria-label={
+                                isExpandedTodo
+                                  ? t('rightSidebar.contextNotesTodo.todo.actions.collapse', { text: todo.text })
+                                  : t('rightSidebar.contextNotesTodo.todo.actions.expand', { text: todo.text })
+                              }
+                            >
+                              {todo.text}
+                            </button>
+                            <div className="flex h-6 items-center gap-0.5">
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteTodo(todo.id)}
+                                className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                                aria-label={t('rightSidebar.contextNotesTodo.todo.actions.delete', { text: todo.text })}
+                                title={t('rightSidebar.contextNotesTodo.todo.actions.delete', { text: todo.text })}
+                              >
+                                <Icon name="delete-bin" className="h-3.5 w-3.5" />
+                              </button>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <button
+                                    type="button"
+                                    disabled={sendingTodoId === todo.id}
+                                    className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
+                                    aria-label={t('rightSidebar.contextNotesTodo.todo.actions.send', { text: todo.text })}
+                                    title={t('rightSidebar.contextNotesTodo.todo.actions.send', { text: todo.text })}
+                                  >
+                                    <Icon name="send-plane" className="h-3.5 w-3.5" />
+                                  </button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="w-56">
+                                  <DropdownMenuItem onClick={() => handleSendToCurrentSession(todo.text)}>
+                                    {t('rightSidebar.contextNotesTodo.todo.sendMenu.currentSession')}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => handleSendToNewSession(todo.id, todo.text)}>
+                                    {t('rightSidebar.contextNotesTodo.todo.sendMenu.newSession')}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onClick={() => void handleSendToNewWorktreeSession(todo.id, todo.text)}
+                                    disabled={!canCreateWorktree}
+                                  >
+                                    {t('rightSidebar.contextNotesTodo.todo.sendMenu.newWorktreeSession')}
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </div>
+                        )}
+                      </SortableTodoItem>
+                    );
+                  })}
+                </ul>
+              </SortableContext>
+            </DndContext>
           )}
         </div>
       </div>

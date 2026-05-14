@@ -1888,6 +1888,7 @@ export const dict: Record<I18nKey, string> = {
   'rightSidebar.contextNotesTodo.todo.actions.expand': 'Rozwiń zadanie „{text}”',
   'rightSidebar.contextNotesTodo.todo.actions.markComplete': 'Oznacz „{text}” jako ukończone',
   'rightSidebar.contextNotesTodo.todo.actions.send': 'Wyślij „{text}”',
+  'rightSidebar.contextNotesTodo.todo.actions.reorder': 'Zmień kolejność "{text}"',
   'rightSidebar.contextNotesTodo.todo.addAria': 'Dodaj zadanie',
   'rightSidebar.contextNotesTodo.todo.clearCompleted': 'Wyczyść ukończone',
   'rightSidebar.contextNotesTodo.todo.empty': 'Brak zadań. Dodaj krótką checklistę dla tego projektu.',
