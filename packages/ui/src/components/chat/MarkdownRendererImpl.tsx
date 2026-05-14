@@ -977,8 +977,8 @@ const buildMarkdownComponents = ({
       : `${effectiveDirectory}/${src}`;
     const apiSrc = resolvedSrc.startsWith('http')
       ? resolvedSrc
-      : `/api/fs/raw?path=${encodeURIComponent(resolvedSrc)}`;
-    const handleDblClick = onShowPopup ? () => {
+      : `/api/fs/raw?path=${encodeURIComponent(resolvedSrc)}&allowOutsideWorkspace=true`;
+    const handleClick = onShowPopup ? () => {
       onShowPopup({
         open: true,
         title: alt || 'Image',
@@ -987,13 +987,15 @@ const buildMarkdownComponents = ({
       });
     } : undefined;
     return (
-      <img
-        src={apiSrc}
-        alt={alt || ''}
-        className="max-w-full h-auto max-h-[75vh] rounded-lg my-2 cursor-zoom-in"
-        loading="lazy"
-        onDoubleClick={handleDblClick}
-      />
+      <div className="rounded-lg border border-border/40 bg-muted/10 overflow-hidden my-2">
+        <img
+          src={apiSrc}
+          alt={alt || ''}
+          className="w-full h-auto max-h-[75vh] object-contain cursor-pointer"
+          loading="lazy"
+          onClick={handleClick}
+        />
+      </div>
     );
   },
 });
