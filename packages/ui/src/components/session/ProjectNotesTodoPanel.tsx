@@ -52,9 +52,9 @@ const TODO_PANEL_MAX_ITEMS = 15;
 const getEffectiveItemHeight = (padding: number) => {
   const scale = Math.sqrt(padding / 100);
   const paddingPx = 12 * scale;
-  const contentPx = 24;
+  const contentPx = 24 * scale; // h-6 uses --spacing-6 which also scales with --padding-scale
   const borderPx = 1;
-  return Math.round(paddingPx + contentPx + borderPx);
+  return Math.ceil(paddingPx + contentPx + borderPx);
 };
 
 const getPanelHeightForItems = (itemCount: number, padding: number) => {
