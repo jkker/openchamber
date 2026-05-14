@@ -246,7 +246,7 @@ export const VSCodeLayout: React.FC = () => {
 
   const isSessionInActiveWorkspace = React.useCallback((session: Session): boolean => {
     if (!activeWorkspacePath) {
-      return true;
+      return false;
     }
 
     const sessionDirectory = resolveGlobalSessionDirectory(session);
