@@ -45,6 +45,25 @@ import { renderMagicPrompt } from '@/lib/magicPrompts';
 import { useI18n } from '@/lib/i18n';
 import { TodoSendDialog, type TodoSendExecution } from './TodoSendDialog';
 
+const TODO_PANEL_MIN_ITEMS = 5;
+const TODO_PANEL_MAX_ITEMS = 15;
+
+const getEffectiveItemHeight = (padding: number) => {
+  const scale = Math.sqrt(padding / 100);
+  const paddingPx = 12 * scale;
+  const contentPx = 24;
+  const borderPx = 1;
+  return Math.round(paddingPx + contentPx + borderPx);
+};
+
+const getPanelHeightForItems = (itemCount: number, padding: number) => {
+  const itemHeight = getEffectiveItemHeight(padding);
+  return Math.max(
+    itemHeight * TODO_PANEL_MIN_ITEMS,
+    Math.min(itemHeight * TODO_PANEL_MAX_ITEMS, itemHeight * itemCount)
+  );
+};
+
 interface ProjectNotesTodoPanelProps {
   projectRef: ProjectRef | null;
   projectLabel?: string | null;
@@ -136,6 +155,10 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
   const [contextReloadTick, setContextReloadTick] = React.useState(0);
   const notesHydratedRef = React.useRef(false);
   const lastSavedNotesRef = React.useRef('');
+  const [todoPanelHeight, setTodoPanelHeight] = React.useState(() => getPanelHeightForItems(7, 100));
+  const [isTodoPanelResizing, setIsTodoPanelResizing] = React.useState(false);
+  const todoPanelStartYRef = React.useRef(0);
+  const todoPanelStartHeightRef = React.useRef(todoPanelHeight);
 
   const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
   const createSession = useSessionUIStore((state) => state.createSession);
@@ -147,6 +170,7 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
   const openContextPanelTab = useUIStore((state) => state.openContextPanelTab);
   const setActiveMainTab = useUIStore((state) => state.setActiveMainTab);
   const setSessionSwitcherOpen = useUIStore((state) => state.setSessionSwitcherOpen);
+  const padding = useUIStore((state) => state.padding);
 
   const persistProjectData = React.useCallback(
     async (nextNotes: string, nextTodos: OpenChamberProjectTodoItem[]) => {
@@ -235,6 +259,54 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
       window.removeEventListener('openchamber:project-notes-updated', handleProjectContextRefresh);
     };
   }, [projectRef]);
+
+  React.useEffect(() => {
+    if (todos.length < 7) {
+      return;
+    }
+    const targetHeight = getPanelHeightForItems(todos.length, padding);
+    setTodoPanelHeight((prev) => {
+      const minHeight = getEffectiveItemHeight(padding) * TODO_PANEL_MIN_ITEMS;
+      if (prev < minHeight || prev > targetHeight) {
+        return targetHeight;
+      }
+      return prev;
+    });
+  }, [todos.length, padding]);
+
+  React.useEffect(() => {
+    if (!isTodoPanelResizing) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const delta = event.clientY - todoPanelStartYRef.current;
+      const nextHeight = Math.min(
+        getEffectiveItemHeight(padding) * TODO_PANEL_MAX_ITEMS,
+        Math.max(getEffectiveItemHeight(padding) * TODO_PANEL_MIN_ITEMS, todoPanelStartHeightRef.current + delta)
+      );
+      setTodoPanelHeight(nextHeight);
+    };
+
+    const handlePointerUp = () => {
+      setIsTodoPanelResizing(false);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp, { once: true });
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [isTodoPanelResizing, padding]);
+
+  const handleTodoPanelResizeStart = React.useCallback((event: React.PointerEvent) => {
+    setIsTodoPanelResizing(true);
+    todoPanelStartYRef.current = event.clientY;
+    todoPanelStartHeightRef.current = todoPanelHeight;
+    event.preventDefault();
+  }, [todoPanelHeight]);
 
   const handleNotesBlur = React.useCallback(() => {
     lastSavedNotesRef.current = notes;
@@ -646,7 +718,20 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
           </button>
         </div>
 
-        <div className="max-h-56 overflow-y-auto rounded-lg border border-border/60 bg-background/40">
+        <div
+          className={cn(
+            'overflow-y-auto rounded-lg border border-border/60 bg-background/40',
+            isTodoPanelResizing && 'transition-none'
+          )}
+          style={
+            todos.length < 7
+              ? undefined
+              : {
+                  height: `${todoPanelHeight}px`,
+                  maxHeight: `${todoPanelHeight}px`,
+                }
+          }
+        >
           {todos.length === 0 ? (
             <p className="px-3 py-3 typography-meta text-muted-foreground">
               {t('rightSidebar.contextNotesTodo.todo.empty')}
@@ -756,6 +841,18 @@ export const ProjectNotesTodoPanel: React.FC<ProjectNotesTodoPanelProps> = ({
             </DndContext>
           )}
         </div>
+        {todos.length >= 7 && (
+          <div
+            className={cn(
+              'h-[3px] w-full cursor-row-resize hover:bg-[var(--interactive-border)]/80 transition-colors',
+              isTodoPanelResizing && 'bg-[var(--interactive-border)]'
+            )}
+            onPointerDown={handleTodoPanelResizeStart}
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label={t('rightSidebar.contextNotesTodo.todo.resizeAria')}
+          />
+        )}
       </div>
 
       <div className="space-y-2">
