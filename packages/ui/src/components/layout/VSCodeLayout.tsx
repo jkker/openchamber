@@ -8,10 +8,10 @@ import { useViewportStore } from '@/sync/viewport-store';
 import { useSessions, useDirectorySync, useSessionMessages, useSessionMessagesResolved } from '@/sync/sync-context';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
-import { useProjectsStore } from '@/stores/useProjectsStore';
 import { ContextUsageDisplay } from '@/components/ui/ContextUsageDisplay';
 import { McpDropdown } from '@/components/mcp/McpDropdown';
 import { SessionSwitcherDropdown } from '@/components/session/SessionSwitcherDropdown';
+import { SessionsTabTitle } from '@/components/session/SessionsTabTitle';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { cn } from '@/lib/utils';
 import {
@@ -22,7 +22,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useI18n } from '@/lib/i18n';
 import { toast } from '@/components/ui';
@@ -818,30 +817,7 @@ const VSCodeHeader: React.FC<VSCodeHeaderProps> = ({ title, showBack, onBack, on
           </button>
         </SessionSwitcherDropdown>
       ) : (
-        <h1 className="text-sm font-medium truncate flex-1" title={title}>{title}</h1>
-        {onArchiveAll && (
-          <DropdownMenu>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    className="inline-flex h-8 w-8 items-center justify-center p-2 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-                    aria-label={t('vscodeLayout.actions.archiveAllAria')}
-                  >
-                    <Icon name="archive" className="h-5 w-5" />
-                  </button>
-                </DropdownMenuTrigger>
-              </TooltipTrigger>
-              <TooltipContent side="bottom" sideOffset={4}><p>{t('vscodeLayout.actions.archiveAllAria')}</p></TooltipContent>
-            </Tooltip>
-            <DropdownMenuContent align="end" className="min-w-[160px]">
-              <DropdownMenuItem onSelect={onArchiveAll}>
-                {t('vscodeLayout.actions.archiveAllConfirm')}
-              </DropdownMenuItem>
-              <DropdownMenuItem>{t('vscodeLayout.actions.cancel')}</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+        <SessionsTabTitle title={title} onArchiveAll={onArchiveAll} />
       )}
       {onNewSession && (
         <button
