@@ -720,18 +720,30 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
         && !hasRenderableSessionSnapshot;
 
     React.useEffect(() => {
+        // Invalidate the "already restored this session" guard whenever the
+        // active session changes. Otherwise once we restore session X and
+        // navigate away, returning to X is treated as `alreadyRestored` and
+        // skipped — even though a fresh restore is exactly what's wanted.
+        if (previousSessionIdRef.current !== currentSessionId) {
+            lastScrolledSessionRef.current = null;
+        }
         previousSessionIdRef.current = currentSessionId;
     }, [currentSessionId]);
 
     React.useEffect(() => {
         if (!currentSessionId) return;
         if (lastScrolledSessionRef.current === currentSessionId) return;
-        if (!hasRenderableSessionSnapshot) return;
+        // Gate on rendered messages instead of `hasRenderableSessionSnapshot`:
+        // the latter goes false whenever any assistant message has
+        // unmaterialized parts (stuck streams, history rows missing part rows)
+        // and can stay false for the rest of the visit even though messages
+        // are on screen. `restoreSnapshot` falls back to
+        // `pendingInitialRestoreRef` if the container isn't attached yet.
+        if (sessionMessages.length === 0) return;
 
         const hasHashTarget = typeof window !== 'undefined' && window.location.hash.length > 0;
         lastScrolledSessionRef.current = currentSessionId;
         if (hasHashTarget) {
-            // Hash navigation handler will scroll to target; we just release auto-follow.
             releaseAutoFollow();
             return;
         }
@@ -746,7 +758,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
                 window.requestAnimationFrame(run);
             });
         }
-    }, [currentSessionId, hasRenderableSessionSnapshot, releaseAutoFollow, restoreSnapshot]);
+    }, [currentSessionId, releaseAutoFollow, restoreSnapshot, sessionMessages.length]);
 
     React.useEffect(() => {
         if (!currentSessionId) return;
