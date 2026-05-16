@@ -1,146 +1,186 @@
 # TTS Module Documentation
 
 ## Purpose
-This module provides server-side Text-to-Speech services using OpenAI's TTS API. Shared text summarization now lives in `packages/web/server/lib/text/` and is consumed here in `tts` mode.
+
+This module provides provider-agnostic server-side text-to-speech for OpenChamber.
+It preserves the existing OpenAI-compatible `/api/tts/speak` contract, adds a provider registry,
+and exposes first-class Edge TTS synthesis with word timestamps.
 
 ## Entrypoints and structure
-- `packages/web/server/lib/tts/index.js`: Public entrypoint imported by `packages/web/server/index.js`.
-- `packages/web/server/lib/tts/routes.js`: Express route registration for `/api/voice/*`, `/api/tts/*`, and `/api/stt/*` endpoints.
-- `packages/web/server/lib/tts/capability-runtime.js`: runtime helper for probing local macOS `say` TTS voice capability.
-- `packages/web/server/lib/tts/service.js`: TTS service implementation with OpenAI integration.
-- `packages/web/server/lib/text/summarization.js`: Shared text summarization and sanitization utilities using opencode.ai zen API.
+
+- `packages/web/server/lib/tts/index.js`: public entrypoint.
+- `packages/web/server/lib/tts/routes.js`: thin Express routes for `/api/tts/*`, `/api/stt/*`, and summarization helpers.
+- `packages/web/server/lib/tts/service.js`: orchestration surface used by routes.
+- `packages/web/server/lib/tts/base-url.js`: OpenAI-compatible base URL validation and remote-host safety.
+- `packages/web/server/lib/tts/capability-runtime.js`: cached macOS `say` capability probe.
+- `packages/web/server/lib/tts/providers/index.js`: provider registry and request normalization.
+- `packages/web/server/lib/tts/providers/speech-sdk.js`: `@speech-sdk/core` adapter for direct-provider and explicit gateway routing.
+- `packages/web/server/lib/tts/providers/edge-universal.js`: `edge-tts-universal` adapter with voice caching and `WordBoundary` timestamps.
+- `packages/web/server/lib/tts/providers/openai-compatible.js`: OpenAI-compatible HTTP adapter.
+- `packages/web/server/lib/tts/providers/say.js`: macOS `say` adapter.
 - `packages/web/server/lib/tts/stt.js`: STT proxy for OpenAI-compatible transcription endpoints.
-- `packages/web/server/lib/tts/base-url.js`: shared base URL validation and normalization for custom OpenAI-compatible endpoints.
+- `packages/web/server/lib/text/summarization.js`: shared summarization and TTS sanitization.
 
-## Public exports
+## Provider registry
 
-### TTS Service (from service.js)
-- `ttsService`: Singleton instance of TTSService class.
-- `TTSService`: TTS service class for OpenAI audio generation.
-- `TTS_VOICES`: Array of supported OpenAI voice identifiers.
+The internal provider ids are:
 
-### Shared text summarization (re-exported from ../text/summarization.js)
-- `summarizeText({ text, threshold, maxLength, zenModel, mode })`: Shared text summarizer. TTS uses `mode: 'tts'`.
-- `sanitizeForTTS(text)`: Sanitizes text by removing markdown, URLs, file paths, and other non-speakable content.
-- `sanitizeForNote(text)`: Re-exported for note-mode callers that still import through the TTS surface.
+- `speech-sdk`
+- `edge-tts`
+- `openai-compatible`
+- `say`
 
-### Capability runtime (capability-runtime.js)
-- `detectSayTtsCapability(processLike)`: probes local `say -v "?"` support and returns `{ available, voices, reason }`.
+Routes also expose a client-only `browser` entry in `/api/tts/providers` so the shared UI can present the full TTS menu.
 
-## Constants
+`resolveTtsRequest()` normalizes incoming payloads onto the internal contract and keeps the following compatibility behavior:
 
-### Voice identifiers
-- `TTS_VOICES`: Array of supported OpenAI voices: `['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse', 'marin', 'cedar']`.
+- if `provider` is omitted and `baseURL` is set, route to `openai-compatible`
+- if `provider` is omitted and no `baseURL` is set, route to `speech-sdk` with the OpenAI provider
+- legacy `voice`, `model`, `speed`, `apiKey`, and `baseURL` request bodies still work
 
-### Summarization defaults
-- `SUMMARIZE_TIMEOUT_MS`: 30000 (30 seconds timeout for zen API requests).
+## Public service API
 
-### Default values
-- `summarizeText` defaults: `threshold` = 200, `maxLength` = 500, `zenModel` = 'gpt-5-nano', `mode` = 'tts'.
-- `generateSpeechStream` defaults: `voice` = 'coral', `model` = 'gpt-4o-mini-tts', `speed` = 1.0.
-- `generateSpeechBuffer` defaults: `voice` = 'coral', `model` = 'gpt-4o-mini-tts', `speed` = 1.0.
+### `ttsService.isAvailable()`
 
-## TTSService methods
+Returns whether the legacy default OpenAI path is server-configured via `OPENAI_API_KEY` or OpenCode auth.
 
-### `isAvailable()`
-Returns boolean indicating whether OpenAI API key is configured (checks environment variable `OPENAI_API_KEY` or OpenCode auth file).
+### `ttsService.listProviders({ sayTTSCapability })`
 
-### `generateSpeechStream(options)`
-Generates speech and returns as a web stream for direct streaming to clients.
-- Options: `text` (required), `voice`, `model`, `speed`, `instructions`, `apiKey`.
-- Returns: `{ stream: ReadableStream, contentType: 'audio/mpeg' }`.
-- Throws: Error if API key not configured or text is empty.
+Returns metadata for browser, Speech SDK, Edge TTS, OpenAI-compatible, and Say.
+Metadata includes availability, configuration booleans, default model/voice, and Speech SDK sub-provider status.
 
-### `generateSpeechBuffer(options)`
-Generates speech and returns as Buffer for caching purposes.
-- Options: `text` (required), `voice`, `model`, `speed`, `instructions`.
-- Returns: Buffer containing MP3 audio data.
-- Throws: Error if API key not configured or text is empty.
+### `ttsService.listVoices({ provider, locale, gender, sayTTSCapability })`
 
-## Response contracts
+Lists normalized voices for providers that support it.
 
-### `summarizeText`
-Returns object with:
-- `summary`: Sanitized summary text or original text (if not summarized).
-- `summarized`: Boolean indicating if summarization was performed.
-- `reason`: Optional string explaining why summarization was skipped (e.g., 'Text under threshold', 'Request timed out').
-- `originalLength`: Optional number for original text length.
-- `summaryLength`: Optional number for summarized text length.
+- `edge-tts`: supports locale and gender filtering
+- `say`: returns the cached startup probe voices
+- `speech-sdk` / `openai-compatible`: currently return an empty list because they do not expose a stable generic voice catalog here
 
-The route-level text summarize API is now `/api/text/summarize`.
+### `ttsService.generateSpeechStream(options)`
 
-### `sanitizeForTTS`
-Returns sanitized string with markdown, URLs, file paths, and special characters removed.
+Normalizes a request, dispatches it through the provider registry, and returns:
 
-### `generateSpeechStream`
-Returns object with:
-- `stream`: ReadableStream of MP3 audio data.
-- `contentType`: Always 'audio/mpeg'.
+- `buffer`
+- `contentType`
+- `provider`
+- `model`
+- `voice`
+- `timestamps?`
+- `warnings?`
 
-### `generateSpeechBuffer`
-Returns Buffer containing MP3 audio data.
+### `ttsService.generateSpeechBuffer(options)`
 
-## API key resolution
-OpenAI API keys are resolved in order:
-1. Environment variable `OPENAI_API_KEY`.
-2. OpenCode auth file (`auth.openai`, `auth.codex`, or `auth.chatgpt`).
-3. Supports both string format (just token) and object format (with `access` or `token` fields).
+Compatibility helper that returns only the synthesized `Buffer`.
 
-## Usage in web server
-The TTS module is used by `packages/web/server/index.js` for:
-- Generating speech streams for client playback.
-- Generating speech buffers for caching.
-- Summarizing long messages before TTS synthesis.
-- Sanitizing text to remove non-speakable content.
+## Routes
 
-The summarization logic itself is shared with notifications and notes, but this module uses it only in `tts` mode.
+### `GET /api/tts/providers`
 
-The server-side TTS approach bypasses mobile Safari's audio context restrictions by generating audio on the server and streaming to clients.
+Returns provider metadata for the TTS settings UI.
 
-## Notes for contributors
+### `GET /api/tts/voices?provider=edge-tts&locale=en-US&gender=Female`
 
-### Adding new TTS features
-1. Add new methods to `packages/web/server/lib/tts/service.js` TTSService class.
-2. Export public functions from `packages/web/server/lib/tts/index.js`.
-3. Follow existing patterns for API key resolution and error handling.
-4. Ensure all text is sanitized before TTS synthesis.
-5. Consider adding new voice options to `TTS_VOICES` constant.
+Returns normalized voice metadata for providers that support listing.
 
-### Text sanitization
-- Always call `sanitizeForTTS` on text before passing to TTS generation.
-- The sanitization removes markdown, code blocks, URLs, file paths, shell commands, and special characters.
-- This prevents the TTS from reading out technical formatting that sounds unnatural.
+### `POST /api/tts/speak`
 
-### Error handling
-- `generateSpeechStream` and `generateSpeechBuffer` throw descriptive errors for missing API keys or empty text.
-- `summarizeText` catches zen API errors and returns mode-specific fallback text with `summarized: false`.
-- All errors are logged to console with `[TTSService]` or `[Summarize]` prefix.
+Backwards-compatible binary audio response by default.
 
-### API key management
-- TTSService caches OpenAI client instance and recreates when API key changes.
-- API key changes are detected by comparing with `_lastApiKey` property.
-- This allows dynamic API key updates without server restart.
+Accepted fields include:
 
-### Testing
-- Run `bun run type-check`, `bun run lint`, and `bun run build` before finalizing changes.
-- Test API key resolution with environment variable and auth file.
-- Test speech generation with various text lengths and voice options.
-- Test summarization behavior above and below threshold.
-- Test sanitization with markdown, URLs, and code blocks.
-- Verify streaming and buffer generation produce valid MP3 audio.
+- `provider`
+- `speechSdkProvider`
+- `voice`
+- `model`
+- `speed`
+- `pitch`
+- `volume`
+- `timestamps`
+- `providerOptions`
+- `apiKeyMode`
+- `apiKey`
+- `baseURL`
+- legacy summarization fields (`summarize`, `threshold`, `maxLength`, `providerId`, `modelId`, `zenModel`)
 
-## Verification notes
+If `returnMetadata: true` is passed, the route returns JSON with:
 
-### Manual verification
-1. Configure OpenAI API key via environment variable or OpenCode settings.
-2. Test `ttsService.isAvailable()` returns true.
-3. Call `ttsService.generateSpeechStream({ text: 'Hello world' })` and verify stream is returned.
-4. Call `ttsService.generateSpeechBuffer({ text: 'Hello world' })` and verify Buffer is returned.
-5. Test `summarizeText` with text above and below threshold.
-6. Test `sanitizeForTTS` with markdown, URLs, and code blocks.
+- `audioBase64`
+- `contentType`
+- `provider`
+- `model`
+- `voice`
+- `timestamps?`
+- `warnings?`
 
-### API endpoint verification
-1. Start web server and access TTS endpoint via client.
-2. Verify audio plays correctly in browser.
-3. Test on mobile Safari to verify bypass of audio context restrictions.
-4. Test with long messages to verify summarization is triggered.
+### `GET /api/tts/status`
+
+Legacy status route retained for existing clients. It now also includes provider metadata.
+
+### `POST /api/tts/say/speak`
+
+Retained for existing macOS Say callers, but it now delegates through the provider registry.
+
+## Speech SDK behavior
+
+`packages/web/server/lib/tts/providers/speech-sdk.js` uses `@speech-sdk/core` as the compatibility layer.
+
+- Direct provider factories are preferred by default.
+- Explicit gateway routing is enabled only when `apiKeyMode === 'gateway'`.
+- Supported provider ids currently include OpenAI, ElevenLabs, Deepgram, Cartesia, Google, Hume, Fish Audio, Murf, Resemble, fal, Mistral, xAI, and Inworld.
+- When `timestamps: true` is enabled, returned timestamps are passed through unchanged from Speech SDK.
+
+Error mapping:
+
+- `MissingApiKeyError` → deterministic 503 without secret leakage
+- `TimestampKeyMissingError` → deterministic 400 explaining fallback STT key requirements
+- `ApiError` → provider request failure with status/code only
+- other `SpeechSDKError`s → deterministic 400
+
+## Edge TTS behavior
+
+`packages/web/server/lib/tts/providers/edge-universal.js` uses `edge-tts-universal` server-side only.
+
+- default model: `edge-tts-universal`
+- default voice: `en-US-AvaNeural`
+- no API key required
+- voice lists are cached with a short TTL
+- `WordBoundary.offset` and `duration` values are converted from 100ns units to seconds
+- responses are returned as `audio/mpeg`
+
+## OpenAI-compatible safety
+
+`normalizeCustomOpenAIBaseURL()` is still the source of truth for remote URL safety.
+
+- only local loopback-style hosts are allowed by default
+- remote hosts remain blocked unless `OPENCHAMBER_ALLOW_REMOTE_OPENAI_COMPAT_URLS=true`
+- server OpenAI credentials are not forwarded to arbitrary remote base URLs automatically
+- when a custom endpoint does not need a key, the adapter uses `apiKey: 'not-required'`
+
+## Secrets
+
+- API key presence is surfaced only via booleans/status labels
+- TTS routes do not echo or log raw API keys
+- error responses avoid returning sensitive upstream headers or credentials
+
+## License note
+
+`edge-tts-universal` is licensed under AGPL-3.0.
+This is a material distribution risk for OpenChamber and must be called out in the PR notes before merge.
+
+## Verification
+
+Required repository validation:
+
+```bash
+bun run type-check
+bun run lint
+bun run build
+```
+
+Targeted backend tests added for:
+
+- provider request normalization
+- Speech SDK direct vs gateway dispatch
+- Edge TTS timestamp conversion and voice filtering
+- provider/status/metadata route behavior

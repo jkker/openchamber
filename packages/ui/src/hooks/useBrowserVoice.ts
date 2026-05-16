@@ -36,6 +36,7 @@ import { useConfigStore } from '@/stores/useConfigStore';
 import { useServerTTS } from './useServerTTS';
 import { useSayTTS } from './useSayTTS';
 import { summarizeText, shouldSummarize, sanitizeForTTS } from '@/lib/voice/summarize';
+import { getTtsProviderLabel, isServerTtsProvider, type TtsProviderId } from '@/lib/voice/ttsConfig';
 
 export type BrowserVoiceStatus = 'idle' | 'listening' | 'processing' | 'speaking' | 'error';
 
@@ -65,7 +66,7 @@ export interface UseBrowserVoiceReturn {
   /** Whether the device is mobile */
   isMobile: boolean;
   /** Current voice provider */
-  voiceProvider: 'browser' | 'openai' | 'openai-compatible' | 'say';
+  voiceProvider: TtsProviderId;
 }
 
 // Storage key for persisting language preference
@@ -141,20 +142,25 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
   const currentModelId = useConfigStore((state) => state.currentModelId);
   const currentAgentName = useConfigStore((state) => state.currentAgentName);
   const voiceModeEnabled = useConfigStore((state) => state.voiceModeEnabled);
-  const voiceProvider = useConfigStore((state) => state.voiceProvider);
+  const voiceProvider = useConfigStore((state) => state.ttsProvider);
+  const ttsSpeechSdkProvider = useConfigStore((state) => state.ttsSpeechSdkProvider);
+  const ttsModel = useConfigStore((state) => state.ttsModel);
+  const ttsVoice = useConfigStore((state) => state.ttsVoice);
+  const ttsBaseURL = useConfigStore((state) => state.ttsBaseURL);
+  const ttsApiKeyMode = useConfigStore((state) => state.ttsApiKeyMode);
+  const ttsTimestampsEnabled = useConfigStore((state) => state.ttsTimestampsEnabled);
+  const ttsRate = useConfigStore((state) => state.ttsRate);
+  const ttsPitch = useConfigStore((state) => state.ttsPitch);
+  const ttsVolume = useConfigStore((state) => state.ttsVolume);
   const speechRate = useConfigStore((state) => state.speechRate);
   const speechPitch = useConfigStore((state) => state.speechPitch);
   const speechVolume = useConfigStore((state) => state.speechVolume);
   const sayVoice = useConfigStore((state) => state.sayVoice);
   const browserVoice = useConfigStore((state) => state.browserVoice);
-  const openaiVoice = useConfigStore((state) => state.openaiVoice);
-  const openaiCompatibleVoice = useConfigStore((state) => state.openaiCompatibleVoice);
-  const openaiCompatibleUrl = useConfigStore((state) => state.openaiCompatibleUrl);
-  const openaiCompatibleTtsModel = useConfigStore((state) => state.openaiCompatibleTtsModel);
   const summarizeVoiceConversation = useConfigStore((state) => state.summarizeVoiceConversation);
   const summarizeCharacterThreshold = useConfigStore((state) => state.summarizeCharacterThreshold);
 
-  const shouldCheckOpenAIAvailability = voiceModeEnabled && (voiceProvider === 'openai' || voiceProvider === 'openai-compatible');
+  const shouldCheckOpenAIAvailability = voiceModeEnabled && isServerTtsProvider(voiceProvider);
   const shouldCheckSayAvailability = voiceModeEnabled && voiceProvider === 'say';
 
   // STT provider config
@@ -175,7 +181,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
   // Server TTS for mobile (bypasses Safari audio restrictions)
   const { speak: speakServerTTS, stop: stopServerTTS, isAvailable: isServerTTSAvailable, unlockAudio: unlockServerTTSAudio } = useServerTTS({
     enabled: shouldCheckOpenAIAvailability,
-    availabilityMode: voiceProvider === 'openai-compatible' ? 'openai-compatible' : 'openai',
+    availabilityMode: isServerTtsProvider(voiceProvider) ? voiceProvider : 'auto',
   });
 
   // macOS Say TTS
@@ -508,19 +514,19 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
                 }
               };
 
-              // Use server TTS when OpenAI (or OpenAI-compatible) provider is selected and available
-              if ((voiceProvider === 'openai' || voiceProvider === 'openai-compatible') && isServerTTSAvailable) {
-                const ttsVoice = voiceProvider === 'openai-compatible' ? openaiCompatibleVoice : openaiVoice;
-                const ttsBaseURL = voiceProvider === 'openai-compatible' ? openaiCompatibleUrl : undefined;
-                const ttsModel = voiceProvider === 'openai-compatible' ? openaiCompatibleTtsModel : undefined;
+              if (isServerTtsProvider(voiceProvider) && isServerTTSAvailable) {
                 console.log('[useBrowserVoice] Using server TTS with voice:', ttsVoice, 'provider:', voiceProvider);
                 await speakServerTTS(textToSpeak, {
                   voice: ttsVoice,
                   model: ttsModel,
-                  speed: speechRate,
-                  pitch: speechPitch,
-                  volume: speechVolume,
-                  baseURL: ttsBaseURL,
+                  provider: voiceProvider,
+                  speechSdkProvider: ttsSpeechSdkProvider,
+                  speed: ttsRate || speechRate,
+                  pitch: ttsPitch || speechPitch,
+                  volume: ttsVolume || speechVolume,
+                  baseURL: ttsBaseURL || undefined,
+                  apiKeyMode: ttsApiKeyMode,
+                  timestamps: ttsTimestampsEnabled,
                   onStart: () => console.log('[useBrowserVoice] Server TTS started'),
                   onEnd: () => {
                     console.log('[useBrowserVoice] Server TTS ended');
@@ -556,10 +562,9 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
                 // Pre-load voices and unlock audio context before speaking
                 console.log('[useBrowserVoice] Using browser TTS');
                 
-                // Warn user if they selected OpenAI but it's unavailable
-                if (voiceProvider === 'openai' && !isServerTTSAvailable) {
-                  console.warn('[useBrowserVoice] OpenAI voice selected but unavailable, falling back to browser voice');
-                  setError('OpenAI voice unavailable (API key not configured). Using browser voice instead.');
+                if (isServerTtsProvider(voiceProvider) && !isServerTTSAvailable) {
+                  console.warn('[useBrowserVoice] Server voice selected but unavailable, falling back to browser voice');
+                  setError(`${getTtsProviderLabel(voiceProvider)} voice unavailable. Using browser voice instead.`);
                 }
                 
                 await browserVoiceService.waitForVoices();
@@ -613,7 +618,7 @@ export function useBrowserVoice(): UseBrowserVoiceReturn {
       setStatus('error');
       processingMessageRef.current = false;
     }
-  }, [currentSessionId, currentProviderId, currentModelId, currentAgentName, language, sendMessage, setPendingInputText, createSession, speechRate, speechPitch, speechVolume, isServerTTSAvailable, speakServerTTS, isSayTTSAvailable, speakSayTTS, voiceProvider, sayVoice, browserVoice, openaiVoice, openaiCompatibleVoice, openaiCompatibleUrl, openaiCompatibleTtsModel, summarizeVoiceConversation, summarizeCharacterThreshold, conversationMode, startCurrentSTT]);
+  }, [currentSessionId, currentProviderId, currentModelId, currentAgentName, language, sendMessage, setPendingInputText, createSession, speechRate, speechPitch, speechVolume, isServerTTSAvailable, speakServerTTS, isSayTTSAvailable, speakSayTTS, voiceProvider, ttsSpeechSdkProvider, ttsModel, ttsVoice, ttsBaseURL, ttsApiKeyMode, ttsTimestampsEnabled, ttsRate, ttsPitch, ttsVolume, sayVoice, browserVoice, summarizeVoiceConversation, summarizeCharacterThreshold, conversationMode, startCurrentSTT]);
 
   // Handle speech recognition result
   const handleSpeechResult = useCallback(async (text: string, isFinal: boolean) => {

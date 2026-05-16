@@ -18,25 +18,29 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { isServerTtsProvider, type TtsApiKeyMode, type TtsProviderId } from '@/lib/voice/ttsConfig';
+
+type ServerTtsAvailabilityMode = 'speech-sdk' | 'openai-compatible' | 'edge-tts';
 
 interface ServerTTSStatusCache {
   available: boolean;
+  providers?: Array<Record<string, unknown>>;
   checkedAt: number;
 }
 
 interface UseServerTTSOptions {
   enabled?: boolean;
-  availabilityMode?: 'auto' | 'openai' | 'openai-compatible';
+  availabilityMode?: 'auto' | ServerTtsAvailabilityMode;
 }
 
 const SERVER_TTS_STATUS_TTL_MS = 30000;
 let serverTTSStatusCache: ServerTTSStatusCache | null = null;
-let serverTTSStatusRequest: Promise<boolean> | null = null;
+let serverTTSStatusRequest: Promise<ServerTTSStatusCache> | null = null;
 
-async function getServerTTSStatus(): Promise<boolean> {
+async function getServerTTSStatus(): Promise<ServerTTSStatusCache> {
   const now = Date.now();
   if (serverTTSStatusCache && now - serverTTSStatusCache.checkedAt < SERVER_TTS_STATUS_TTL_MS) {
-    return serverTTSStatusCache.available;
+    return serverTTSStatusCache;
   }
 
   if (serverTTSStatusRequest) {
@@ -47,17 +51,20 @@ async function getServerTTSStatus(): Promise<boolean> {
     try {
       const response = await fetch('/api/tts/status');
       if (!response.ok) {
-        serverTTSStatusCache = { available: false, checkedAt: Date.now() };
-        return false;
+        serverTTSStatusCache = { available: false, checkedAt: Date.now(), providers: [] };
+        return serverTTSStatusCache;
       }
 
       const data = await response.json();
-      const available = Boolean(data.available);
-      serverTTSStatusCache = { available, checkedAt: Date.now() };
-      return available;
+      serverTTSStatusCache = {
+        available: Boolean(data.available),
+        checkedAt: Date.now(),
+        providers: Array.isArray(data.providers) ? data.providers : [],
+      };
+      return serverTTSStatusCache;
     } catch {
-      serverTTSStatusCache = { available: false, checkedAt: Date.now() };
-      return false;
+      serverTTSStatusCache = { available: false, checkedAt: Date.now(), providers: [] };
+      return serverTTSStatusCache;
     } finally {
       serverTTSStatusRequest = null;
     }
@@ -106,6 +113,11 @@ export interface SpeakOptions {
   threshold?: number;
   /** Custom base URL for OpenAI-compatible server */
   baseURL?: string;
+  provider?: TtsProviderId;
+  speechSdkProvider?: string;
+  apiKeyMode?: TtsApiKeyMode;
+  timestamps?: boolean;
+  providerOptions?: Record<string, unknown>;
   /** Callback when playback starts */
   onStart?: () => void;
   /** Callback when playback ends */
@@ -139,8 +151,18 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
   const currentModelId = useConfigStore((state) => state.currentModelId);
   const summarizeCharacterThreshold = useConfigStore((state) => state.summarizeCharacterThreshold);
   const summarizeMaxLength = useConfigStore((state) => state.summarizeMaxLength);
-  const openaiApiKey = useConfigStore((state) => state.openaiApiKey);
-  const openaiCompatibleUrl = useConfigStore((state) => state.openaiCompatibleUrl);
+  const ttsProvider = useConfigStore((state) => state.ttsProvider);
+  const ttsSpeechSdkProvider = useConfigStore((state) => state.ttsSpeechSdkProvider);
+  const ttsModel = useConfigStore((state) => state.ttsModel);
+  const ttsVoice = useConfigStore((state) => state.ttsVoice);
+  const ttsApiKey = useConfigStore((state) => state.ttsApiKey);
+  const ttsApiKeyMode = useConfigStore((state) => state.ttsApiKeyMode);
+  const ttsBaseURL = useConfigStore((state) => state.ttsBaseURL);
+  const ttsTimestampsEnabled = useConfigStore((state) => state.ttsTimestampsEnabled);
+  const ttsRate = useConfigStore((state) => state.ttsRate);
+  const ttsPitch = useConfigStore((state) => state.ttsPitch);
+  const ttsVolume = useConfigStore((state) => state.ttsVolume);
+  const ttsProviderOptions = useConfigStore((state) => state.ttsProviderOptions);
   const settingsZenModel = useConfigStore((state) => state.settingsZenModel);
 
   // Check if server TTS is available
@@ -150,32 +172,41 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
       return false;
     }
 
-    const hasClientKey = Boolean(openaiApiKey && openaiApiKey.trim().length > 0);
-    const hasCustomUrl = Boolean(openaiCompatibleUrl && openaiCompatibleUrl.trim().length > 0);
-    if (availabilityMode === 'openai-compatible') {
-      setIsAvailable(hasCustomUrl);
-      return hasCustomUrl;
-    }
+    const hasClientKey = Boolean(ttsApiKey && ttsApiKey.trim().length > 0);
+    const hasCustomUrl = Boolean(ttsBaseURL && ttsBaseURL.trim().length > 0);
+    const effectiveMode: 'auto' | ServerTtsAvailabilityMode = availabilityMode === 'auto'
+      ? (isServerTtsProvider(ttsProvider) ? ttsProvider : 'auto')
+      : availabilityMode;
 
-    if (hasClientKey) {
+    if (effectiveMode === 'edge-tts') {
       setIsAvailable(true);
       return true;
     }
 
-    if (availabilityMode === 'auto' && hasCustomUrl) {
+    if (effectiveMode === 'openai-compatible') {
+      setIsAvailable(hasCustomUrl);
+      return hasCustomUrl;
+    }
+
+    if (effectiveMode === 'speech-sdk' && (ttsApiKeyMode === 'client' || ttsApiKeyMode === 'gateway') && hasClientKey) {
       setIsAvailable(true);
       return true;
     }
 
     try {
-      const hasServerKey = await getServerTTSStatus();
-      setIsAvailable(hasServerKey);
-      return hasServerKey;
+      const status = await getServerTTSStatus();
+      const speechSdkStatus = status.providers?.find((provider) => provider.id === 'speech-sdk');
+
+      const available = effectiveMode === 'speech-sdk'
+        ? Boolean(speechSdkStatus?.configured) || Boolean(speechSdkStatus?.gatewayConfigured)
+        : status.available;
+      setIsAvailable(Boolean(available));
+      return Boolean(available);
     } catch {
       setIsAvailable(false);
       return false;
     }
-  }, [availabilityMode, enabled, openaiApiKey, openaiCompatibleUrl]);
+  }, [availabilityMode, enabled, ttsApiKey, ttsApiKeyMode, ttsBaseURL, ttsProvider]);
 
   // Check availability on mount and when API key changes
   useEffect(() => {
@@ -260,7 +291,7 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
       // Create abort controller for this request
       abortControllerRef.current = new AbortController();
 
-      const voice = options?.voice || 'nova';
+      const voice = options?.voice || ttsVoice || 'coral';
       console.log('[useServerTTS] Speaking with voice:', voice, 'options:', options);
 
       // Fetch audio from server
@@ -271,9 +302,13 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
         },
         body: JSON.stringify({
           text: text.trim(),
+          provider: options?.provider || ttsProvider,
+          speechSdkProvider: options?.speechSdkProvider || ttsSpeechSdkProvider,
           voice,
-          model: options?.model || undefined,
-          speed: options?.speed || 0.9,
+          model: options?.model || ttsModel || undefined,
+          speed: options?.speed ?? ttsRate ?? 0.9,
+          pitch: options?.pitch ?? ttsPitch ?? 1,
+          volume: options?.volume ?? ttsVolume ?? 1,
           instructions: options?.instructions,
           summarize: options?.summarize ?? true, // Summarize by default for voice output
           // Use provided provider/model, or fall back to current chat model
@@ -283,10 +318,11 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
           threshold: options?.threshold ?? summarizeCharacterThreshold ?? 200,
           // Max character length for summaries
           maxLength: summarizeMaxLength ?? 500,
-          // Send API key from settings if available
-          apiKey: openaiApiKey || undefined,
-          // Send custom base URL for OpenAI-compatible servers
-          baseURL: options?.baseURL || undefined,
+          apiKeyMode: options?.apiKeyMode || ttsApiKeyMode,
+          apiKey: (options?.apiKeyMode || ttsApiKeyMode) !== 'server' ? (ttsApiKey || undefined) : undefined,
+          baseURL: options?.baseURL || ttsBaseURL || undefined,
+          timestamps: options?.timestamps ?? ttsTimestampsEnabled,
+          providerOptions: options?.providerOptions ?? ttsProviderOptions,
           ...(settingsZenModel ? { zenModel: settingsZenModel } : {}),
         }),
         signal: abortControllerRef.current.signal,
@@ -310,13 +346,13 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
       source.buffer = audioBuffer;
 
       // Apply pitch shift via detune (cents): 1200 cents = 1 octave
-      const pitch = options?.pitch ?? 1.0;
+      const pitch = options?.pitch ?? ttsPitch ?? 1.0;
       if (pitch !== 1.0) {
         source.detune.value = (pitch - 1.0) * 1200;
       }
 
       // Apply volume via GainNode
-      const volume = options?.volume ?? 1.0;
+      const volume = options?.volume ?? ttsVolume ?? 1.0;
       const gainNode = ctx.createGain();
       gainNode.gain.value = volume;
 
@@ -350,7 +386,7 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
       options?.onError?.(errorMsg);
       setIsPlaying(false);
     }
-  }, [stop, currentProviderId, currentModelId, summarizeCharacterThreshold, summarizeMaxLength, openaiApiKey, settingsZenModel]);
+  }, [stop, currentProviderId, currentModelId, summarizeCharacterThreshold, summarizeMaxLength, settingsZenModel, ttsApiKey, ttsApiKeyMode, ttsBaseURL, ttsModel, ttsPitch, ttsProvider, ttsProviderOptions, ttsRate, ttsSpeechSdkProvider, ttsTimestampsEnabled, ttsVoice, ttsVolume]);
 
   // Cleanup on unmount
   useEffect(() => {

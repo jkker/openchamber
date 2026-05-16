@@ -26,6 +26,7 @@ import { flattenAssistantTextParts, suggestPlanTitleFromText } from '@/lib/messa
 import { MULTIRUN_EXECUTION_FORK_PROMPT_META_TEXT } from '@/lib/messages/executionMeta';
 import { useMessageTTS } from '@/hooks/useMessageTTS';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { getTtsProviderLabel } from '@/lib/voice/ttsConfig';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { TextSelectionMenu } from './TextSelectionMenu';
 import { copyTextToClipboard } from '@/lib/clipboard';
@@ -608,7 +609,7 @@ const AssistantMessageActionButtons = React.memo(({
     const chatSurfaceMode = useChatSurfaceMode();
     const { isPlaying: isTTSPlaying, play: playTTS, stop: stopTTS } = useMessageTTS();
     const showMessageTTSButtons = useConfigStore((state) => state.showMessageTTSButtons);
-    const voiceProvider = useConfigStore((state) => state.voiceProvider);
+    const voiceProvider = useConfigStore((state) => state.ttsProvider);
     const [copyHintVisible, setCopyHintVisible] = React.useState(false);
     const [isMessageCopied, setIsMessageCopied] = React.useState(false);
     const [isSharing, setIsSharing] = React.useState(false);
@@ -714,13 +715,7 @@ const AssistantMessageActionButtons = React.memo(({
         if (isTTSPlaying) {
             return t('chat.messageBody.tts.stopSpeaking');
         }
-        const providerLabel = voiceProvider === 'browser'
-            ? 'Browser'
-            : voiceProvider === 'openai'
-                ? 'OpenAI'
-                : voiceProvider === 'openai-compatible'
-                    ? 'Custom'
-                    : 'Say';
+        const providerLabel = getTtsProviderLabel(voiceProvider);
         return t('chat.messageBody.tts.readAloudWithProvider', { provider: providerLabel });
     }, [isTTSPlaying, t, voiceProvider]);
 
