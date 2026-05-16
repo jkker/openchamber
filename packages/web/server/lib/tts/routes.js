@@ -1,6 +1,7 @@
 import express from 'express';
 import { normalizeCustomOpenAIBaseURL } from './base-url.js';
 import { summarizeText, sanitizeForTTS, sanitizeForNote, sanitizeForNotification } from '../text/summarization.js';
+import { generateTTS, getProviderMetadata, listEdgeVoices } from './providers/index.js';
 
 export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
   let ttsModulePromise = null;
@@ -10,6 +11,32 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
     }
     return ttsModulePromise;
   };
+
+  // --- Provider metadata endpoint ---
+  app.get('/api/tts/providers', (_req, res) => {
+    try {
+      res.json({ providers: getProviderMetadata() });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to list providers' });
+    }
+  });
+
+  // --- Voice list endpoint ---
+  app.get('/api/tts/voices', async (req, res) => {
+    const provider = typeof req.query.provider === 'string' ? req.query.provider : 'edge-tts';
+    try {
+      if (provider === 'edge-tts') {
+        const locale = typeof req.query.locale === 'string' ? req.query.locale : undefined;
+        const gender = typeof req.query.gender === 'string' ? req.query.gender : undefined;
+        const voices = await listEdgeVoices({ locale, gender });
+        return res.json({ provider: 'edge-tts', voices });
+      }
+      return res.status(400).json({ error: `Voice list not available for provider '${provider}'` });
+    } catch (error) {
+      console.error('[TTS/voices] Error:', error);
+      return res.status(500).json({ error: 'Failed to list voices' });
+    }
+  });
 
   app.post('/api/voice/token', async (req, res) => {
     console.log('[Voice] Token request received:', {
@@ -41,35 +68,55 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
     }
   });
 
-  // Server-side TTS endpoint - streams audio from OpenAI TTS API
+  // Server-side TTS endpoint — routes through provider registry.
+  // Backward compatible: existing {voice, model, speed, apiKey, baseURL} bodies still work.
   app.post('/api/tts/speak', async (req, res) => {
     try {
-      const { text, voice = 'nova', model = 'gpt-4o-mini-tts', speed = 0.9, instructions, summarize = false, providerId, modelId, threshold = 200, maxLength = 500, apiKey, baseURL } = req.body || {};
+      const {
+        text,
+        voice = 'nova',
+        model,
+        speed = 0.9,
+        instructions,
+        summarize = false,
+        threshold = 200,
+        maxLength = 500,
+        apiKey,
+        baseURL,
+        // New provider-registry fields
+        provider,
+        sdkProvider,
+        pitch,
+        volume,
+        timestamps = false,
+      } = req.body || {};
 
-      const normalizedBaseURLResult = normalizeCustomOpenAIBaseURL(baseURL);
-      if (normalizedBaseURLResult.error) {
-        return res.status(400).json({ error: normalizedBaseURLResult.error });
-      }
-      const normalizedBaseURL = normalizedBaseURLResult.value;
-
-      console.log('[TTS] Request received:', { voice, model, speed, textLength: text?.length, hasApiKey: !!apiKey, hasBaseURL: !!baseURL });
+      console.log('[TTS] Request received:', { provider, sdkProvider, voice, model, speed, textLength: text?.length, hasApiKey: !!apiKey, hasBaseURL: !!baseURL });
 
       if (!text || typeof text !== 'string' || !text.trim()) {
         return res.status(400).json({ error: 'Text is required' });
       }
 
-      // Dynamically import the TTS service (ESM)
-      const { ttsService } = await getTtsModule();
+      // Validate baseURL if present (for openai-compatible backward compat)
+      if (baseURL) {
+        const normalizedBaseURLResult = normalizeCustomOpenAIBaseURL(baseURL);
+        if (normalizedBaseURLResult.error) {
+          return res.status(400).json({ error: normalizedBaseURLResult.error });
+        }
+      }
 
-      // Check availability - server-configured key, client-provided key, or custom server URL
-      const hasServerKey = ttsService.isAvailable();
+      // For legacy openai-compatible requests without explicit provider field, check OpenAI availability
+      const isLegacyOpenAI = !provider || provider === 'openai-compatible';
       const hasClientKey = apiKey && typeof apiKey === 'string' && apiKey.trim().length > 0;
-      const hasCustomBaseURL = typeof normalizedBaseURL === 'string' && normalizedBaseURL.length > 0;
-      
-      if (!hasServerKey && !hasClientKey && !hasCustomBaseURL) {
-        return res.status(503).json({ 
-          error: 'TTS service not available. Please configure OpenAI in OpenCode, provide an API key, or set a custom server URL in settings.' 
-        });
+      const hasCustomBaseURL = typeof baseURL === 'string' && baseURL.trim().length > 0;
+
+      if (isLegacyOpenAI && !hasCustomBaseURL && !hasClientKey) {
+        const { ttsService } = await getTtsModule();
+        if (!ttsService.isAvailable()) {
+          return res.status(503).json({
+            error: 'TTS service not available. Please configure OpenAI in OpenCode, provide an API key, or set a custom server URL in settings.',
+          });
+        }
       }
 
       let textToSpeak = text.trim();
@@ -79,7 +126,6 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
         try {
           const speakZenModel = await resolveZenModel(typeof req.body?.zenModel === 'string' ? req.body.zenModel : undefined);
           const result = await summarizeText({ text: textToSpeak, threshold, maxLength, zenModel: speakZenModel, mode: 'tts' });
-          
           if (result.summarized && result.summary) {
             textToSpeak = result.summary;
           }
@@ -89,30 +135,57 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
         }
       }
 
-      const result = await ttsService.generateSpeechStream({
-        text: textToSpeak,
-        voice,
+      // For legacy requests using the server OpenAI key (no provider, no baseURL, no clientKey),
+      // fall back to the original ttsService to preserve key-resolution behavior.
+      if (isLegacyOpenAI && !hasCustomBaseURL && !hasClientKey) {
+        const { ttsService } = await getTtsModule();
+        const result = await ttsService.generateSpeechStream({
+          text: textToSpeak,
+          voice,
+          model: model || 'gpt-4o-mini-tts',
+          speed,
+          instructions,
+          apiKey: undefined,
+          baseURL: undefined,
+        });
+        res.setHeader('Content-Type', result.contentType);
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Content-Length', result.buffer.length);
+        return res.send(result.buffer);
+      }
+
+      const result = await generateTTS({
+        provider,
+        sdkProvider,
         model,
+        voice,
+        text: textToSpeak,
         speed,
-        instructions,
+        pitch,
+        volume,
+        timestamps,
         apiKey: hasClientKey ? apiKey.trim() : undefined,
-        baseURL: hasCustomBaseURL ? normalizedBaseURL : undefined,
+        baseURL: hasCustomBaseURL ? baseURL.trim() : undefined,
+        instructions,
       });
 
       res.setHeader('Content-Type', result.contentType);
       res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Content-Length', result.buffer.length);
-      res.send(result.buffer);
-      } catch (error) {
-        console.error('[TTS] Error:', error);
-        if (!res.headersSent) {
-          const { model: m, voice: v, baseURL: b } = req.body || {};
-          res.status(500).json({ 
-            error: error instanceof Error ? error.message : 'TTS generation failed',
-            detail: { model: m, voice: v, hasBaseURL: !!b },
-          });
-        }
+      res.setHeader('Content-Length', result.audio.length);
+      if (timestamps && result.timestamps) {
+        res.setHeader('X-TTS-Has-Timestamps', '1');
       }
+      return res.send(result.audio);
+    } catch (error) {
+      console.error('[TTS] Error:', error);
+      if (!res.headersSent) {
+        const { model: m, voice: v, baseURL: b, provider: p } = req.body || {};
+        res.status(500).json({
+          error: error instanceof Error ? error.message : 'TTS generation failed',
+          detail: { provider: p, model: m, voice: v, hasBaseURL: !!b },
+        });
+      }
+    }
   });
 
   app.post('/api/text/summarize', async (req, res) => {

@@ -539,8 +539,26 @@ interface ConfigStore {
     settingsZenModel: string | undefined;
     settingsMessageStreamTransport: 'auto' | 'ws' | 'sse';
     // Voice provider preference ('browser', 'openai', 'openai-compatible', or 'say' for macOS)
+    // Legacy field — preserved for backward compatibility. New code should use ttsProvider.
     voiceProvider: 'browser' | 'openai' | 'openai-compatible' | 'say';
     setVoiceProvider: (provider: 'browser' | 'openai' | 'openai-compatible' | 'say') => void;
+    // New provider-agnostic TTS provider field
+    ttsProvider: 'browser' | 'edge-tts' | 'speech-sdk' | 'openai-compatible' | 'say';
+    setTtsProvider: (provider: 'browser' | 'edge-tts' | 'speech-sdk' | 'openai-compatible' | 'say') => void;
+    // Speech SDK sub-provider (openai, elevenlabs, deepgram, cartesia, etc.)
+    ttsSpeechSdkProvider: string;
+    setTtsSpeechSdkProvider: (provider: string) => void;
+    // Provider-agnostic model / voice / URL / key
+    ttsModel: string;
+    setTtsModel: (model: string) => void;
+    ttsVoice: string;
+    setTtsVoice: (voice: string) => void;
+    ttsBaseURL: string;
+    setTtsBaseURL: (url: string) => void;
+    ttsApiKey: string;
+    setTtsApiKey: (key: string) => void;
+    ttsTimestampsEnabled: boolean;
+    setTtsTimestampsEnabled: (enabled: boolean) => void;
     // TTS settings
     speechRate: number;
     speechPitch: number;
@@ -763,6 +781,82 @@ export const useConfigStore = create<ConfigStore>()(
                         if (saved && saved !== 'speaches-ai/Kokoro-82M-v1.0-ONNX') return saved;
                     }
                     return 'kokoro';
+                })(),
+                // New provider-agnostic TTS fields — migrate from legacy voiceProvider on first access
+                ttsProvider: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('ttsProvider');
+                        if (saved === 'browser' || saved === 'edge-tts' || saved === 'speech-sdk' || saved === 'openai-compatible' || saved === 'say') return saved;
+                        // Migrate from legacy voiceProvider
+                        const legacy = localStorage.getItem('voiceProvider');
+                        if (legacy === 'openai') return 'speech-sdk' as const;
+                        if (legacy === 'openai-compatible') return 'openai-compatible' as const;
+                        if (legacy === 'say') return 'say' as const;
+                    }
+                    return 'browser' as const;
+                })(),
+                ttsSpeechSdkProvider: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('ttsSpeechSdkProvider');
+                        if (saved) return saved;
+                        // Migrate: if legacy was openai, default to openai sub-provider
+                        const legacy = localStorage.getItem('voiceProvider');
+                        if (legacy === 'openai') return 'openai';
+                    }
+                    return 'openai';
+                })(),
+                ttsModel: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('ttsModel');
+                        if (saved) return saved;
+                        // Migrate from openaiCompatibleTtsModel
+                        const legacy = localStorage.getItem('openaiCompatibleTtsModel');
+                        if (legacy && legacy !== 'speaches-ai/Kokoro-82M-v1.0-ONNX') return legacy;
+                    }
+                    return '';
+                })(),
+                ttsVoice: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('ttsVoice');
+                        if (saved) return saved;
+                        // Migrate from legacy voice fields
+                        const legacyProvider = localStorage.getItem('voiceProvider');
+                        if (legacyProvider === 'openai') {
+                            const v = localStorage.getItem('openaiVoice');
+                            if (v) return v;
+                        } else if (legacyProvider === 'openai-compatible') {
+                            const v = localStorage.getItem('openaiCompatibleVoice');
+                            if (v) return v;
+                        }
+                    }
+                    return '';
+                })(),
+                ttsBaseURL: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('ttsBaseURL');
+                        if (saved) return saved;
+                        // Migrate from openaiCompatibleUrl
+                        const legacy = localStorage.getItem('openaiCompatibleUrl');
+                        if (legacy) return legacy;
+                    }
+                    return '';
+                })(),
+                ttsApiKey: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('ttsApiKey');
+                        if (saved) return saved;
+                        // Migrate from openaiApiKey
+                        const legacy = localStorage.getItem('openaiApiKey');
+                        if (legacy) return legacy;
+                    }
+                    return '';
+                })(),
+                ttsTimestampsEnabled: (() => {
+                    if (typeof window !== 'undefined') {
+                        const saved = localStorage.getItem('ttsTimestampsEnabled');
+                        if (saved !== null) return saved === 'true';
+                    }
+                    return false;
                 })(),
                 // STT provider: 'browser' (Web Speech API), 'server' (OpenAI-compat), 'wasm' (local Whisper)
                 sttProvider: (() => {
@@ -1897,6 +1991,55 @@ export const useConfigStore = create<ConfigStore>()(
                     set({ openaiCompatibleTtsModel: model });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('openaiCompatibleTtsModel', model);
+                    }
+                },
+
+                setTtsProvider: (provider: 'browser' | 'edge-tts' | 'speech-sdk' | 'openai-compatible' | 'say') => {
+                    set({ ttsProvider: provider });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsProvider', provider);
+                    }
+                },
+
+                setTtsSpeechSdkProvider: (provider: string) => {
+                    set({ ttsSpeechSdkProvider: provider });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsSpeechSdkProvider', provider);
+                    }
+                },
+
+                setTtsModel: (model: string) => {
+                    set({ ttsModel: model });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsModel', model);
+                    }
+                },
+
+                setTtsVoice: (voice: string) => {
+                    set({ ttsVoice: voice });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsVoice', voice);
+                    }
+                },
+
+                setTtsBaseURL: (url: string) => {
+                    set({ ttsBaseURL: url });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsBaseURL', url);
+                    }
+                },
+
+                setTtsApiKey: (key: string) => {
+                    set({ ttsApiKey: key });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsApiKey', key);
+                    }
+                },
+
+                setTtsTimestampsEnabled: (enabled: boolean) => {
+                    set({ ttsTimestampsEnabled: enabled });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsTimestampsEnabled', String(enabled));
                     }
                 },
 

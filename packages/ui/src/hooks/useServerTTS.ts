@@ -1,21 +1,3 @@
-/**
- * useServerTTS Hook
- * 
- * React hook for server-side text-to-speech playback.
- * Fetches audio from the server and plays it, bypassing mobile Safari restrictions.
- * 
- * @example
- * ```typescript
- * const { speak, isPlaying, stop, isAvailable } = useServerTTS();
- * 
- * // Speak text
- * await speak('Hello, this is a test');
- * 
- * // Stop playback
- * stop();
- * ```
- */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '@/stores/useConfigStore';
 
@@ -84,9 +66,13 @@ export interface UseServerTTSReturn {
 }
 
 export interface SpeakOptions {
-  /** Voice to use (defaults to coral) */
+  /** TTS provider (e.g. 'browser', 'edge-tts', 'speech-sdk', 'openai-compatible', 'say') */
+  provider?: string;
+  /** Speech SDK sub-provider (e.g. 'openai', 'elevenlabs') */
+  sdkProvider?: string;
+  /** Voice to use */
   voice?: string;
-  /** Model to use (defaults to gpt-4o-mini-tts) */
+  /** Model to use */
   model?: string;
   /** Speech speed (0.25 to 4.0, defaults to 1.0) */
   speed?: number;
@@ -96,6 +82,12 @@ export interface SpeakOptions {
   volume?: number;
   /** Optional instructions for the voice */
   instructions?: string;
+  /** Custom base URL for OpenAI-compatible server */
+  baseURL?: string;
+  /** Client API key */
+  apiKey?: string;
+  /** Whether to request word timestamps */
+  timestamps?: boolean;
   /** Summarize long text before speaking (defaults to true) */
   summarize?: boolean;
   /** Provider ID for summarization model */
@@ -104,8 +96,6 @@ export interface SpeakOptions {
   modelId?: string;
   /** Character threshold for summarization (defaults to 200) */
   threshold?: number;
-  /** Custom base URL for OpenAI-compatible server */
-  baseURL?: string;
   /** Callback when playback starts */
   onStart?: () => void;
   /** Callback when playback ends */
@@ -134,13 +124,15 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   
-  // Get current model, threshold, and max length from config store for summarization
+  // Config store selectors
   const currentProviderId = useConfigStore((state) => state.currentProviderId);
   const currentModelId = useConfigStore((state) => state.currentModelId);
   const summarizeCharacterThreshold = useConfigStore((state) => state.summarizeCharacterThreshold);
   const summarizeMaxLength = useConfigStore((state) => state.summarizeMaxLength);
   const openaiApiKey = useConfigStore((state) => state.openaiApiKey);
+  const ttsApiKey = useConfigStore((state) => state.ttsApiKey);
   const openaiCompatibleUrl = useConfigStore((state) => state.openaiCompatibleUrl);
+  const ttsProvider = useConfigStore((state) => state.ttsProvider);
   const settingsZenModel = useConfigStore((state) => state.settingsZenModel);
 
   // Check if server TTS is available
@@ -150,8 +142,18 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
       return false;
     }
 
-    const hasClientKey = Boolean(openaiApiKey && openaiApiKey.trim().length > 0);
+    // Edge TTS is always available server-side (no key required)
+    if (ttsProvider === 'edge-tts') {
+      setIsAvailable(true);
+      return true;
+    }
+
+    const hasClientKey = Boolean(
+      (ttsApiKey && ttsApiKey.trim().length > 0) ||
+      (openaiApiKey && openaiApiKey.trim().length > 0)
+    );
     const hasCustomUrl = Boolean(openaiCompatibleUrl && openaiCompatibleUrl.trim().length > 0);
+
     if (availabilityMode === 'openai-compatible') {
       setIsAvailable(hasCustomUrl);
       return hasCustomUrl;
@@ -175,7 +177,7 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
       setIsAvailable(false);
       return false;
     }
-  }, [availabilityMode, enabled, openaiApiKey, openaiCompatibleUrl]);
+  }, [availabilityMode, enabled, ttsApiKey, openaiApiKey, openaiCompatibleUrl, ttsProvider]);
 
   // Check availability on mount and when API key changes
   useEffect(() => {
@@ -184,7 +186,6 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
 
   // Stop current playback
   const stop = useCallback(() => {
-    // Stop Web Audio API source
     if (audioSourceRef.current) {
       try {
         audioSourceRef.current.stop();
@@ -203,25 +204,18 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
   }, []);
 
   // Pre-unlock audio for mobile Safari
-  // This must be called within a user gesture context
   const unlockAudio = useCallback(async (): Promise<void> => {
     try {
-      // Get or create AudioContext
       const ctx = getAudioContext();
-      
-      // Resume if suspended (required for iOS Safari)
       if (ctx.state === 'suspended') {
         await ctx.resume();
         console.log('[useServerTTS] AudioContext resumed');
       }
-      
-      // Play a tiny silent buffer to fully unlock
       const buffer = ctx.createBuffer(1, 1, 22050);
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(ctx.destination);
       source.start(0);
-      
       console.log('[useServerTTS] Audio unlocked for mobile playback');
     } catch (err) {
       console.error('[useServerTTS] Failed to unlock audio:', err);
@@ -229,64 +223,63 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
   }, []);
 
   // Speak text using server TTS
-  const speak = useCallback(async (text: string, options?: SpeakOptions): Promise<void> => {
-    // Stop any existing playback
+  const speak = useCallback(async (text: string, speakOpts?: SpeakOptions): Promise<void> => {
     stop();
 
     if (!text.trim()) {
       setError('No text to speak');
-      options?.onError?.('No text to speak');
+      speakOpts?.onError?.('No text to speak');
       return;
     }
 
     setError(null);
 
     try {
-      // Unlock audio context first (required for mobile Safari)
-      // Must be done before any async operations to stay within user gesture context
       const ctx = getAudioContext();
       if (ctx.state === 'suspended') {
         await ctx.resume();
         console.log('[useServerTTS] AudioContext resumed');
       }
       
-      // Play a silent buffer to fully unlock audio on iOS
       const silentBuffer = ctx.createBuffer(1, 1, 22050);
       const silentSource = ctx.createBufferSource();
       silentSource.buffer = silentBuffer;
       silentSource.connect(ctx.destination);
       silentSource.start(0);
 
-      // Create abort controller for this request
       abortControllerRef.current = new AbortController();
 
-      const voice = options?.voice || 'nova';
-      console.log('[useServerTTS] Speaking with voice:', voice, 'options:', options);
+      const voice = speakOpts?.voice || 'nova';
+      console.log('[useServerTTS] Speaking with provider:', speakOpts?.provider, 'voice:', voice);
 
-      // Fetch audio from server
+      // Resolve API key: explicit > ttsApiKey > legacy openaiApiKey
+      const resolvedApiKey =
+        speakOpts?.apiKey ||
+        (ttsApiKey && ttsApiKey.trim().length > 0 ? ttsApiKey.trim() : undefined) ||
+        (openaiApiKey && openaiApiKey.trim().length > 0 ? openaiApiKey.trim() : undefined);
+
       const response = await fetch('/api/tts/speak', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: text.trim(),
           voice,
-          model: options?.model || undefined,
-          speed: options?.speed || 0.9,
-          instructions: options?.instructions,
-          summarize: options?.summarize ?? true, // Summarize by default for voice output
-          // Use provided provider/model, or fall back to current chat model
-          providerId: options?.providerId || currentProviderId || undefined,
-          modelId: options?.modelId || currentModelId || undefined,
-          // Use provided threshold, or fall back to user setting, or default to 200
-          threshold: options?.threshold ?? summarizeCharacterThreshold ?? 200,
-          // Max character length for summaries
+          model: speakOpts?.model || undefined,
+          speed: speakOpts?.speed || 0.9,
+          pitch: speakOpts?.pitch,
+          volume: speakOpts?.volume,
+          instructions: speakOpts?.instructions,
+          timestamps: speakOpts?.timestamps ?? false,
+          // New provider routing
+          provider: speakOpts?.provider || undefined,
+          sdkProvider: speakOpts?.sdkProvider || undefined,
+          summarize: speakOpts?.summarize ?? true,
+          providerId: speakOpts?.providerId || currentProviderId || undefined,
+          modelId: speakOpts?.modelId || currentModelId || undefined,
+          threshold: speakOpts?.threshold ?? summarizeCharacterThreshold ?? 200,
           maxLength: summarizeMaxLength ?? 500,
-          // Send API key from settings if available
-          apiKey: openaiApiKey || undefined,
-          // Send custom base URL for OpenAI-compatible servers
-          baseURL: options?.baseURL || undefined,
+          apiKey: resolvedApiKey,
+          baseURL: speakOpts?.baseURL || undefined,
           ...(settingsZenModel ? { zenModel: settingsZenModel } : {}),
         }),
         signal: abortControllerRef.current.signal,
@@ -297,26 +290,21 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
         throw new Error(errorData.error || `HTTP ${response.status}`);
       }
 
-      // Get audio data from response
       const audioBlob = await response.blob();
       const arrayBuffer = await audioBlob.arrayBuffer();
       
-      // Decode audio data using the same context we unlocked earlier
       console.log('[useServerTTS] Decoding audio data...');
       const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
       
-      // Create source node
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
 
-      // Apply pitch shift via detune (cents): 1200 cents = 1 octave
-      const pitch = options?.pitch ?? 1.0;
+      const pitch = speakOpts?.pitch ?? 1.0;
       if (pitch !== 1.0) {
         source.detune.value = (pitch - 1.0) * 1200;
       }
 
-      // Apply volume via GainNode
-      const volume = options?.volume ?? 1.0;
+      const volume = speakOpts?.volume ?? 1.0;
       const gainNode = ctx.createGain();
       gainNode.gain.value = volume;
 
@@ -324,33 +312,30 @@ export function useServerTTS(options: UseServerTTSOptions = {}): UseServerTTSRet
       gainNode.connect(ctx.destination);
       audioSourceRef.current = source;
       
-      // Set up event handlers
       source.onended = () => {
         console.log('[useServerTTS] Audio playback ended');
         setIsPlaying(false);
         audioSourceRef.current = null;
-        options?.onEnd?.();
+        speakOpts?.onEnd?.();
       };
       
-      // Start playback
       console.log('[useServerTTS] Starting audio playback via Web Audio API...');
       setIsPlaying(true);
-      options?.onStart?.();
+      speakOpts?.onStart?.();
       source.start(0);
       
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
-        // Request was aborted, don't show error
         return;
       }
       
       const errorMsg = err instanceof Error ? err.message : 'Failed to speak';
       console.error('[useServerTTS] Error:', errorMsg);
       setError(errorMsg);
-      options?.onError?.(errorMsg);
+      speakOpts?.onError?.(errorMsg);
       setIsPlaying(false);
     }
-  }, [stop, currentProviderId, currentModelId, summarizeCharacterThreshold, summarizeMaxLength, openaiApiKey, settingsZenModel]);
+  }, [stop, currentProviderId, currentModelId, summarizeCharacterThreshold, summarizeMaxLength, ttsApiKey, openaiApiKey, settingsZenModel]);
 
   // Cleanup on unmount
   useEffect(() => {
