@@ -1,10 +1,3 @@
-const EXPANDABLE_TOOL_NAMES = new Set<string>([
-    'edit', 'multiedit', 'apply_patch', 'str_replace', 'str_replace_based_edit_tool',
-    'bash', 'shell', 'cmd', 'terminal',
-    'write', 'create', 'file_write',
-    'question',
-]);
-
 const STANDALONE_TOOL_NAMES = new Set<string>(['task']);
 
 const STATIC_TOOL_NAMES = new Set<string>([
