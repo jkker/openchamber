@@ -1,5 +1,5 @@
 import React from 'react';
-import type { Part } from '@opencode-ai/sdk/v2';
+import type { Part, TextPart } from '@opencode-ai/sdk/v2';
 
 import UserTextPart from './parts/UserTextPart';
 import ToolPart from './parts/ToolPart';
@@ -284,6 +284,7 @@ interface MessageBodyProps {
     messageFinish?: string;
     messageCompletedAt?: number;
     messageCreatedAt?: number;
+    outputTokens?: number;
 
     syntaxTheme: { [key: string]: React.CSSProperties };
 
@@ -846,6 +847,7 @@ const AssistantMessageBody = React.memo(({
     messageFinish,
     messageCompletedAt,
     messageCreatedAt,
+    outputTokens,
 
     syntaxTheme,
     isMobile,
@@ -1722,6 +1724,27 @@ const AssistantMessageBody = React.memo(({
         return formatTurnDuration(messageCompletedAt - userCreatedAt);
     }, [isLastAssistantInTurn, hasStopFinish, turnGroupingContext?.userMessageCreatedAt, messageCompletedAt]);
 
+    const tpsText = React.useMemo(() => {
+        if (!isLastAssistantInTurn || !hasStopFinish) return undefined;
+        const userCreatedAt = turnGroupingContext?.userMessageCreatedAt;
+        if (typeof userCreatedAt !== 'number' || typeof messageCompletedAt !== 'number' || typeof outputTokens !== 'number') return undefined;
+        const durationSec = (messageCompletedAt - userCreatedAt) / 1000;
+        if (durationSec <= 0 || outputTokens <= 0) return undefined;
+        return `${(outputTokens / durationSec).toFixed(1)} t/s`;
+    }, [isLastAssistantInTurn, hasStopFinish, turnGroupingContext?.userMessageCreatedAt, messageCompletedAt, outputTokens]);
+
+    const ttftText = React.useMemo(() => {
+        if (!isLastAssistantInTurn || !hasStopFinish) return undefined;
+        const msgCreated = messageCreatedAt;
+        if (typeof msgCreated !== 'number') return undefined;
+        const firstTextPart = parts.find((p): p is TextPart => p.type === 'text' && typeof (p as { time?: { start?: number } }).time?.start === 'number');
+        if (!firstTextPart) return undefined;
+        const ttStart = (firstTextPart as unknown as { time: { start: number } }).time.start;
+        const ttftMs = ttStart - msgCreated;
+        if (ttftMs <= 0) return undefined;
+        return ttftMs < 1000 ? `${ttftMs}ms` : `${(ttftMs / 1000).toFixed(1)}s`;
+    }, [isLastAssistantInTurn, hasStopFinish, messageCreatedAt, parts]);
+
     const footerTimestamp = React.useMemo(() => {
         const timestamp = typeof messageCompletedAt === 'number' && messageCompletedAt > 0
             ? messageCompletedAt
@@ -1895,6 +1918,28 @@ const AssistantMessageBody = React.memo(({
                                         </span>
                                     </TooltipTrigger>
                                     <TooltipContent>{turnDurationText}</TooltipContent>
+                                </Tooltip>
+                            ) : null}
+                            {tpsText ? (
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <span className="text-sm text-muted-foreground/60 tabular-nums flex items-center gap-1">
+                                            <Icon name="pulse" className="h-3.5 w-3.5" />
+                                            <span className="message-footer__label">{tpsText}</span>
+                                        </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Tokens per second</TooltipContent>
+                                </Tooltip>
+                            ) : null}
+                            {ttftText ? (
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <span className="text-sm text-muted-foreground/60 tabular-nums flex items-center gap-1">
+                                            <Icon name="flashlight" className="h-3.5 w-3.5" />
+                                            <span className="message-footer__label">{ttftText}</span>
+                                        </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Time to first token</TooltipContent>
                                 </Tooltip>
                             ) : null}
                             {footerTimestamp ? (
