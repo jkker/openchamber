@@ -737,7 +737,7 @@ const ToolScrollableSection: React.FC<ToolScrollableSectionProps> = ({
     </div>
 );
 
-const hasStructuredValue = (value: unknown): value is Record<string, unknown> | unknown[] => {
+const isStructuredValue = (value: unknown): value is Record<string, unknown> | unknown[] => {
     if (Array.isArray(value)) {
         return true;
     }
@@ -772,6 +772,22 @@ const shouldRenderToolOutputAsMarkdown = (toolName: string): boolean => {
     }
 
     return getToolMetadata(normalizedToolName).outputLanguage === 'markdown';
+};
+
+const isEditLikeTool = (toolName: string): boolean => {
+    return toolName === 'edit' || toolName === 'multiedit' || toolName === 'apply_patch';
+};
+
+const shouldSkipGenericInputRendering = (
+    toolName: string,
+    hideToolInputPreview: boolean,
+    isWriteLikeTool: boolean,
+): boolean => {
+    return hideToolInputPreview
+        || isWriteLikeTool
+        || toolName === 'bash'
+        || toolName === 'question'
+        || toolName === 'task';
 };
 
 const getToolOutputLanguage = (
@@ -1562,7 +1578,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
     const rawOutput = stateWithData.output;
     const hasStringOutput = typeof rawOutput === 'string' && rawOutput.length > 0;
     const outputString = typeof rawOutput === 'string' ? rawOutput : '';
-    const hasStructuredOutput = !hasStringOutput && hasStructuredValue(rawOutput);
+    const hasStructuredOutput = !hasStringOutput && isStructuredValue(rawOutput);
     const hasMarkdownOutput = hasStringOutput && shouldRenderToolOutputAsMarkdown(normalizedToolName || part.tool);
 
     const diffContent = getPatchText((metadata as { patch?: unknown } | undefined)?.patch)
@@ -1572,9 +1588,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
         () => (diffContent ? getDiffPatchEntries(metadata, diffContent, currentDirectory) : []),
         [currentDirectory, diffContent, metadata]
     );
-    const hideToolInputPreview = normalizedToolName === 'apply_patch'
-        || normalizedToolName === 'edit'
-        || normalizedToolName === 'multiedit';
+    const hideToolInputPreview = isEditLikeTool(normalizedToolName);
     const diagnosticSection = React.useMemo(
         () => getToolDiagnosticSection(part.tool, input, metadata, currentDirectory),
         [currentDirectory, input, metadata, part.tool],
@@ -1597,7 +1611,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
     }, [input, normalizedToolName, part.tool]);
     const isWriteLikeTool = normalizedToolName === 'write' || normalizedToolName === 'create' || normalizedToolName === 'file_write';
     const genericStructuredInput = React.useMemo(() => {
-        if (hideToolInputPreview || isWriteLikeTool || normalizedToolName === 'bash' || normalizedToolName === 'question' || normalizedToolName === 'task') {
+        if (shouldSkipGenericInputRendering(normalizedToolName, hideToolInputPreview, isWriteLikeTool)) {
             return null;
         }
 
@@ -1755,7 +1769,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
             );
         }
 
-        if ((normalizedToolName === 'edit' || normalizedToolName === 'multiedit' || normalizedToolName === 'apply_patch' || normalizedToolName === 'write') && (diffEntries.length > 0 || !!diagnosticSection)) {
+        if ((isEditLikeTool(normalizedToolName) || normalizedToolName === 'write') && (diffEntries.length > 0 || !!diagnosticSection)) {
             return renderScrollableBlock(
                 <div className="space-y-3">
                     {diffEntries.map((entry) => (
@@ -1880,7 +1894,7 @@ const ToolExpandedContent: React.FC<ToolExpandedContentProps> = React.memo(({
 
                     {state.status === 'completed' && 'output' in state && (
                         <div>
-                            {(normalizedToolName === 'edit' || normalizedToolName === 'multiedit' || normalizedToolName === 'apply_patch' || normalizedToolName === 'write') && diffContent ? (
+                            {(isEditLikeTool(normalizedToolName) || normalizedToolName === 'write') && diffContent ? (
                                 <div className="mb-1 flex items-center justify-end gap-2">
                                     <DiffViewToggle
                                         mode={diffViewMode}
