@@ -63,7 +63,15 @@ export const useProjectSessionLists = (args: Args) => {
     };
   }, [archivedSessions, sessions]);
 
-  const includeDescendants = React.useCallback((input: Session[], childrenByParent: Map<string, Session[]>): Session[] => {
+  // BFS expansion from `input` through `childrenByParent`. Descendants are kept
+  // only if `keep` returns true; non-matching nodes also block their subtree
+  // from being expanded, preserving the pre-branch invariant that off-project
+  // sessions don't leak into a project's list via a parent linkage.
+  const includeDescendants = React.useCallback((
+    input: Session[],
+    childrenByParent: Map<string, Session[]>,
+    keep: (session: Session) => boolean,
+  ): Session[] => {
     if (input.length === 0) {
       return input;
     }
@@ -76,6 +84,9 @@ export const useProjectSessionLists = (args: Args) => {
         continue;
       }
       seen.add(current.id);
+      if (!keep(current)) {
+        continue;
+      }
       out.push(current);
       const children = childrenByParent.get(current.id);
       if (children && children.length > 0) {
@@ -112,7 +123,12 @@ export const useProjectSessionLists = (args: Args) => {
           collected.push(session);
         });
       });
-      const result = includeDescendants(collected, sessionPools.activeChildrenByParent);
+      const validDirectories = new Set(directories);
+      const result = includeDescendants(
+        collected,
+        sessionPools.activeChildrenByParent,
+        (session) => isSessionRelatedToProject(session, project.normalizedPath, validDirectories),
+      );
       return result;
     },
     [availableWorktreesByProject, includeDescendants, isVSCode, sessionPools.activeChildrenByParent, sessionsByDirectory],
@@ -121,16 +137,16 @@ export const useProjectSessionLists = (args: Args) => {
   const getArchivedSessionsForProject = React.useCallback(
     (project: { normalizedPath: string }) => {
       if (isVSCode) {
-        const archived = archivedSessions.filter((session) => {
+        const isVSCodeProjectMatch = (session: Session): boolean => {
           const sessionDirectory = normalizePath((session as Session & { directory?: string | null }).directory ?? null);
           const projectWorktree = normalizePath((session as Session & { project?: { worktree?: string | null } | null }).project?.worktree ?? null);
-
           if (sessionDirectory) {
             return sessionDirectory === project.normalizedPath;
           }
-
           return projectWorktree === project.normalizedPath;
-        });
+        };
+
+        const archived = archivedSessions.filter(isVSCodeProjectMatch);
 
         const unassignedLive = sessions.filter((session) => {
           if (session.time?.archived) {
@@ -145,7 +161,11 @@ export const useProjectSessionLists = (args: Args) => {
         });
 
         const base = dedupeSessionsById([...archived, ...unassignedLive]);
-        const result = includeDescendants(base, sessionPools.archivedLikeChildrenByParent);
+        const result = includeDescendants(
+          base,
+          sessionPools.archivedLikeChildrenByParent,
+          isVSCodeProjectMatch,
+        );
         return result;
       }
 
@@ -178,7 +198,11 @@ export const useProjectSessionLists = (args: Args) => {
       });
 
       const base = dedupeSessionsById([...archived, ...unassignedLive]);
-      const result = includeDescendants(base, sessionPools.archivedLikeChildrenByParent);
+      const result = includeDescendants(
+        base,
+        sessionPools.archivedLikeChildrenByParent,
+        (session) => isSessionRelatedToProject(session, project.normalizedPath, validDirectories),
+      );
       return result;
     },
     [archivedSessions, availableWorktreesByProject, includeDescendants, isVSCode, sessionPools.archivedLikeChildrenByParent, sessions],

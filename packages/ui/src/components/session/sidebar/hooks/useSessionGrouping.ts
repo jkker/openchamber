@@ -130,11 +130,6 @@ export const useSessionGrouping = (args: Args) => {
         const parentSession = sessionMap.get(parentID);
         return !parentSession;
       });
-      const attachedChildIds = new Set<string>();
-      childrenMap.forEach((children) => {
-        children.forEach((child) => attachedChildIds.add(child.id));
-      });
-      const strictRoots = roots.filter((session) => !attachedChildIds.has(session.id));
 
       const groupedNodes = new Map<string, SessionNode[]>();
       const archivedKey = '__archived__';
@@ -152,7 +147,7 @@ export const useSessionGrouping = (args: Args) => {
         return archivedKey;
       };
 
-      strictRoots.forEach((session) => {
+      roots.forEach((session) => {
         const node = buildProjectNode(session);
         const groupKey = getGroupKey(session);
         if (!groupedNodes.has(groupKey)) groupedNodes.set(groupKey, []);

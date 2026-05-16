@@ -291,6 +291,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             throw new Error(`Search failed: ${response.status}`);
           }
           const payload = await response.json() as { ids?: unknown };
+          if (controller.signal.aborted) return;
           const ids = Array.isArray(payload.ids) ? payload.ids.filter((value): value is string => typeof value === 'string') : [];
           setSearchedSessionIds(new Set(ids));
         })
@@ -720,6 +721,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         window.clearTimeout(pendingTransitionTimeoutRef.current);
       }
 
+      // Failsafe: if `openchamber:session-ready` never fires (sync stalled, target
+      // session deleted mid-transition, etc.), drop the optimistic spinner so the
+      // sidebar doesn't get stuck. 4s comfortably covers a slow hydration but is
+      // short enough that a stuck spinner is noticed quickly.
       pendingTransitionTimeoutRef.current = window.setTimeout(() => {
         if (transitionTokenRef.current !== token) return;
         setPendingTransitionSessionId((prev) => (prev === sessionId ? null : prev));
@@ -1608,7 +1613,17 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           : t('sessions.sidebar.bulkActions.failedDeletePlural', { count: failedIds.length }));
       }
     } else {
-      const { archivedIds, failedIds } = await archiveSessions(ids);
+      // Cross-archive nesting (active root with already-archived descendants
+      // surfaced into the selection) means `ids` can include sessions that are
+      // already archived. Skip those to keep the toast accurate and avoid
+      // server-side no-op failures.
+      const archivedIdSet = new Set(archivedSessions.map((s) => s.id));
+      const idsToArchive = ids.filter((id) => !archivedIdSet.has(id));
+      if (idsToArchive.length === 0) {
+        useSessionMultiSelectStore.getState().clear();
+        return;
+      }
+      const { archivedIds, failedIds } = await archiveSessions(idsToArchive);
       if (archivedIds.length > 0) {
         toast.success(archivedIds.length === 1
           ? t('sessions.sidebar.bulkActions.archivedSingle', { count: archivedIds.length })
@@ -1621,17 +1636,29 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       }
     }
     useSessionMultiSelectStore.getState().clear();
-  }, [archiveSessions, bulkScopeIsArchived, deleteSessions, selectedIds, t]);
+  }, [archiveSessions, archivedSessions, bulkScopeIsArchived, deleteSessions, selectedIds, t]);
 
   const handleBulkDelete = React.useCallback(() => {
-    const count = selectedIds.size;
-    if (count === 0) return;
+    if (selectedIds.size === 0) return;
+    // Mirror executeBulkDelete's filtering so the dialog count matches what
+    // will actually be archived (skip already-archived selections in active
+    // scope).
+    let effectiveCount = selectedIds.size;
+    if (!bulkScopeIsArchived) {
+      const archivedIdSet = new Set(archivedSessions.map((s) => s.id));
+      let skipped = 0;
+      selectedIds.forEach((id) => {
+        if (archivedIdSet.has(id)) skipped += 1;
+      });
+      effectiveCount -= skipped;
+    }
+    if (effectiveCount === 0) return;
     if (!showDeletionDialog) {
       void executeBulkDelete();
       return;
     }
-    setBulkDeleteConfirm({ sessionCount: count, archivedBucket: bulkScopeIsArchived });
-  }, [bulkScopeIsArchived, executeBulkDelete, selectedIds, showDeletionDialog]);
+    setBulkDeleteConfirm({ sessionCount: effectiveCount, archivedBucket: bulkScopeIsArchived });
+  }, [archivedSessions, bulkScopeIsArchived, executeBulkDelete, selectedIds, showDeletionDialog]);
 
   const confirmBulkDelete = React.useCallback(async () => {
     setBulkDeleteConfirm(null);

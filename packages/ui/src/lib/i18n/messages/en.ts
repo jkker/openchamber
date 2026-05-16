@@ -275,6 +275,8 @@ export const dict = {
   'sessions.sidebar.session.status.unread': 'Unread updates',
   'sessions.sidebar.session.status.pinned': 'Pinned session',
   'sessions.sidebar.session.status.permissionRequired': 'Permission required',
+  'sessions.sidebar.session.archiveMismatch.archivedNested': 'Archived session inside an active tree',
+  'sessions.sidebar.session.archiveMismatch.activeNested': 'Active session inside an archived tree',
   'sessions.sidebar.session.subsessions.collapse': 'Collapse subsessions',
   'sessions.sidebar.session.subsessions.expand': 'Expand subsessions',
   'sessions.sidebar.dialogs.deleteSession.title': 'Delete session?',

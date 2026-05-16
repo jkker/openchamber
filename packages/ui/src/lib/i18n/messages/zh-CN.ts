@@ -276,6 +276,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.status.unread': '有未读更新',
   'sessions.sidebar.session.status.pinned': '已置顶会话',
   'sessions.sidebar.session.status.permissionRequired': '需要权限',
+  'sessions.sidebar.session.archiveMismatch.archivedNested': '已归档会话位于活动会话树中',
+  'sessions.sidebar.session.archiveMismatch.activeNested': '活动会话位于已归档会话树中',
   'sessions.sidebar.session.subsessions.collapse': '折叠子会话',
   'sessions.sidebar.session.subsessions.expand': '展开子会话',
   'sessions.sidebar.dialogs.deleteSession.title': '删除会话？',

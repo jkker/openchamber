@@ -276,6 +276,8 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.status.unread": "Actualizaciones no leídas",
   "sessions.sidebar.session.status.pinned": "Sesión anclada",
   "sessions.sidebar.session.status.permissionRequired": "Permiso requerido",
+  "sessions.sidebar.session.archiveMismatch.archivedNested": "Sesión archivada dentro de un árbol activo",
+  "sessions.sidebar.session.archiveMismatch.activeNested": "Sesión activa dentro de un árbol archivado",
   "sessions.sidebar.session.subsessions.collapse": "Colapsar subsesiones",
   "sessions.sidebar.session.subsessions.expand": "Expandir subsesiones",
   "sessions.sidebar.dialogs.deleteSession.title": "¿Eliminar sesión?",

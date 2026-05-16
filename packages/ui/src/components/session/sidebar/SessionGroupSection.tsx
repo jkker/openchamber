@@ -16,6 +16,7 @@ import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
 import { openExternalUrl } from '@/lib/url';
 import { useI18n } from '@/lib/i18n';
 import { formatDirectoryName } from '@/lib/utils';
+import { useSessionUIStore } from '@/sync/session-ui-store';
 
 type DeleteFolderConfirm = {
   scopeKey: string;
@@ -187,6 +188,43 @@ export function SessionGroupSection(props: Props): React.ReactNode {
       : sourceGroupNodes),
     [group.isArchivedBucket, sourceGroupNodes, archivedStartIndex],
   );
+
+  // When the selected session lives somewhere under a root in this archived
+  // bucket, snap the bucket's page to the one containing that root so the
+  // chain is reachable for SessionNodeItem's per-node auto-paging.
+  const currentSessionIdForArchivedAutoPage = useSessionUIStore((state) => state.currentSessionId);
+  React.useEffect(() => {
+    if (!group.isArchivedBucket) return;
+    if (!currentSessionIdForArchivedAutoPage) return;
+    if (sourceGroupNodes.length <= archivedPageSize) return;
+    const subtreeContains = (n: SessionNode): boolean => {
+      if (n.session.id === currentSessionIdForArchivedAutoPage) return true;
+      for (const child of n.children) {
+        if (subtreeContains(child)) return true;
+      }
+      return false;
+    };
+    let foundIndex = -1;
+    for (let i = 0; i < sourceGroupNodes.length; i += 1) {
+      if (subtreeContains(sourceGroupNodes[i]!)) {
+        foundIndex = i;
+        break;
+      }
+    }
+    if (foundIndex === -1) return;
+    const targetPage = Math.floor(foundIndex / archivedPageSize) + 1;
+    if (targetPage !== archivedCurrentPage) {
+      onArchivedPageChange(groupKey, targetPage);
+    }
+  }, [
+    archivedCurrentPage,
+    archivedPageSize,
+    currentSessionIdForArchivedAutoPage,
+    group.isArchivedBucket,
+    groupKey,
+    onArchivedPageChange,
+    sourceGroupNodes,
+  ]);
   const folderScopeKey = group.folderScopeKey ?? normalizePath(group.directory ?? null);
   const scopeFolders = React.useMemo(
     () => folderScopeKey ? (foldersMap[folderScopeKey] ?? []) : [],

@@ -276,6 +276,8 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.status.unread": "Непрочитані оновлення",
   "sessions.sidebar.session.status.pinned": "Закріплений сесія",
   "sessions.sidebar.session.status.permissionRequired": "Потрібен дозвіл",
+  "sessions.sidebar.session.archiveMismatch.archivedNested": "Архівована сесія всередині активного дерева",
+  "sessions.sidebar.session.archiveMismatch.activeNested": "Активна сесія всередині архівованого дерева",
   "sessions.sidebar.session.subsessions.collapse": "Згорнути підсесії",
   "sessions.sidebar.session.subsessions.expand": "Розгорнути підсесії",
   "sessions.sidebar.dialogs.deleteSession.title": "Видалити сесія?",

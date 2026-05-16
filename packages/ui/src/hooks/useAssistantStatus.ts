@@ -198,14 +198,36 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
             return { activePartType: undefined, activeToolName: undefined, statusText: 'working', isGenericStatus: true };
         }
 
+        // Pick the latest assistant message by created-time (tiebreak by id) in a
+        // single pass — sync reconciliation can splice messages out of array order.
         let lastAssistant: AssistantSessionMessageRecord | null = null;
-        for (let i = sessionMessages.length - 1; i >= 0; i -= 1) {
-            const candidate = sessionMessages[i];
+        let lastCreated: number | null = null;
+        for (const candidate of sessionMessages) {
             if (!isAssistantMessage(candidate.info) || isFullySyntheticMessage(candidate.parts)) {
                 continue;
             }
-            lastAssistant = candidate as AssistantSessionMessageRecord;
-            break;
+            const typed = candidate as AssistantSessionMessageRecord;
+            const candidateCreated = typeof typed.info.time?.created === 'number' ? typed.info.time.created : null;
+            if (lastAssistant === null) {
+                lastAssistant = typed;
+                lastCreated = candidateCreated;
+                continue;
+            }
+            const bothHaveCreated = candidateCreated !== null && lastCreated !== null;
+            const isNewer = bothHaveCreated
+                ? candidateCreated! > lastCreated!
+                : (typed.info.id.localeCompare(lastAssistant.info.id) > 0);
+            if (bothHaveCreated && candidateCreated === lastCreated) {
+                if (typed.info.id.localeCompare(lastAssistant.info.id) > 0) {
+                    lastAssistant = typed;
+                    lastCreated = candidateCreated;
+                }
+                continue;
+            }
+            if (isNewer) {
+                lastAssistant = typed;
+                lastCreated = candidateCreated;
+            }
         }
 
         if (!lastAssistant) {

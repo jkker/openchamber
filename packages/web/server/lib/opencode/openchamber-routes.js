@@ -20,6 +20,25 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
   let cachedModelsMetadataTimestamp = 0;
   let internalApiClient = null;
 
+  const readResponseHeader = (response, header) => {
+    if (!response || typeof response !== 'object') return null;
+    const headers = response.headers;
+    if (!headers || typeof headers !== 'object') return null;
+    if (typeof headers.get === 'function') {
+      const value = headers.get(header);
+      return typeof value === 'string' ? value : null;
+    }
+    const direct = headers[header] ?? headers[header.toLowerCase()];
+    return typeof direct === 'string' ? direct : null;
+  };
+
+  const readNumberHeader = (response, header) => {
+    const raw = readResponseHeader(response, header);
+    if (!raw) return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
   const getInternalApiClient = () => {
     if (internalApiClient) {
       return internalApiClient;
@@ -87,14 +106,23 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
           if (page.length < pageSize) {
             break;
           }
+          // Prefer the server-provided cursor; fall back to the last row's
+          // updated timestamp. The header path lets the server advance past
+          // ties in `time.updated` (sessions sharing a timestamp at a page
+          // boundary would otherwise be skipped).
+          const headerCursor = readNumberHeader(response, 'x-next-cursor');
           const lastUpdated = page[page.length - 1]?.time?.updated;
-          if (typeof lastUpdated !== 'number' || !Number.isFinite(lastUpdated)) {
+          const fallbackCursor = typeof lastUpdated === 'number' && Number.isFinite(lastUpdated)
+            ? lastUpdated
+            : null;
+          const nextCursor = headerCursor ?? fallbackCursor;
+          if (nextCursor === null) {
             break;
           }
-          if (cursor !== undefined && lastUpdated >= cursor) {
+          if (cursor !== undefined && nextCursor >= cursor) {
             break;
           }
-          cursor = lastUpdated;
+          cursor = nextCursor;
         }
       };
 

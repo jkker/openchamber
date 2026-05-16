@@ -297,6 +297,13 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     secondaryMeta,
     renderContext = 'project',
   } = props;
+  const session = node.session;
+  const liveSession = useSession(session.id);
+  const resolvedSession = liveSession ?? session;
+  // Use the session's own archive state for menu and action decisions — `archivedBucket`
+  // only describes the tree root, and a cross-archive subagent should still get its own
+  // menu (e.g. "Delete" for an already-archived child, not "Archive" again).
+  const isSessionArchived = Boolean(resolvedSession.time?.archived);
   const hasSecondaryProjectLabel = Boolean(secondaryMeta?.projectLabel);
   const hasSecondaryBranchLabel = Boolean(secondaryMeta?.branchLabel);
   const depthPaddingStyle = depth > 0 ? { paddingLeft: `${8 + depth * 8}px` } : undefined;
@@ -316,7 +323,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   const hideOnHoverClass = isVSCode
     ? 'group-hover:opacity-0'
     : 'group-hover:opacity-0 group-focus-within:opacity-0';
-  const showQuickArchiveAction = !archivedBucket && !mobileVariant;
+  const showQuickArchiveAction = !isSessionArchived && !mobileVariant;
   const revealPaddingClass = isMinimalMode
     ? (isVSCode
         ? 'group-hover:pr-2'
@@ -329,10 +336,6 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   const [isTouchPressed, setIsTouchPressed] = React.useState(false);
   const [isClickFeedbackVisible, setIsClickFeedbackVisible] = React.useState(false);
   const clickFeedbackTimerRef = React.useRef<number | null>(null);
-
-  const session = node.session;
-  const liveSession = useSession(session.id);
-  const resolvedSession = liveSession ?? session;
 
   const sessionDirectory =
     normalizePath((session as Session & { directory?: string | null }).directory ?? null)
@@ -372,6 +375,36 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   const isMissingDirectory = directoryState === 'missing';
   const isActive = currentSessionId === session.id;
   const isOptimisticTarget = optimisticActiveSessionId === session.id && !isActive;
+  // Surface cross-archive nesting: a session whose own archive state disagrees
+  // with the tree root it's rendered under (e.g. an archived subagent inside an
+  // active session, or an active subagent inside an archived session). Cross-
+  // archive parent/child links are intentionally allowed by useSessionGrouping;
+  // this indicator makes the mismatch visible at a glance.
+  const hasArchiveMismatch = depth > 0 && isSessionArchived !== archivedBucket;
+  const archiveMismatchTooltipKey = isSessionArchived
+    ? 'sessions.sidebar.session.archiveMismatch.archivedNested'
+    : 'sessions.sidebar.session.archiveMismatch.activeNested';
+  const archiveMismatchIcon = isSessionArchived ? 'archive' : 'pulse';
+  const archiveMismatchIndicator = hasArchiveMismatch ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className={cn(
+            'inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-sm',
+            isSessionArchived
+              ? 'text-muted-foreground/80'
+              : 'text-status-success/80',
+          )}
+          aria-label={t(archiveMismatchTooltipKey)}
+        >
+          <Icon name={archiveMismatchIcon} className="h-3 w-3" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="right" sideOffset={6} className="max-w-xs text-left text-xs">
+        {t(archiveMismatchTooltipKey)}
+      </TooltipContent>
+    </Tooltip>
+  ) : null;
   const sessionTitle = resolvedSession.title || t('sessions.sidebar.session.untitled');
   const hasChildren = node.children.length > 0;
   const expansionKey = `${renderContext}:${archivedBucket ? 'archived' : 'active'}:${session.id}`;
@@ -391,11 +424,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     () => node.children.slice(childStartIndex, childStartIndex + childPageSize),
     [node.children, childStartIndex],
   );
-  const allDescendantIds = React.useMemo(() => collectNodeDescendantIds(node), [collectNodeDescendantIds, node]);
-  const allDescendantExpansionKeys = React.useMemo(
-    () => allDescendantIds.map((id) => `${renderContext}:${archivedBucket ? 'archived' : 'active'}:${id}`),
-    [allDescendantIds, archivedBucket, renderContext],
-  );
+  const expansionKeyPrefix = `${renderContext}:${archivedBucket ? 'archived' : 'active'}:`;
   const isSubtaskSession = Boolean((resolvedSession as Session & { parentID?: string | null }).parentID);
   const unseenCount = useSessionUnseenCount(session.id);
   const needsAttention = unseenCount > 0 && (!isSubtaskSession || notifyOnSubtasks);
@@ -409,6 +438,36 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   React.useEffect(() => {
     setChildPage((prev) => Math.min(Math.max(prev, 1), childTotalPages));
   }, [childTotalPages]);
+
+  // When the selected session is somewhere under this node, make sure that
+  // ancestor chain is visible: expand this node and page its child list so the
+  // ancestor that contains the selection is on the visible page. Runs on
+  // currentSessionId or tree changes, so URL/programmatic selection of a deep
+  // subagent surfaces the whole chain without manual page/expand clicks.
+  React.useEffect(() => {
+    if (!currentSessionId || currentSessionId === session.id) return;
+    if (node.children.length === 0) return;
+    const subtreeContains = (n: SessionNode): boolean => {
+      if (n.session.id === currentSessionId) return true;
+      for (const child of n.children) {
+        if (subtreeContains(child)) return true;
+      }
+      return false;
+    };
+    let foundIndex = -1;
+    for (let i = 0; i < node.children.length; i += 1) {
+      if (subtreeContains(node.children[i]!)) {
+        foundIndex = i;
+        break;
+      }
+    }
+    if (foundIndex === -1) return;
+    const targetPage = Math.floor(foundIndex / childPageSize) + 1;
+    if (targetPage !== childCurrentPage) {
+      setChildPage(targetPage);
+    }
+    useSessionExpansionStore.getState().expand(expansionKey);
+  }, [currentSessionId, node, session.id, childCurrentPage, childPageSize, expansionKey]);
 
   React.useEffect(() => {
     return () => {
@@ -426,9 +485,34 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     if (resolvedPage === childCurrentPage) {
       return;
     }
-    collapseExpandedSubagentSessions(allDescendantExpansionKeys);
+    // Collapse only the subtrees that are leaving the visible page so their
+    // expansion state doesn't bleed across pages. Children that remain on the
+    // new page keep their (and their descendants') expanded state.
+    const nextStartIndex = (resolvedPage - 1) * childPageSize;
+    const nextVisibleSet = new Set(
+      node.children.slice(nextStartIndex, nextStartIndex + childPageSize).map((child) => child.session.id),
+    );
+    const collapseKeys: string[] = [];
+    for (const child of node.children) {
+      if (nextVisibleSet.has(child.session.id)) continue;
+      collapseKeys.push(`${expansionKeyPrefix}${child.session.id}`);
+      for (const descendantId of collectNodeDescendantIds(child)) {
+        collapseKeys.push(`${expansionKeyPrefix}${descendantId}`);
+      }
+    }
+    if (collapseKeys.length > 0) {
+      collapseExpandedSubagentSessions(collapseKeys);
+    }
     setChildPage(resolvedPage);
-  }, [allDescendantExpansionKeys, childCurrentPage, childTotalPages, collapseExpandedSubagentSessions]);
+  }, [
+    childCurrentPage,
+    childPageSize,
+    childTotalPages,
+    collapseExpandedSubagentSessions,
+    collectNodeDescendantIds,
+    expansionKeyPrefix,
+    node.children,
+  ]);
 
   const collectChildExports = React.useCallback(async (children: SessionNode[]): Promise<{ children: ChildSessionExport[]; skipped: number }> => {
     const results: ChildSessionExport[] = [];
@@ -711,7 +795,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     event.preventDefault();
     event.stopPropagation();
     setOpenSidebarMenuKey(null);
-    handleDeleteSession(session, { archivedBucket });
+    handleDeleteSession(session, { archivedBucket: isSessionArchived });
   };
 
   const handleRowSelect = (event?: React.MouseEvent<HTMLButtonElement>) => {
@@ -815,7 +899,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
         </DropdownMenuItem>
       ) : null}
 
-      {sessionDirectory && !archivedBucket ? (() => {
+      {sessionDirectory && !isSessionArchived ? (() => {
         const scopeFolders = getFoldersForScope(sessionDirectory);
         const currentFolderId = getSessionFolderId(sessionDirectory, session.id);
         return (
@@ -882,9 +966,9 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
       ) : null}
 
       <DropdownMenuSeparator />
-      <DropdownMenuItem className="text-destructive focus:text-destructive [&>svg]:mr-1" onClick={() => handleDeleteSession(session, { archivedBucket })}>
+      <DropdownMenuItem className="text-destructive focus:text-destructive [&>svg]:mr-1" onClick={() => handleDeleteSession(session, { archivedBucket: isSessionArchived })}>
         <Icon name="delete-bin" className="mr-1 h-4 w-4" />
-        {archivedBucket ? t('sessions.sidebar.bulkActions.delete') : t('sessions.sidebar.bulkActions.archive')}
+        {isSessionArchived ? t('sessions.sidebar.bulkActions.delete') : t('sessions.sidebar.bulkActions.archive')}
       </DropdownMenuItem>
     </DropdownMenuContent>
   );
@@ -895,7 +979,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
         <div
           data-session-row={session.id}
           data-session-scope={sessionDirectory ?? ''}
-          data-session-archived={archivedBucket ? '1' : '0'}
+          data-session-archived={isSessionArchived ? '1' : '0'}
           className={cn(
             'group relative my-0.5 flex items-center rounded-sm px-1.5 py-1',
             isMissingDirectory ? 'opacity-75' : '',
@@ -953,7 +1037,15 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
                           title="Switching session"
                         />
                       ) : null}
-                      <div className={cn('block min-w-0 flex-1 truncate typography-ui-label font-normal', isActive ? 'text-primary' : 'text-foreground')}>{renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}</div>
+                      {archiveMismatchIndicator}
+                      <div className={cn(
+                        'block min-w-0 flex-1 truncate typography-ui-label font-normal',
+                        isActive
+                          ? 'text-primary'
+                          : hasArchiveMismatch
+                            ? 'text-muted-foreground'
+                            : 'text-foreground',
+                      )}>{renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}</div>
                       {alwaysShowActions ? <span className="ml-2 flex-shrink-0 text-[0.72rem] text-muted-foreground/75">{sessionCompactUpdatedLabel}</span> : null}
                       {!alwaysShowActions ? (
                         <div className="relative ml-1 flex h-4 min-w-4 flex-shrink-0 items-center justify-end">
@@ -1024,7 +1116,15 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
                         title="Switching session"
                       />
                     ) : null}
-                    <div className={cn('block min-w-0 flex-1 truncate typography-ui-label font-normal', isActive ? 'text-primary' : 'text-foreground')}>{renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}</div>
+                    {archiveMismatchIndicator}
+                    <div className={cn(
+                        'block min-w-0 flex-1 truncate typography-ui-label font-normal',
+                        isActive
+                          ? 'text-primary'
+                          : hasArchiveMismatch
+                            ? 'text-muted-foreground'
+                            : 'text-foreground',
+                      )}>{renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}</div>
                     {pendingPermissionCount > 0 ? (
                       <span className="inline-flex items-center gap-1 rounded bg-destructive/10 px-1 py-0.5 text-[0.7rem] text-destructive flex-shrink-0" title={t('sessions.sidebar.session.status.permissionRequired')} aria-label={t('sessions.sidebar.session.status.permissionRequired')}>
                         <Icon name="shield" className="h-3 w-3" />

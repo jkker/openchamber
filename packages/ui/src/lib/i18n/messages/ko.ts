@@ -276,6 +276,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.status.unread': '읽지 않은 업데이트',
   'sessions.sidebar.session.status.pinned': '고정된 세션',
   'sessions.sidebar.session.status.permissionRequired': '권한 필요',
+  'sessions.sidebar.session.archiveMismatch.archivedNested': '활성 트리에 포함된 보관 세션',
+  'sessions.sidebar.session.archiveMismatch.activeNested': '보관 트리에 포함된 활성 세션',
   'sessions.sidebar.session.subsessions.collapse': '하위 세션 접기',
   'sessions.sidebar.session.subsessions.expand': '하위 세션 펼치기',
   'sessions.sidebar.dialogs.deleteSession.title': '세션 삭제?',
