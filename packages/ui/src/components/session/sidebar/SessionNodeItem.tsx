@@ -352,17 +352,6 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   }, [childTotalPages]);
 
   React.useEffect(() => {
-    if (!hasChildren || !isExpanded) {
-      return;
-    }
-    // keep effect for page clamp lifecycle only
-  }, [
-    hasChildren,
-    isExpanded,
-    node.children.length,
-  ]);
-
-  React.useEffect(() => {
     return () => {
       if (clickFeedbackTimerRef.current !== null) {
         window.clearTimeout(clickFeedbackTimerRef.current);
@@ -1046,16 +1035,16 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
             disabled={childCurrentPage <= 1}
             className="rounded px-1 py-0.5 enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Prev
+            {t('sessions.sidebar.group.pagination.prev')}
           </button>
-          <span>Subagents {childCurrentPage}/{childTotalPages}</span>
+          <span>{t('sessions.sidebar.group.pagination.subagents', { current: childCurrentPage, total: childTotalPages })}</span>
           <button
             type="button"
             onClick={() => changeChildPage(childCurrentPage + 1)}
             disabled={childCurrentPage >= childTotalPages}
             className="rounded px-1 py-0.5 enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Next
+            {t('sessions.sidebar.group.pagination.next')}
           </button>
         </div>
       ) : null}

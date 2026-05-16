@@ -188,8 +188,8 @@ export function SessionGroupSection(props: Props): React.ReactNode {
   const effectiveGroupNodes = React.useMemo(
     () => (group.isArchivedBucket
       ? sourceRootNodes.slice(archivedStartIndex, archivedStartIndex + archivedPageSize)
-      : sourceRootNodes),
-    [group.isArchivedBucket, sourceRootNodes, archivedStartIndex],
+      : sourceGroupNodes),
+    [group.isArchivedBucket, sourceGroupNodes, sourceRootNodes, archivedStartIndex],
   );
   const folderScopeKey = group.folderScopeKey ?? normalizePath(group.directory ?? null);
   const scopeFolders = React.useMemo(
@@ -287,10 +287,6 @@ export function SessionGroupSection(props: Props): React.ReactNode {
     : hasSessionSearchQuery
       ? ungroupedSessions
       : (isExpanded ? ungroupedSessions : ungroupedSessions.slice(0, maxVisible));
-  const finalVisibleSessions = React.useMemo(
-    () => (group.isArchivedBucket ? visibleSessions.slice(0, archivedPageSize) : visibleSessions),
-    [group.isArchivedBucket, visibleSessions],
-  );
   const remainingCount = totalSessions - visibleSessions.length;
 
   if (hasSessionSearchQuery && !groupMatchesSearch && rootFolders.length === 0 && ungroupedSessions.length === 0) {
@@ -511,7 +507,7 @@ export function SessionGroupSection(props: Props): React.ReactNode {
       }}
     >
       {renderFolderItems()}
-      {finalVisibleSessions.map((node) => (
+      {visibleSessions.map((node) => (
         <React.Fragment key={node.session.id}>
           {renderSessionNode(node, 0, group.directory, projectId, group.isArchivedBucket === true)}
         </React.Fragment>
@@ -551,16 +547,16 @@ export function SessionGroupSection(props: Props): React.ReactNode {
             disabled={archivedCurrentPage <= 1}
             className="rounded px-1 py-0.5 enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Prev
+            {t('sessions.sidebar.group.pagination.prev')}
           </button>
-          <span>Page {archivedCurrentPage} / {archivedTotalPages}</span>
+          <span>{t('sessions.sidebar.group.pagination.page', { current: archivedCurrentPage, total: archivedTotalPages })}</span>
           <button
             type="button"
             onClick={() => onArchivedPageChange(groupKey, Math.min(archivedTotalPages, archivedCurrentPage + 1))}
             disabled={archivedCurrentPage >= archivedTotalPages}
             className="rounded px-1 py-0.5 enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Next
+            {t('sessions.sidebar.group.pagination.next')}
           </button>
         </div>
       ) : null}

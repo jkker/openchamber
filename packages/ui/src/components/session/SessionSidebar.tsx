@@ -284,31 +284,36 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     const controller = new AbortController();
     setIsSessionSearchLoading(true);
     const query = normalizedSessionSearchQuery;
-    void fetch(`/api/openchamber/sessions/search?q=${encodeURIComponent(query)}&archived=all&limit=5000`, {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Search failed: ${response.status}`);
-        }
-        const payload = await response.json() as { ids?: unknown };
-        const ids = Array.isArray(payload.ids) ? payload.ids.filter((value): value is string => typeof value === 'string') : [];
-        setSearchedSessionIds(new Set(ids));
+    const debounceTimer = window.setTimeout(() => {
+      void fetch(`/api/openchamber/sessions/search?q=${encodeURIComponent(query)}&archived=all&limit=5000`, {
+        signal: controller.signal,
       })
-      .catch((error) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-        console.warn('Search request failed', error);
-        setSearchedSessionIds(new Set());
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsSessionSearchLoading(false);
-        }
-      });
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`Search failed: ${response.status}`);
+          }
+          const payload = await response.json() as { ids?: unknown };
+          const ids = Array.isArray(payload.ids) ? payload.ids.filter((value): value is string => typeof value === 'string') : [];
+          setSearchedSessionIds(new Set(ids));
+        })
+        .catch((error) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+          console.warn('Search request failed', error);
+          setSearchedSessionIds(new Set());
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setIsSessionSearchLoading(false);
+          }
+        });
+    }, 300);
 
-    return () => controller.abort();
+    return () => {
+      window.clearTimeout(debounceTimer);
+      controller.abort();
+    };
   }, [hasSessionSearchQuery, normalizedSessionSearchQuery]);
 
   React.useEffect(() => {
@@ -351,7 +356,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const pendingTransitionRaf1Ref = React.useRef<number | null>(null);
   const pendingTransitionRaf2Ref = React.useRef<number | null>(null);
   const pendingTransitionTimeoutRef = React.useRef<number | null>(null);
-  const pendingTransitionTraceRef = React.useRef<{ sessionId: string; startedAt: number } | null>(null);
   const suppressedAutoExpandParentIdsRef = React.useRef<Set<string>>(new Set());
   const effectiveActiveSessionId = pendingTransitionSessionId ?? currentSessionId;
   const newSessionDraftOpen = useSessionUIStore((state) => Boolean(state.newSessionDraft?.open));
@@ -706,7 +710,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       flushSync(() => {
         setPendingTransitionSessionId(sessionId);
       });
-      pendingTransitionTraceRef.current = { sessionId, startedAt: performance.now() };
     },
     dispatchSessionTransition: (sessionId, runSwitch) => {
       transitionTokenRef.current += 1;
@@ -726,7 +729,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         if (transitionTokenRef.current !== token) return;
         setPendingTransitionSessionId((prev) => (prev === sessionId ? null : prev));
         pendingTransitionTimeoutRef.current = null;
-      }, 10000);
+      }, 4000);
 
       // Tree-first transition: allow at least one paint for the spinner/highlight,
       // then dispatch session switch on the following frame.
@@ -761,7 +764,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       const readySessionId = custom.detail?.sessionId;
       if (!readySessionId) return;
       if (readySessionId !== pendingTransitionSessionId) return;
-      pendingTransitionTraceRef.current = null;
       setPendingTransitionSessionId(null);
       if (pendingTransitionTimeoutRef.current !== null) {
         window.clearTimeout(pendingTransitionTimeoutRef.current);
@@ -1021,7 +1023,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const searchEmptyState = (
     <div className="py-6 text-center text-muted-foreground">
       {isSessionSearchLoading ? (
-        <p className="typography-ui-label font-semibold">Searching sessions...</p>
+        <p className="typography-ui-label font-semibold">{t('sessions.sidebar.searching')}</p>
       ) : (
         <>
           <p className="typography-ui-label font-semibold">{t('sessions.sidebar.empty.noMatches.title')}</p>

@@ -337,7 +337,6 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
     // Session UI state
     const currentSessionId = useSessionUIStore((s) => s.currentSessionId);
     const previousSessionIdRef = React.useRef<string | null>(null);
-    const sessionSwitchTraceRef = React.useRef<{ sessionId: string; startedAt: number; source: 'initial' | 'switch' } | null>(null);
     const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
     const setCurrentSession = useSessionUIStore((s) => s.setCurrentSession);
     const newSessionDraft = useSessionUIStore((s) => s.newSessionDraft);
@@ -721,17 +720,6 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
         && !hasRenderableSessionSnapshot;
 
     React.useEffect(() => {
-        if (!currentSessionId || currentSessionId === previousSessionIdRef.current) {
-            previousSessionIdRef.current = currentSessionId;
-            return;
-        }
-
-        const source = previousSessionIdRef.current ? 'switch' as const : 'initial' as const;
-        sessionSwitchTraceRef.current = {
-            sessionId: currentSessionId,
-            startedAt: performance.now(),
-            source,
-        };
         previousSessionIdRef.current = currentSessionId;
     }, [currentSessionId]);
 
@@ -765,17 +753,6 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
         if (hasRenderableSessionSnapshot) return;
         void ensureSessionRenderable(currentSessionId);
     }, [currentSessionId, ensureSessionRenderable, hasRenderableSessionSnapshot]);
-
-    React.useEffect(() => {
-        if (!currentSessionId || !hasRenderableSessionSnapshot) {
-            return;
-        }
-        const trace = sessionSwitchTraceRef.current;
-        if (!trace || trace.sessionId !== currentSessionId) {
-            return;
-        }
-        sessionSwitchTraceRef.current = null;
-    }, [currentSessionId, hasRenderableSessionSnapshot]);
 
     React.useEffect(() => {
         if (!currentSessionId || !hasRenderableSessionSnapshot || typeof window === 'undefined') {

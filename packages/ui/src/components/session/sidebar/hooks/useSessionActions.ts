@@ -86,6 +86,8 @@ export const useSessionActions = (args: Args) => {
         args.setSessionSwitcherOpen(false);
       }
 
+      // Read directly from the store (not the prop) to get the most recent value,
+      // since React batching may leave `args.currentSessionId` stale during rapid clicks.
       const liveCurrentSessionId = useSessionUIStore.getState().currentSessionId;
       if (sessionId === liveCurrentSessionId) {
         if (args.allowReselect) {
