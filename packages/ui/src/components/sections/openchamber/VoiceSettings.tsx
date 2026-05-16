@@ -21,6 +21,22 @@ import { wasmSttService, WASM_MODELS } from '@/lib/voice/wasmSttService';
 import type { WasmModelStatus } from '@/lib/voice/wasmSttService';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
+
+const SPEECH_SDK_PROVIDERS = [
+    { value: 'openai', label: 'OpenAI' },
+    { value: 'elevenlabs', label: 'ElevenLabs' },
+    { value: 'deepgram', label: 'Deepgram' },
+    { value: 'cartesia', label: 'Cartesia' },
+    { value: 'google', label: 'Google' },
+    { value: 'hume', label: 'Hume' },
+    { value: 'mistral', label: 'Mistral' },
+    { value: 'xai', label: 'xAI' },
+    { value: 'fish-audio', label: 'Fish Audio' },
+    { value: 'murf', label: 'Murf' },
+    { value: 'resemble', label: 'Resemble' },
+    { value: 'fal', label: 'fal' },
+    { value: 'speech-gateway', label: 'Speech Gateway' },
+];
 const LANGUAGE_OPTIONS = [
     { value: 'en-US', label: 'English' },
     { value: 'es-ES', label: 'Español' },
@@ -157,6 +173,21 @@ export const VoiceSettings: React.FC = () => {
     const openaiCompatibleTtsModel = useConfigStore((state) => state.openaiCompatibleTtsModel);
     const setOpenaiCompatibleTtsModel = useConfigStore((state) => state.setOpenaiCompatibleTtsModel);
     const showMessageTTSButtons = useConfigStore((state) => state.showMessageTTSButtons);
+    // New provider-agnostic TTS fields
+    const ttsProvider = useConfigStore((state) => state.ttsProvider);
+    const setTtsProvider = useConfigStore((state) => state.setTtsProvider);
+    const ttsSpeechSdkProvider = useConfigStore((state) => state.ttsSpeechSdkProvider);
+    const setTtsSpeechSdkProvider = useConfigStore((state) => state.setTtsSpeechSdkProvider);
+    const ttsModel = useConfigStore((state) => state.ttsModel);
+    const setTtsModel = useConfigStore((state) => state.setTtsModel);
+    const ttsVoice = useConfigStore((state) => state.ttsVoice);
+    const setTtsVoice = useConfigStore((state) => state.setTtsVoice);
+    const ttsBaseURL = useConfigStore((state) => state.ttsBaseURL);
+    const setTtsBaseURL = useConfigStore((state) => state.setTtsBaseURL);
+    const ttsApiKey = useConfigStore((state) => state.ttsApiKey);
+    const setTtsApiKey = useConfigStore((state) => state.setTtsApiKey);
+    const ttsTimestampsEnabled = useConfigStore((state) => state.ttsTimestampsEnabled);
+    const setTtsTimestampsEnabled = useConfigStore((state) => state.setTtsTimestampsEnabled);
     // STT settings
     const sttProvider = useConfigStore((state) => state.sttProvider);
     const setSttProvider = useConfigStore((state) => state.setSttProvider);
@@ -200,6 +231,16 @@ export const VoiceSettings: React.FC = () => {
 
     const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
     const [isBrowserPreviewPlaying, setIsBrowserPreviewPlaying] = useState(false);
+
+    // Edge TTS state
+    const [edgeVoices, setEdgeVoices] = useState<Array<{ ShortName: string; FriendlyName: string; Locale: string; Gender: string }>>([]);
+    const [edgeVoicesLoading, setEdgeVoicesLoading] = useState(false);
+    const [isEdgePreviewPlaying, setIsEdgePreviewPlaying] = useState(false);
+    const [edgePreviewAudio, setEdgePreviewAudio] = useState<HTMLAudioElement | null>(null);
+
+    // Speech SDK state
+    const [isSdkPreviewPlaying, setIsSdkPreviewPlaying] = useState(false);
+    const [sdkPreviewAudio, setSdkPreviewAudio] = useState<HTMLAudioElement | null>(null);
 
     useEffect(() => {
         const loadVoices = async () => {
@@ -492,6 +533,131 @@ export const VoiceSettings: React.FC = () => {
         };
     }, [compatiblePreviewAudio]);
 
+    // Load Edge TTS voices when edge-tts provider is selected
+    useEffect(() => {
+        if (ttsProvider !== 'edge-tts' || !voiceModeEnabled) return;
+        if (edgeVoices.length > 0) return; // Already loaded
+        setEdgeVoicesLoading(true);
+        fetch('/api/tts/voices?provider=edge-tts')
+            .then((res) => res.json())
+            .then((data) => {
+                if (Array.isArray(data.voices)) {
+                    setEdgeVoices(data.voices);
+                }
+            })
+            .catch(() => {})
+            .finally(() => setEdgeVoicesLoading(false));
+    }, [ttsProvider, voiceModeEnabled, edgeVoices.length]);
+
+    const previewEdgeTTSVoice = useCallback(async () => {
+        if (edgePreviewAudio) {
+            edgePreviewAudio.pause();
+            edgePreviewAudio.currentTime = 0;
+            setEdgePreviewAudio(null);
+            setIsEdgePreviewPlaying(false);
+            return;
+        }
+
+        const voice = ttsVoice || 'en-US-AvaNeural';
+        setIsEdgePreviewPlaying(true);
+        try {
+            const response = await fetch('/api/tts/speak', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    provider: 'edge-tts',
+                    text: t('settings.voice.page.preview.edgeTtsLine'),
+                    voice,
+                    speed: speechRate,
+                    pitch: speechPitch,
+                    volume: speechVolume,
+                }),
+            });
+
+            if (!response.ok) throw new Error('Preview failed');
+
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                setEdgePreviewAudio(null);
+                setIsEdgePreviewPlaying(false);
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(url);
+                setEdgePreviewAudio(null);
+                setIsEdgePreviewPlaying(false);
+            };
+
+            setEdgePreviewAudio(audio);
+            await audio.play();
+        } catch {
+            setIsEdgePreviewPlaying(false);
+        }
+    }, [ttsVoice, speechRate, speechPitch, speechVolume, edgePreviewAudio, t]);
+
+    useEffect(() => {
+        return () => { edgePreviewAudio?.pause(); };
+    }, [edgePreviewAudio]);
+
+    const previewSpeechSdkVoice = useCallback(async () => {
+        if (sdkPreviewAudio) {
+            sdkPreviewAudio.pause();
+            sdkPreviewAudio.currentTime = 0;
+            setSdkPreviewAudio(null);
+            setIsSdkPreviewPlaying(false);
+            return;
+        }
+
+        setIsSdkPreviewPlaying(true);
+        try {
+            const response = await fetch('/api/tts/speak', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    provider: 'speech-sdk',
+                    sdkProvider: ttsSpeechSdkProvider || 'openai',
+                    text: t('settings.voice.page.preview.speechSdkLine'),
+                    voice: ttsVoice || undefined,
+                    model: ttsModel || undefined,
+                    speed: speechRate,
+                    apiKey: ttsApiKey || undefined,
+                }),
+            });
+
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({ error: 'Unknown error' }));
+                throw new Error(errData.error || `HTTP ${response.status}`);
+            }
+
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                setSdkPreviewAudio(null);
+                setIsSdkPreviewPlaying(false);
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(url);
+                setSdkPreviewAudio(null);
+                setIsSdkPreviewPlaying(false);
+            };
+
+            setSdkPreviewAudio(audio);
+            await audio.play();
+        } catch {
+            setIsSdkPreviewPlaying(false);
+        }
+    }, [ttsSpeechSdkProvider, ttsVoice, ttsModel, ttsApiKey, speechRate, sdkPreviewAudio, t]);
+
+    useEffect(() => {
+        return () => { sdkPreviewAudio?.pause(); };
+    }, [sdkPreviewAudio]);
+
     const sliderClass = "flex-1 min-w-0 h-1.5 bg-[var(--interactive-border)] rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[var(--primary-base)] [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-[var(--primary-base)] [&::-moz-range-thumb]:border-0 disabled:opacity-50";
 
     return (
@@ -529,10 +695,11 @@ export const VoiceSettings: React.FC = () => {
                                             <TooltipTrigger asChild>
                                                 <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
                                             </TooltipTrigger>
-                                            <TooltipContent sideOffset={8} className="max-w-xs">
+                                             <TooltipContent sideOffset={8} className="max-w-xs">
                                                 <ul className="space-y-1">
                                                     <li><strong>{t('settings.voice.page.provider.browser')}</strong> {t('settings.voice.page.tooltip.browser')}</li>
-                                                    <li><strong>OpenAI:</strong> {t('settings.voice.page.tooltip.openai')}</li>
+                                                    <li><strong>{t('settings.voice.page.provider.edgeTts')}</strong> {t('settings.voice.page.tooltip.edgeTts')}</li>
+                                                    <li><strong>{t('settings.voice.page.provider.speechSdk')}</strong> {t('settings.voice.page.tooltip.speechSdk')}</li>
                                                     <li><strong>{t('settings.voice.page.provider.custom')}</strong> {t('settings.voice.page.tooltip.custom')}</li>
                                                     <li><strong>{t('settings.voice.page.provider.say')}</strong> {t('settings.voice.page.tooltip.say')}</li>
                                                 </ul>
@@ -543,8 +710,8 @@ export const VoiceSettings: React.FC = () => {
                                         <Button
                                             variant="chip"
                                             size="xs"
-                                            aria-pressed={voiceProvider === 'browser'}
-                                            onClick={() => setVoiceProvider('browser')}
+                                            aria-pressed={ttsProvider === 'browser'}
+                                            onClick={() => { setTtsProvider('browser'); setVoiceProvider('browser'); }}
                                             className="!font-normal"
                                         >
                                             {t('settings.voice.page.provider.browser')}
@@ -552,17 +719,26 @@ export const VoiceSettings: React.FC = () => {
                                         <Button
                                             variant="chip"
                                             size="xs"
-                                            aria-pressed={voiceProvider === 'openai'}
-                                            onClick={() => setVoiceProvider('openai')}
+                                            aria-pressed={ttsProvider === 'edge-tts'}
+                                            onClick={() => { setTtsProvider('edge-tts'); }}
                                             className="!font-normal"
                                         >
-                                            OpenAI
+                                            {t('settings.voice.page.provider.edgeTts')}
                                         </Button>
                                         <Button
                                             variant="chip"
                                             size="xs"
-                                            aria-pressed={voiceProvider === 'openai-compatible'}
-                                            onClick={() => setVoiceProvider('openai-compatible')}
+                                            aria-pressed={ttsProvider === 'speech-sdk'}
+                                            onClick={() => { setTtsProvider('speech-sdk'); setVoiceProvider('openai'); }}
+                                            className="!font-normal"
+                                        >
+                                            {t('settings.voice.page.provider.speechSdk')}
+                                        </Button>
+                                        <Button
+                                            variant="chip"
+                                            size="xs"
+                                            aria-pressed={ttsProvider === 'openai-compatible'}
+                                            onClick={() => { setTtsProvider('openai-compatible'); setVoiceProvider('openai-compatible'); }}
                                             className="!font-normal"
                                         >
                                             {t('settings.voice.page.provider.custom')}
@@ -571,8 +747,8 @@ export const VoiceSettings: React.FC = () => {
                                             <Button
                                                 variant="chip"
                                                 size="xs"
-                                                aria-pressed={voiceProvider === 'say'}
-                                                onClick={() => setVoiceProvider('say')}
+                                                aria-pressed={ttsProvider === 'say'}
+                                                onClick={() => { setTtsProvider('say'); setVoiceProvider('say'); }}
                                                 className="!font-normal"
                                             >
                                                 <Icon name="apple" className="w-3.5 h-3.5 mr-0.5" />
@@ -583,8 +759,135 @@ export const VoiceSettings: React.FC = () => {
                                 </div>
                             </div>
 
-                            {/* OpenAI API Key */}
-                            {voiceProvider === 'openai' && (
+                            {/* Edge TTS configuration */}
+                            {ttsProvider === 'edge-tts' && (
+                                <div className="py-1.5 space-y-2">
+                                    <p className="typography-meta text-muted-foreground">
+                                        {t('settings.voice.page.field.edgeTtsNote')}
+                                    </p>
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.edgeVoice')}</span>
+                                        <div className="flex items-center gap-2 mt-1.5">
+                                            {edgeVoicesLoading ? (
+                                                <span className="typography-meta text-muted-foreground">Loading voices…</span>
+                                            ) : edgeVoices.length > 0 ? (
+                                                <Select value={ttsVoice || 'en-US-AvaNeural'} onValueChange={setTtsVoice}>
+                                                    <SelectTrigger className="w-fit max-w-[220px]">
+                                                        <SelectValue placeholder={t('settings.voice.page.field.selectVoicePlaceholder')} />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        {edgeVoices.map((v) => (
+                                                            <SelectItem key={v.ShortName} value={v.ShortName}>
+                                                                {v.FriendlyName ?? v.ShortName}
+                                                            </SelectItem>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            ) : (
+                                                <div className="relative max-w-xs flex-1">
+                                                    <input
+                                                        type="text"
+                                                        value={ttsVoice}
+                                                        onChange={(e) => setTtsVoice(e.target.value)}
+                                                        placeholder="en-US-AvaNeural"
+                                                        className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                                    />
+                                                </div>
+                                            )}
+                                            <Button size="xs" variant="ghost" onClick={previewEdgeTTSVoice} title={t('settings.voice.page.actions.preview')}>
+                                                {isEdgePreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Speech SDK configuration */}
+                            {ttsProvider === 'speech-sdk' && (
+                                <div className="py-1.5 space-y-2">
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.sdkProvider')}</span>
+                                        <div className="mt-1.5">
+                                            <Select value={ttsSpeechSdkProvider || 'openai'} onValueChange={setTtsSpeechSdkProvider}>
+                                                <SelectTrigger className="w-fit">
+                                                    <SelectValue placeholder="Select provider" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {SPEECH_SDK_PROVIDERS.map((p) => (
+                                                        <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.model')}</span>
+                                        <div className="relative mt-1.5 max-w-xs">
+                                            <input
+                                                type="text"
+                                                value={ttsModel}
+                                                onChange={(e) => setTtsModel(e.target.value)}
+                                                placeholder="tts-1"
+                                                className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.voice')}</span>
+                                        <div className="flex items-center gap-2 mt-1.5">
+                                            <div className="relative max-w-xs flex-1">
+                                                <input
+                                                    type="text"
+                                                    value={ttsVoice}
+                                                    onChange={(e) => setTtsVoice(e.target.value)}
+                                                    placeholder="nova"
+                                                    className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                                />
+                                            </div>
+                                            <Button size="xs" variant="ghost" onClick={previewSpeechSdkVoice} title={t('settings.voice.page.actions.preview')}>
+                                                {isSdkPreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.sdkApiKey')}</span>
+                                        <span className="typography-meta ml-2 text-muted-foreground">{t('settings.voice.page.field.sdkApiKeyHint')}</span>
+                                        <div className="relative mt-1.5 max-w-xs">
+                                            <input
+                                                type="password"
+                                                value={ttsApiKey}
+                                                onChange={(e) => setTtsApiKey(e.target.value)}
+                                                placeholder="sk-..."
+                                                className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                            />
+                                            {ttsApiKey && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setTtsApiKey('')}
+                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                                >
+                                                    <Icon name="close" className="w-3.5 h-3.5" />
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div
+                                        className="group flex cursor-pointer items-center gap-2 py-0.5"
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-pressed={ttsTimestampsEnabled}
+                                        onClick={() => setTtsTimestampsEnabled(!ttsTimestampsEnabled)}
+                                        onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setTtsTimestampsEnabled(!ttsTimestampsEnabled); } }}
+                                    >
+                                        <Checkbox checked={ttsTimestampsEnabled} onChange={setTtsTimestampsEnabled} ariaLabel={t('settings.voice.page.field.timestamps')} />
+                                        <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.timestamps')}</span>
+                                        <span className="typography-meta text-muted-foreground">{t('settings.voice.page.field.timestampsHint')}</span>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* OpenAI API Key — legacy section shown only when voiceProvider=openai (migration compat) */}
+                            {ttsProvider !== 'speech-sdk' && ttsProvider !== 'edge-tts' && voiceProvider === 'openai' && (
                                 <div className="py-1.5">
                                     <span className={cn("typography-ui-label text-foreground", !isOpenAIAvailable && "text-[var(--status-error)]")}>
                                         {t('settings.voice.page.field.apiKey')}
@@ -618,10 +921,10 @@ export const VoiceSettings: React.FC = () => {
                             )}
 
                             {/* OpenAI-compatible custom server */}
-                            {voiceProvider === 'openai-compatible' && (
+                            {ttsProvider === 'openai-compatible' && (
                                 <div className="py-1.5 space-y-2">
                                     <div>
-                                        <span className={cn("typography-ui-label text-foreground", !openaiCompatibleUrl.trim() && "text-[var(--status-error)]")}>
+                                        <span className={cn("typography-ui-label text-foreground", !(ttsBaseURL || openaiCompatibleUrl).trim() && "text-[var(--status-error)]")}>
                                             {t('settings.voice.page.field.serverUrl')}
                                         </span>
                                         <span className="typography-meta ml-2 text-muted-foreground">
@@ -630,15 +933,15 @@ export const VoiceSettings: React.FC = () => {
                                         <div className="relative mt-1.5 max-w-xs">
                                             <input
                                                 type="text"
-                                                value={openaiCompatibleUrl}
-                                                onChange={(e) => setOpenaiCompatibleUrl(e.target.value)}
+                                                value={ttsBaseURL || openaiCompatibleUrl}
+                                                onChange={(e) => { setTtsBaseURL(e.target.value); setOpenaiCompatibleUrl(e.target.value); }}
                                                 placeholder="http://localhost:8880/v1"
                                                 className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
                                             />
-                                            {openaiCompatibleUrl && (
+                                            {(ttsBaseURL || openaiCompatibleUrl) && (
                                                 <button
                                                     type="button"
-                                                    onClick={() => setOpenaiCompatibleUrl('')}
+                                                    onClick={() => { setTtsBaseURL(''); setOpenaiCompatibleUrl(''); }}
                                                     className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                                                 >
                                                     <Icon name="close" className="w-3.5 h-3.5" />
@@ -651,8 +954,8 @@ export const VoiceSettings: React.FC = () => {
                                         <div className="relative mt-1.5 max-w-xs">
                                             <input
                                                 type="text"
-                                                value={openaiCompatibleTtsModel}
-                                                onChange={(e) => setOpenaiCompatibleTtsModel(e.target.value)}
+                                                value={ttsModel || openaiCompatibleTtsModel}
+                                                onChange={(e) => { setTtsModel(e.target.value); setOpenaiCompatibleTtsModel(e.target.value); }}
                                                 placeholder="speaches-ai/Kokoro-82M-v1.0-ONNX"
                                                 className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
                                             />
@@ -667,13 +970,13 @@ export const VoiceSettings: React.FC = () => {
                                             <div className="relative max-w-xs flex-1">
                                                 <input
                                                     type="text"
-                                                    value={openaiCompatibleVoice}
-                                                    onChange={(e) => setOpenaiCompatibleVoice(e.target.value)}
+                                                    value={ttsVoice || openaiCompatibleVoice}
+                                                    onChange={(e) => { setTtsVoice(e.target.value); setOpenaiCompatibleVoice(e.target.value); }}
                                                     placeholder="af_sky"
                                                     className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
                                                 />
                                             </div>
-                                            <Button size="xs" variant="ghost" onClick={previewCompatibleVoice} title={t('settings.voice.page.actions.preview')} disabled={!openaiCompatibleUrl.trim()}>
+                                            <Button size="xs" variant="ghost" onClick={previewCompatibleVoice} title={t('settings.voice.page.actions.preview')} disabled={!(ttsBaseURL || openaiCompatibleUrl).trim()}>
                                                 {isCompatiblePreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
                                             </Button>
                                         </div>
@@ -681,11 +984,11 @@ export const VoiceSettings: React.FC = () => {
                                 </div>
                             )}
 
-                            {/* Voice Selection */}
+                            {/* Voice Selection (only shown for providers without inline config) */}
                             <div className="flex items-center gap-8 py-1.5">
                                 <span className="typography-ui-label text-foreground sm:w-56 shrink-0">{t('settings.voice.page.field.voice')}</span>
                                 <div className="flex items-center gap-2 w-fit">
-                                    {voiceProvider === 'openai' && isOpenAIAvailable && (
+                                    {voiceProvider === 'openai' && ttsProvider !== 'speech-sdk' && isOpenAIAvailable && (
                                         <>
                                             <Select value={openaiVoice} onValueChange={setOpenaiVoice}>
                                                 <SelectTrigger className="w-fit">
@@ -703,11 +1006,11 @@ export const VoiceSettings: React.FC = () => {
                                         </>
                                     )}
 
-                                    {voiceProvider === 'openai-compatible' && (
+                                    {(ttsProvider === 'edge-tts' || ttsProvider === 'speech-sdk' || ttsProvider === 'openai-compatible') && (
                                         <span className="typography-meta text-muted-foreground">{t('settings.voice.page.field.configuredAbove')}</span>
                                     )}
 
-                                    {voiceProvider === 'say' && isSayAvailable && sayVoices.length > 0 && (
+                                    {(ttsProvider === 'say' || voiceProvider === 'say') && isSayAvailable && sayVoices.length > 0 && (
                                         <>
                                             <Select value={sayVoice} onValueChange={setSayVoice}>
                                                 <SelectTrigger className="w-fit">

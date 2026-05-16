@@ -1,16 +1,203 @@
 # TTS Module Documentation
 
 ## Purpose
-This module provides server-side Text-to-Speech services using OpenAI's TTS API. Shared text summarization now lives in `packages/web/server/lib/text/` and is consumed here in `tts` mode.
+
+This module provides server-side Text-to-Speech services for OpenChamber via a provider registry backed by multiple adapters. Providers include:
+
+- **edge-tts** — Microsoft Edge Read Aloud via `edge-tts-universal` (no API key, AGPL-3.0)
+- **speech-sdk** — Multi-provider TTS via `@speech-sdk/core` (OpenAI, ElevenLabs, Deepgram, Cartesia, Google, Hume, Mistral, xAI, and more)
+- **openai-compatible** — Any OpenAI-compatible `/audio/speech` endpoint (local or remote)
+- **say** — macOS `say` command (darwin only)
+- **browser** — client-side browser synthesis (no server synthesis; routing rejected with an error)
+
+The legacy OpenAI-centric `service.js` remains the fallback for requests with no `provider` field and no client-supplied API key or `baseURL` (backward compatibility).
+
+Shared text summarization lives in `packages/web/server/lib/text/` and is consumed here in `tts` mode.
 
 ## Entrypoints and structure
+
 - `packages/web/server/lib/tts/index.js`: Public entrypoint imported by `packages/web/server/index.js`.
 - `packages/web/server/lib/tts/routes.js`: Express route registration for `/api/voice/*`, `/api/tts/*`, and `/api/stt/*` endpoints.
-- `packages/web/server/lib/tts/capability-runtime.js`: runtime helper for probing local macOS `say` TTS voice capability.
-- `packages/web/server/lib/tts/service.js`: TTS service implementation with OpenAI integration.
+- `packages/web/server/lib/tts/capability-runtime.js`: Runtime helper for probing local macOS `say` TTS voice capability.
+- `packages/web/server/lib/tts/service.js`: Legacy TTS service implementation (OpenAI-only). Used as fallback for server-key-only requests.
+- `packages/web/server/lib/tts/base-url.js`: Shared base URL validation and normalization for custom OpenAI-compatible endpoints.
+- `packages/web/server/lib/tts/providers/index.js`: **Provider registry** — dispatches `generateTTS()` to the correct adapter.
+- `packages/web/server/lib/tts/providers/speech-sdk.js`: `@speech-sdk/core` adapter (multi-provider).
+- `packages/web/server/lib/tts/providers/edge-universal.js`: `edge-tts-universal` adapter (no API key).
+- `packages/web/server/lib/tts/providers/openai-compatible.js`: OpenAI-compatible HTTP adapter.
+- `packages/web/server/lib/tts/providers/say.js`: macOS `say` adapter.
 - `packages/web/server/lib/text/summarization.js`: Shared text summarization and sanitization utilities using opencode.ai zen API.
 - `packages/web/server/lib/tts/stt.js`: STT proxy for OpenAI-compatible transcription endpoints.
-- `packages/web/server/lib/tts/base-url.js`: shared base URL validation and normalization for custom OpenAI-compatible endpoints.
+
+## API Routes
+
+### `GET /api/tts/providers`
+
+Returns metadata for all registered providers and their availability.
+
+```json
+{
+  "providers": [
+    {
+      "id": "browser",
+      "name": "Browser Speech Synthesis",
+      "serverSide": false,
+      "requiresApiKey": false,
+      "available": true
+    },
+    {
+      "id": "edge-tts",
+      "name": "Edge TTS",
+      "note": "edge-tts-universal is AGPL-3.0. Review license before distributing.",
+      "serverSide": true,
+      "requiresApiKey": false,
+      "available": true
+    },
+    {
+      "id": "speech-sdk",
+      "name": "Speech SDK",
+      "serverSide": true,
+      "requiresApiKey": true,
+      "available": true,
+      "subProviders": [...]
+    },
+    {
+      "id": "openai-compatible",
+      "name": "OpenAI-compatible Endpoint",
+      "serverSide": true,
+      "requiresApiKey": false,
+      "available": true
+    },
+    {
+      "id": "say",
+      "name": "macOS Say",
+      "serverSide": true,
+      "requiresApiKey": false,
+      "available": false  // true only on macOS
+    }
+  ]
+}
+```
+
+### `GET /api/tts/voices?provider=edge-tts&locale=en-US`
+
+Returns voices for the specified provider. Currently only `provider=edge-tts` is supported.
+Voices are cached with a short TTL to avoid repeated upstream fetches.
+
+### `POST /api/tts/speak`
+
+Generates TTS audio. Returns raw audio bytes (`audio/mpeg` or other content type).
+
+**Backward compatible**: existing request bodies with `voice`, `model`, `speed`, `apiKey`, `baseURL` still work unchanged.
+
+**New fields** (all optional):
+- `provider`: Provider ID (`'browser'|'edge-tts'|'speech-sdk'|'openai-compatible'|'say'`). Omit for legacy auto-routing.
+- `sdkProvider`: Sub-provider for `speech-sdk` (e.g. `'openai'`, `'elevenlabs'`).
+- `pitch`: Pitch value for Edge TTS and browser TTS (0.5–2.0).
+- `volume`: Volume value (0–1).
+- `timestamps`: Boolean. If true, and provider supports it, word timestamps are computed.
+
+When `timestamps=true` and timestamps were returned, the response includes `X-TTS-Has-Timestamps: 1` header.
+
+**Backward compatibility routing**:
+- If `provider` is omitted and `baseURL` is present → routes to `openai-compatible`.
+- If `provider` is omitted, no `baseURL`, no client API key → routes through legacy `service.js` (uses server `OPENAI_API_KEY`).
+
+## Provider registry (`providers/index.js`)
+
+`generateTTS(req)` — dispatches to correct adapter.
+
+```js
+import { generateTTS, getProviderMetadata, listEdgeVoices } from './providers/index.js';
+
+const result = await generateTTS({
+  provider: 'edge-tts',
+  voice: 'en-US-AvaNeural',
+  text: 'Hello world',
+  speed: 1.0,
+  pitch: 1.0,
+  volume: 1.0,
+  timestamps: true,
+});
+
+// result: { audio: Buffer, contentType: 'audio/mpeg', provider: 'edge-tts', voice, timestamps: [{text, start, end}] }
+```
+
+## Speech SDK adapter (`providers/speech-sdk.js`)
+
+Uses `@speech-sdk/core` for multi-provider TTS.
+
+**Supported SDK providers**: `openai`, `elevenlabs`, `deepgram`, `cartesia`, `google`, `hume`, `mistral`, `xai`, `fish-audio`, `murf`, `resemble`, `fal`, `inworld`, `speech-gateway`.
+
+**Key behavior**:
+- Prefers direct provider factories (BYO keys) over Speech Gateway by default.
+- Resolves API key: explicit client `apiKey` > matching env var (e.g. `OPENAI_API_KEY`).
+- Passes `timestamps: true` when requested; returns `result.timestamps` (seconds, `{text, start, end}`).
+- Handles `MissingApiKeyError`, `TimestampKeyMissingError`, `ApiError`, `SpeechSDKError` with stable user-facing messages (no secrets exposed).
+
+## Edge TTS adapter (`providers/edge-universal.js`)
+
+Uses `edge-tts-universal` server-side.
+
+**⚠️ License**: `edge-tts-universal` is **AGPL-3.0**. Review license implications before distributing.
+
+**Key behavior**:
+- Default voice: `en-US-AvaNeural`. No API key required.
+- Rate/pitch/volume are converted from OpenChamber numeric values to Edge TTS percent strings.
+- Word boundaries (`WordBoundary` chunks) are converted to seconds: `start = offset / 10_000_000`, `end = (offset + duration) / 10_000_000`.
+- Returns `contentType: 'audio/mpeg'`.
+- Voice list is cached with a 5-minute TTL.
+
+## OpenAI-compatible adapter (`providers/openai-compatible.js`)
+
+Preserves existing custom endpoint behavior, renamed from OpenAI-centric.
+
+**Key safety rules**:
+- `normalizeCustomOpenAIBaseURL()` from `base-url.js` is applied before any request.
+- Server `OPENAI_API_KEY` is never sent to arbitrary remote URLs.
+- No timestamps returned by default (endpoint has no guarantee).
+
+## macOS Say adapter (`providers/say.js`)
+
+Preserved from prior implementation. Only available on `process.platform === 'darwin'`.
+
+## Key resolution
+
+Explicit `apiKey` in request body always takes precedence over server env vars.
+**API keys from request body are not logged.**
+No server env vars are leaked in responses.
+
+## Remote URL safety
+
+Custom `baseURL` values are validated by `normalizeCustomOpenAIBaseURL()` before use. Remote URLs are blocked unless explicitly allowed by configuration.
+
+## Timestamp behavior
+
+| Provider | Timestamps | Notes |
+|---|---|---|
+| `speech-sdk` | ✓ (where supported) | Seconds, `{text, start, end}`. `TimestampKeyMissingError` handled. |
+| `edge-tts` | ✓ | Converted from 100ns `WordBoundary` events. |
+| `openai-compatible` | ✗ | Not guaranteed by endpoint protocol. |
+| `say` | ✗ | No word boundary data available. |
+| `browser` | ✗ | Client-side only. |
+
+## Backward compatibility
+
+- All existing `/api/tts/speak` request shapes continue to work unchanged.
+- `voiceProvider='openai'` in UI is migrated to `ttsProvider='speech-sdk'` with `ttsSpeechSdkProvider='openai'` on first load.
+- `voiceProvider='openai-compatible'` → `ttsProvider='openai-compatible'`.
+- `openaiCompatibleUrl` → `ttsBaseURL`.
+- `openaiCompatibleVoice` → `ttsVoice`.
+- `openaiCompatibleTtsModel` → `ttsModel`.
+
+## Validation commands
+
+```bash
+bun run type-check
+bun run lint
+bun run build
+```
+
 
 ## Public exports
 
