@@ -3,6 +3,7 @@ import type { Part, TextPart } from '@opencode-ai/sdk/v2';
 
 import UserTextPart from './parts/UserTextPart';
 import ToolPart from './parts/ToolPart';
+import { computeMergedToolDurationMs, computeToolTimeBeforeTextMs } from './toolTimeUtils';
 import AssistantTextPart from './parts/AssistantTextPart';
 import ReasoningPart, { MergedReasoningPart } from './parts/ReasoningPart';
 import { MessageFilesDisplay } from '../FileAttachment';
@@ -1725,77 +1726,21 @@ const AssistantMessageBody = React.memo(({
     }, [isLastAssistantInTurn, hasStopFinish, turnGroupingContext?.userMessageCreatedAt, messageCompletedAt]);
 
     const mergedToolDurationMs = React.useMemo((): number | undefined => {
-        const activityParts = turnGroupingContext?.activityParts;
-        if (!activityParts) return undefined;
-        const userCreatedAt = turnGroupingContext?.userMessageCreatedAt;
-        if (typeof userCreatedAt !== 'number' || typeof messageCompletedAt !== 'number') return undefined;
-        const windowStart = userCreatedAt;
-        const windowEnd = messageCompletedAt;
-        const intervals: Array<[number, number]> = [];
-        for (const ap of activityParts) {
-            if (ap.kind !== 'tool') continue;
-            const st = (ap.part as { state?: unknown }).state;
-            if (st && typeof st === 'object' && 'time' in st) {
-                const t = (st as { time?: { start?: number; end?: number } }).time;
-                if (t && typeof t.start === 'number' && typeof t.end === 'number' && t.end > t.start) {
-                    const clippedStart = Math.max(t.start, windowStart);
-                    const clippedEnd = Math.min(t.end, windowEnd);
-                    if (clippedEnd > clippedStart) {
-                        intervals.push([clippedStart, clippedEnd]);
-                    }
-                }
-            }
-        }
-        if (intervals.length === 0) return 0;
-        intervals.sort((a, b) => a[0] - b[0]);
-        const merged: Array<[number, number]> = [[...intervals[0]]];
-        for (let i = 1; i < intervals.length; i++) {
-            const last = merged[merged.length - 1];
-            if (intervals[i][0] <= last[1]) {
-                last[1] = Math.max(last[1], intervals[i][1]);
-            } else {
-                merged.push([...intervals[i]]);
-            }
-        }
-        return merged.reduce((sum, iv) => sum + (iv[1] - iv[0]), 0);
+        if (typeof turnGroupingContext?.userMessageCreatedAt !== 'number' || typeof messageCompletedAt !== 'number') return undefined;
+        return computeMergedToolDurationMs(
+            turnGroupingContext?.activityParts as { kind: string; part: { state?: { time?: { start?: number; end?: number } } } }[] | undefined,
+            turnGroupingContext.userMessageCreatedAt,
+            messageCompletedAt,
+        );
     }, [turnGroupingContext?.activityParts, turnGroupingContext?.userMessageCreatedAt, messageCompletedAt]);
 
     const toolTimeBeforeTextMs = React.useMemo((): number | undefined => {
-        const activityParts = turnGroupingContext?.activityParts;
+        const activityParts = turnGroupingContext?.activityParts as { kind: string; part: { state?: { time?: { start?: number; end?: number } } } }[] | undefined;
         if (!activityParts) return undefined;
         const firstTextPart = parts.find((p): p is TextPart => p.type === 'text' && typeof (p as { time?: { start?: number } }).time?.start === 'number');
-        if (!firstTextPart || typeof messageCreatedAt !== 'number') return 0;
-        const textStart = (firstTextPart as unknown as { time: { start: number } }).time.start;
-        const windowStart = messageCreatedAt;
-        const windowEnd = textStart;
-        if (windowEnd <= windowStart) return 0;
-        const intervals: Array<[number, number]> = [];
-        for (const ap of activityParts) {
-            if (ap.kind !== 'tool') continue;
-            const st = (ap.part as { state?: unknown }).state;
-            if (st && typeof st === 'object' && 'time' in st) {
-                const t = (st as { time?: { start?: number; end?: number } }).time;
-                if (t && typeof t.start === 'number' && typeof t.end === 'number') {
-                    const clippedStart = Math.max(t.start, windowStart);
-                    const clippedEnd = Math.min(t.end, windowEnd);
-                    if (clippedEnd > clippedStart) {
-                        intervals.push([clippedStart, clippedEnd]);
-                    }
-                }
-            }
-        }
-        if (intervals.length === 0) return 0;
-        intervals.sort((a, b) => a[0] - b[0]);
-        const merged: Array<[number, number]> = [[...intervals[0]]];
-        for (let i = 1; i < intervals.length; i++) {
-            const last = merged[merged.length - 1];
-            if (intervals[i][0] <= last[1]) {
-                last[1] = Math.max(last[1], intervals[i][1]);
-            } else {
-                merged.push([...intervals[i]]);
-            }
-        }
-        return merged.reduce((sum, iv) => sum + (iv[1] - iv[0]), 0);
+        const textStart = firstTextPart ? (firstTextPart as unknown as { time: { start: number } }).time.start : undefined;
+        if (typeof messageCreatedAt !== 'number') return 0;
+        return computeToolTimeBeforeTextMs(activityParts, messageCreatedAt, textStart);
     }, [turnGroupingContext?.activityParts, parts, messageCreatedAt]);
 
     const tpsText = React.useMemo(() => {
