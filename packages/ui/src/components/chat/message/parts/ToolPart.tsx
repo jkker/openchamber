@@ -767,6 +767,8 @@ const renderJsonTreeBlock = (data: unknown) => {
 
 const shouldRenderToolOutputAsMarkdown = (toolName: string): boolean => {
     const normalizedToolName = normalizeToolName(toolName);
+    // Task output is handled by its dedicated renderer below because it also
+    // carries child-session summary behavior that should stay centralized there.
     if (!normalizedToolName || normalizedToolName === 'task') {
         return false;
     }

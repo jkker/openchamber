@@ -33,6 +33,15 @@ describe('toolRenderUtils', () => {
         expect(isStandaloneTool('custom-tool')).toBe(false);
     });
 
+    test('treats empty or missing tool names as non-expandable', () => {
+        expect(isExpandableTool('')).toBe(false);
+        expect(isExpandableTool('   ')).toBe(false);
+        expect(isExpandableTool(null)).toBe(false);
+        expect(isExpandableTool(undefined)).toBe(false);
+        expect(isStaticTool(undefined)).toBe(false);
+        expect(isStandaloneTool(undefined)).toBe(false);
+    });
+
     test('normalizes grouped static search tool names', () => {
         expect(getStaticGroupToolName('ripgrep')).toBe('grep');
         expect(getStaticGroupToolName('functions.glob')).toBe('grep');
