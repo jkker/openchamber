@@ -41,10 +41,50 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
     }
   });
 
-  // Server-side TTS endpoint - streams audio from OpenAI TTS API
+  app.get('/api/tts/providers', async (_req, res) => {
+    try {
+      const { ttsService } = await getTtsModule();
+      res.json({
+        providers: ttsService.listProviders({ sayTTSCapability }),
+      });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to load TTS providers' });
+    }
+  });
+
+  app.get('/api/tts/voices', async (req, res) => {
+    try {
+      const provider = typeof req.query.provider === 'string' ? req.query.provider.trim() : '';
+      if (!provider) {
+        return res.status(400).json({ error: 'provider query parameter is required' });
+      }
+
+      const { ttsService } = await getTtsModule();
+      const voices = await ttsService.listVoices({
+        provider,
+        locale: typeof req.query.locale === 'string' ? req.query.locale : undefined,
+        gender: typeof req.query.gender === 'string' ? req.query.gender : undefined,
+        sayTTSCapability,
+      });
+
+      return res.json({ provider, voices });
+    } catch (error) {
+      return res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to load TTS voices' });
+    }
+  });
+
   app.post('/api/tts/speak', async (req, res) => {
     try {
-      const { text, voice = 'nova', model = 'gpt-4o-mini-tts', speed = 0.9, instructions, summarize = false, providerId, modelId, threshold = 200, maxLength = 500, apiKey, baseURL } = req.body || {};
+      const {
+        text,
+        summarize = false,
+        providerId,
+        modelId,
+        threshold = 200,
+        maxLength = 500,
+        apiKey,
+        baseURL,
+      } = req.body || {};
 
       const normalizedBaseURLResult = normalizeCustomOpenAIBaseURL(baseURL);
       if (normalizedBaseURLResult.error) {
@@ -52,29 +92,14 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
       }
       const normalizedBaseURL = normalizedBaseURLResult.value;
 
-      console.log('[TTS] Request received:', { voice, model, speed, textLength: text?.length, hasApiKey: !!apiKey, hasBaseURL: !!baseURL });
-
       if (!text || typeof text !== 'string' || !text.trim()) {
         return res.status(400).json({ error: 'Text is required' });
       }
 
-      // Dynamically import the TTS service (ESM)
       const { ttsService } = await getTtsModule();
-
-      // Check availability - server-configured key, client-provided key, or custom server URL
-      const hasServerKey = ttsService.isAvailable();
-      const hasClientKey = apiKey && typeof apiKey === 'string' && apiKey.trim().length > 0;
-      const hasCustomBaseURL = typeof normalizedBaseURL === 'string' && normalizedBaseURL.length > 0;
-      
-      if (!hasServerKey && !hasClientKey && !hasCustomBaseURL) {
-        return res.status(503).json({ 
-          error: 'TTS service not available. Please configure OpenAI in OpenCode, provide an API key, or set a custom server URL in settings.' 
-        });
-      }
 
       let textToSpeak = text.trim();
 
-      // Optionally summarize long text before speaking using zen API
       if (summarize && textToSpeak.length > threshold) {
         try {
           const speakZenModel = await resolveZenModel(typeof req.body?.zenModel === 'string' ? req.body.zenModel : undefined);
@@ -85,34 +110,53 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
           }
         } catch (summarizeError) {
           console.error('[TTS/speak] Summarization failed:', summarizeError);
-          // Continue with original text if summarization fails
         }
       }
 
       const result = await ttsService.generateSpeechStream({
         text: textToSpeak,
-        voice,
-        model,
-        speed,
-        instructions,
-        apiKey: hasClientKey ? apiKey.trim() : undefined,
-        baseURL: hasCustomBaseURL ? normalizedBaseURL : undefined,
+        provider: typeof req.body?.provider === 'string' ? req.body.provider : undefined,
+        speechSdkProvider: typeof req.body?.speechSdkProvider === 'string' ? req.body.speechSdkProvider : undefined,
+        voice: typeof req.body?.voice === 'string' ? req.body.voice : undefined,
+        model: typeof req.body?.model === 'string' ? req.body.model : undefined,
+        speed: typeof req.body?.speed === 'number' ? req.body.speed : undefined,
+        pitch: typeof req.body?.pitch === 'number' ? req.body.pitch : undefined,
+        volume: typeof req.body?.volume === 'number' ? req.body.volume : undefined,
+        timestamps: req.body?.timestamps === true,
+        providerOptions: req.body?.providerOptions,
+        apiKeyMode: typeof req.body?.apiKeyMode === 'string' ? req.body.apiKeyMode : undefined,
+        instructions: typeof req.body?.instructions === 'string' ? req.body.instructions : undefined,
+        apiKey: typeof apiKey === 'string' && apiKey.trim().length > 0 ? apiKey.trim() : undefined,
+        baseURL: typeof normalizedBaseURL === 'string' && normalizedBaseURL.length > 0 ? normalizedBaseURL : undefined,
+        returnMetadata: req.body?.returnMetadata === true,
       });
+
+      if (req.body?.returnMetadata === true) {
+        return res.json({
+          audioBase64: result.buffer.toString('base64'),
+          contentType: result.contentType,
+          provider: result.provider,
+          model: result.model,
+          voice: result.voice,
+          timestamps: result.timestamps,
+          warnings: result.warnings,
+        });
+      }
 
       res.setHeader('Content-Type', result.contentType);
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Content-Length', result.buffer.length);
       res.send(result.buffer);
-      } catch (error) {
-        console.error('[TTS] Error:', error);
-        if (!res.headersSent) {
-          const { model: m, voice: v, baseURL: b } = req.body || {};
-          res.status(500).json({ 
-            error: error instanceof Error ? error.message : 'TTS generation failed',
-            detail: { model: m, voice: v, hasBaseURL: !!b },
-          });
-        }
+    } catch (error) {
+      console.error('[TTS] Error:', error);
+      if (!res.headersSent) {
+        const status = typeof error?.status === 'number' ? error.status : 500;
+        res.status(status).json({
+          error: error instanceof Error ? error.message : 'TTS generation failed',
+          ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+        });
       }
+    }
   });
 
   app.post('/api/text/summarize', async (req, res) => {
@@ -173,7 +217,8 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
         voices: [
           'alloy', 'ash', 'ballad', 'coral', 'echo', 'fable',
           'nova', 'onyx', 'sage', 'shimmer', 'verse', 'marin', 'cedar'
-        ]
+        ],
+        providers: ttsService.listProviders({ sayTTSCapability }),
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to check TTS status' });
@@ -193,48 +238,19 @@ export function registerTtsRoutes(app, { resolveZenModel, sayTTSCapability }) {
       if (!text || typeof text !== 'string' || !text.trim()) {
         return res.status(400).json({ error: 'Text is required' });
       }
-      
-      // Check if we're on macOS
-      if (process.platform !== 'darwin') {
-        return res.status(503).json({ error: 'macOS say command not available on this platform' });
-      }
-      
-      const { exec } = await import('child_process');
-      const { promisify } = await import('util');
-      const fs = await import('fs');
-      const os = await import('os');
-      const path = await import('path');
-      const execAsync = promisify(exec);
-      
-      // Create temp file for audio output (use m4a for browser compatibility)
-      const tempDir = os.tmpdir();
-      const tempFile = path.join(tempDir, `say-${Date.now()}.m4a`);
-      
-      // Escape text for shell - escape both single quotes and double quotes
-      const escapedText = text.trim().replace(/'/g, "'\\''").replace(/"/g, '\\"');
-      
-      // Generate audio file using 'say' command
-      // -o outputs to file, -r sets rate (words per minute)
-      // --data-format=aac outputs as m4a which browsers can decode
-      const cmd = `say -v "${voice}" -r ${rate} -o "${tempFile}" --data-format=aac '${escapedText}'`;
-      console.log('[TTS-Say] Generating speech:', { textLength: text.length, voice, rate });
-      
-      await execAsync(cmd);
-      
-      // Read the generated audio file
-      const audioBuffer = await fs.promises.readFile(tempFile);
-      
-      // Clean up temp file
-      fs.promises.unlink(tempFile).catch(() => {});
-      
-      // Send audio response
-      res.setHeader('Content-Type', 'audio/mp4');
-      res.setHeader('Content-Length', audioBuffer.length);
-      res.send(audioBuffer);
-      
+      const { ttsService } = await getTtsModule();
+      const result = await ttsService.generateSpeechStream({
+        provider: 'say',
+        text,
+        voice,
+        providerOptions: { rate },
+      });
+      res.setHeader('Content-Type', result.contentType);
+      res.setHeader('Content-Length', result.buffer.length);
+      res.send(result.buffer);
     } catch (error) {
       console.error('[TTS-Say] Error:', error);
-      res.status(500).json({
+      res.status(typeof error?.status === 'number' ? error.status : 500).json({
         error: error instanceof Error ? error.message : 'Say command failed'
       });
     }
