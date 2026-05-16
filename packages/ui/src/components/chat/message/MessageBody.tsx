@@ -1724,26 +1724,104 @@ const AssistantMessageBody = React.memo(({
         return formatTurnDuration(messageCompletedAt - userCreatedAt);
     }, [isLastAssistantInTurn, hasStopFinish, turnGroupingContext?.userMessageCreatedAt, messageCompletedAt]);
 
+    const mergedToolDurationMs = React.useMemo((): number | undefined => {
+        const activityParts = turnGroupingContext?.activityParts;
+        if (!activityParts) return undefined;
+        const userCreatedAt = turnGroupingContext?.userMessageCreatedAt;
+        if (typeof userCreatedAt !== 'number' || typeof messageCompletedAt !== 'number') return undefined;
+        const windowStart = userCreatedAt;
+        const windowEnd = messageCompletedAt;
+        const intervals: Array<[number, number]> = [];
+        for (const ap of activityParts) {
+            if (ap.kind !== 'tool') continue;
+            const st = (ap.part as { state?: unknown }).state;
+            if (st && typeof st === 'object' && 'time' in st) {
+                const t = (st as { time?: { start?: number; end?: number } }).time;
+                if (t && typeof t.start === 'number' && typeof t.end === 'number' && t.end > t.start) {
+                    const clippedStart = Math.max(t.start, windowStart);
+                    const clippedEnd = Math.min(t.end, windowEnd);
+                    if (clippedEnd > clippedStart) {
+                        intervals.push([clippedStart, clippedEnd]);
+                    }
+                }
+            }
+        }
+        if (intervals.length === 0) return 0;
+        intervals.sort((a, b) => a[0] - b[0]);
+        const merged: Array<[number, number]> = [[...intervals[0]]];
+        for (let i = 1; i < intervals.length; i++) {
+            const last = merged[merged.length - 1];
+            if (intervals[i][0] <= last[1]) {
+                last[1] = Math.max(last[1], intervals[i][1]);
+            } else {
+                merged.push([...intervals[i]]);
+            }
+        }
+        return merged.reduce((sum, iv) => sum + (iv[1] - iv[0]), 0);
+    }, [turnGroupingContext?.activityParts, turnGroupingContext?.userMessageCreatedAt, messageCompletedAt]);
+
+    const toolTimeBeforeTextMs = React.useMemo((): number | undefined => {
+        const activityParts = turnGroupingContext?.activityParts;
+        if (!activityParts) return undefined;
+        const firstTextPart = parts.find((p): p is TextPart => p.type === 'text' && typeof (p as { time?: { start?: number } }).time?.start === 'number');
+        if (!firstTextPart || typeof messageCreatedAt !== 'number') return 0;
+        const textStart = (firstTextPart as unknown as { time: { start: number } }).time.start;
+        const windowStart = messageCreatedAt;
+        const windowEnd = textStart;
+        if (windowEnd <= windowStart) return 0;
+        const intervals: Array<[number, number]> = [];
+        for (const ap of activityParts) {
+            if (ap.kind !== 'tool') continue;
+            const st = (ap.part as { state?: unknown }).state;
+            if (st && typeof st === 'object' && 'time' in st) {
+                const t = (st as { time?: { start?: number; end?: number } }).time;
+                if (t && typeof t.start === 'number' && typeof t.end === 'number') {
+                    const clippedStart = Math.max(t.start, windowStart);
+                    const clippedEnd = Math.min(t.end, windowEnd);
+                    if (clippedEnd > clippedStart) {
+                        intervals.push([clippedStart, clippedEnd]);
+                    }
+                }
+            }
+        }
+        if (intervals.length === 0) return 0;
+        intervals.sort((a, b) => a[0] - b[0]);
+        const merged: Array<[number, number]> = [[...intervals[0]]];
+        for (let i = 1; i < intervals.length; i++) {
+            const last = merged[merged.length - 1];
+            if (intervals[i][0] <= last[1]) {
+                last[1] = Math.max(last[1], intervals[i][1]);
+            } else {
+                merged.push([...intervals[i]]);
+            }
+        }
+        return merged.reduce((sum, iv) => sum + (iv[1] - iv[0]), 0);
+    }, [turnGroupingContext?.activityParts, parts, messageCreatedAt]);
+
     const tpsText = React.useMemo(() => {
         if (!isLastAssistantInTurn || !hasStopFinish) return undefined;
         const userCreatedAt = turnGroupingContext?.userMessageCreatedAt;
         if (typeof userCreatedAt !== 'number' || typeof messageCompletedAt !== 'number' || typeof outputTokens !== 'number') return undefined;
-        const durationSec = (messageCompletedAt - userCreatedAt) / 1000;
-        if (durationSec <= 0 || outputTokens <= 0) return undefined;
-        return `${(outputTokens / durationSec).toFixed(1)} t/s`;
-    }, [isLastAssistantInTurn, hasStopFinish, turnGroupingContext?.userMessageCreatedAt, messageCompletedAt, outputTokens]);
+        if (typeof mergedToolDurationMs !== 'number') return undefined;
+        const totalMs = messageCompletedAt - userCreatedAt;
+        const generationMs = totalMs - mergedToolDurationMs;
+        if (generationMs <= 0 || outputTokens <= 0) return undefined;
+        return `${(outputTokens / (generationMs / 1000)).toFixed(1)} t/s`;
+    }, [isLastAssistantInTurn, hasStopFinish, turnGroupingContext?.userMessageCreatedAt, messageCompletedAt, outputTokens, mergedToolDurationMs]);
 
     const ttftText = React.useMemo(() => {
         if (!isLastAssistantInTurn || !hasStopFinish) return undefined;
         const msgCreated = messageCreatedAt;
         if (typeof msgCreated !== 'number') return undefined;
+        if (typeof toolTimeBeforeTextMs !== 'number') return undefined;
         const firstTextPart = parts.find((p): p is TextPart => p.type === 'text' && typeof (p as { time?: { start?: number } }).time?.start === 'number');
         if (!firstTextPart) return undefined;
         const ttStart = (firstTextPart as unknown as { time: { start: number } }).time.start;
-        const ttftMs = ttStart - msgCreated;
-        if (ttftMs <= 0) return undefined;
-        return ttftMs < 1000 ? `${ttftMs}ms` : `${(ttftMs / 1000).toFixed(1)}s`;
-    }, [isLastAssistantInTurn, hasStopFinish, messageCreatedAt, parts]);
+        const rawTTFT = ttStart - msgCreated;
+        const adjustedTTFT = rawTTFT - toolTimeBeforeTextMs;
+        if (adjustedTTFT <= 0) return undefined;
+        return adjustedTTFT < 1000 ? `${adjustedTTFT}ms` : `${(adjustedTTFT / 1000).toFixed(1)}s`;
+    }, [isLastAssistantInTurn, hasStopFinish, messageCreatedAt, parts, toolTimeBeforeTextMs]);
 
     const footerTimestamp = React.useMemo(() => {
         const timestamp = typeof messageCompletedAt === 'number' && messageCompletedAt > 0
