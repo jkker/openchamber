@@ -166,7 +166,7 @@ Error mapping:
 ## License note
 
 `edge-tts-universal` is licensed under AGPL-3.0.
-This is a material distribution risk for OpenChamber and must be called out in the PR notes before merge.
+That license constraint applies to the current implementation and should be reviewed by maintainers as part of release and distribution decisions.
 
 ## Verification
 

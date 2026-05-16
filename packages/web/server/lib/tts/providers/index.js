@@ -85,6 +85,8 @@ export function resolveTtsRequest(rawRequest = {}) {
   }
 
   if (provider === 'say') {
+    // Legacy say callers use a normalized 0.5-2.0 speed slider. Convert that to the
+    // words-per-minute rate expected by the macOS `say` command.
     const rate = Number.isFinite(providerOptions.rate)
       ? Math.round(providerOptions.rate)
       : Math.round(100 + (resolved.speed - 0.5) * 200);

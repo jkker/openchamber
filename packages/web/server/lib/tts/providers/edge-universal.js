@@ -3,6 +3,7 @@ import { UniversalCommunicate, listVoicesUniversal } from 'edge-tts-universal';
 const EDGE_VOICE_CACHE_TTL_MS = 5 * 60 * 1000;
 const EDGE_DEFAULT_VOICE = 'en-US-AvaNeural';
 const EDGE_DEFAULT_MODEL = 'edge-tts-universal';
+const EDGE_100NS_PER_SECOND = 10_000_000;
 
 let edgeVoiceCache = null;
 
@@ -102,8 +103,9 @@ export function createEdgeUniversalTtsProvider() {
         if (chunk.type === 'WordBoundary') {
           timestamps.push({
             text: chunk.text,
-            start: chunk.offset / 10_000_000,
-            end: (chunk.offset + chunk.duration) / 10_000_000,
+            // Edge TTS reports word boundaries in 100ns ticks, so convert them to seconds.
+            start: chunk.offset / EDGE_100NS_PER_SECOND,
+            end: (chunk.offset + chunk.duration) / EDGE_100NS_PER_SECOND,
           });
         }
       }

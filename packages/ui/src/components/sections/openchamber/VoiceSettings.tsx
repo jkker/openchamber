@@ -468,7 +468,7 @@ export const VoiceSettings: React.FC = () => {
                                                 <ul className="space-y-1">
                                                     <li><strong>{t('settings.voice.page.provider.browser')}</strong> {t('settings.voice.page.tooltip.browser')}</li>
                                                     <li><strong>Edge TTS:</strong> No key required, synthesized on the server.</li>
-                                                    <li><strong>Speech SDK:</strong> Provider-agnostic TTS with direct or gateway routing.</li>
+                                                    <li><strong>Speech SDK:</strong> Supports multiple hosted TTS providers behind one OpenChamber setting.</li>
                                                     <li><strong>OpenAI-compatible:</strong> {t('settings.voice.page.tooltip.custom')}</li>
                                                     <li><strong>{t('settings.voice.page.provider.say')}</strong> {t('settings.voice.page.tooltip.say')}</li>
                                                 </ul>

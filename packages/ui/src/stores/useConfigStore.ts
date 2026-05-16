@@ -553,6 +553,9 @@ const getInitialSpeechSdkProvider = (): SpeechSdkProviderId => {
 
 const getInitialTtsApiKey = (): string => {
     const next = readLocalStorageString('ttsApiKey') ?? readLocalStorageString('openaiApiKey') ?? '';
+    // Legacy TTS keys used to be persisted in localStorage. Read them once during
+    // migration, immediately clear them, and then keep all new client-supplied keys
+    // in memory for the current session only.
     removeLocalStorageKey('ttsApiKey');
     removeLocalStorageKey('openaiApiKey');
     return next;
@@ -2136,13 +2139,14 @@ export const useConfigStore = create<ConfigStore>()(
                 },
 
                 setOpenaiVoice: (voice: string) => {
+                    const state = get();
                     set({
                         openaiVoice: voice,
-                        ...(get().ttsProvider === 'speech-sdk' && get().ttsSpeechSdkProvider === 'openai' ? { ttsVoice: voice } : {}),
+                        ...(state.ttsProvider === 'speech-sdk' && state.ttsSpeechSdkProvider === 'openai' ? { ttsVoice: voice } : {}),
                     });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('openaiVoice', voice);
-                        if (get().ttsProvider === 'speech-sdk' && get().ttsSpeechSdkProvider === 'openai') {
+                        if (state.ttsProvider === 'speech-sdk' && state.ttsSpeechSdkProvider === 'openai') {
                             localStorage.setItem('ttsVoice', voice);
                         }
                     }
