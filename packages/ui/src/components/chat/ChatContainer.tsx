@@ -35,6 +35,7 @@ import {
     useSessionMessageRecords,
     useSessions,
     useDirectorySync,
+    useDirectoryStore as useSyncDirectoryStore,
     useSessionStatus,
 } from '@/sync/sync-context';
 import { useSync } from '@/sync/use-sync';
@@ -42,6 +43,7 @@ import { getSessionMaterializationStatus } from '@/sync/materialization';
 import { usePlanDetection } from '@/hooks/usePlanDetection';
 import { getAllSyncSessions } from '@/sync/sync-refs';
 import { useI18n } from '@/lib/i18n';
+import { opencodeClient } from '@/lib/opencode/client';
 
 import { EMPTY_OBJECT, EMPTY_PERMISSION_REQUESTS, EMPTY_QUESTION_REQUESTS, emptyArray } from '@/constants/empty';
 const EMPTY_MESSAGES: Array<{ info: Message; parts: Part[] }> = emptyArray<{ info: Message; parts: Part[] }>() as Array<{ info: Message; parts: Part[] }>;
@@ -391,6 +393,8 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ aboveInput }) => {
 
     // Sessions from sync system
     const sessions = useSessions();
+    const syncStatus = useDirectorySync(React.useCallback((state) => state.status, []));
+    const syncStore = useSyncDirectoryStore();
 
     // Plan detection - watches messages for plan creation and signals store
     usePlanDetection(currentSessionId ?? '');
@@ -744,6 +748,79 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ aboveInput }) => {
         if (hasRenderableSessionSnapshot) return;
         void ensureSessionRenderable(currentSessionId);
     }, [currentSessionId, ensureSessionRenderable, hasRenderableSessionSnapshot]);
+
+    React.useEffect(() => {
+        if (!currentSessionId) return;
+        let cancelled = false;
+        const directory = opencodeClient.getDirectory() || undefined;
+        void Promise.all([
+            opencodeClient.getSessionStatusForDirectory(directory),
+            opencodeClient.listPendingPermissions({ directories: [directory] }),
+            opencodeClient.listPendingQuestions({ directories: [directory] }),
+        ]).then(([statuses, permissions, questions]) => {
+            if (cancelled) return;
+            syncStore.setState((state) => ({
+                session_status: statuses[currentSessionId]
+                    ? { ...state.session_status, [currentSessionId]: statuses[currentSessionId] as (typeof state.session_status)[string] }
+                    : state.session_status,
+                permission: {
+                    ...state.permission,
+                    [currentSessionId]: permissions.filter((item) => item.sessionID === currentSessionId),
+                },
+                question: {
+                    ...state.question,
+                    [currentSessionId]: questions.filter((item) => item.sessionID === currentSessionId),
+                },
+            }));
+        }).catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+    }, [currentSessionId, syncStore]);
+
+    React.useEffect(() => {
+        if (!currentSessionId || hasRenderableSessionSnapshot) return;
+        if (!sessions.some((session) => session.id === currentSessionId)) return;
+
+        let cancelled = false;
+        let attempts = 0;
+        let timer: number | null = null;
+
+        const run = () => {
+            if (cancelled) return;
+            attempts += 1;
+            void sync.syncSession(currentSessionId, true).finally(() => {
+                const directory = opencodeClient.getDirectory() || undefined;
+                void Promise.all([
+                    opencodeClient.getSessionStatusForDirectory(directory),
+                    opencodeClient.listPendingPermissions({ directories: [directory] }),
+                    opencodeClient.listPendingQuestions({ directories: [directory] }),
+                ]).then(([statuses, permissions, questions]) => {
+                    syncStore.setState((state) => ({
+                        session_status: statuses[currentSessionId]
+                            ? { ...state.session_status, [currentSessionId]: statuses[currentSessionId] as (typeof state.session_status)[string] }
+                            : state.session_status,
+                        permission: {
+                            ...state.permission,
+                            [currentSessionId]: permissions.filter((item) => item.sessionID === currentSessionId),
+                        },
+                        question: {
+                            ...state.question,
+                            [currentSessionId]: questions.filter((item) => item.sessionID === currentSessionId),
+                        },
+                    }));
+                }).catch(() => undefined);
+                if (cancelled || attempts >= 5) return;
+                timer = window.setTimeout(run, 700);
+            });
+        };
+
+        timer = window.setTimeout(run, syncStatus === 'complete' ? 0 : 300);
+        return () => {
+            cancelled = true;
+            if (timer) window.clearTimeout(timer);
+        };
+    }, [currentSessionId, hasRenderableSessionSnapshot, sessions, sync, syncStatus, syncStore]);
 
 	if (!currentSessionId && !draftOpen) {
 		return (

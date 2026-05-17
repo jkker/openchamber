@@ -7,7 +7,8 @@ import { setDirectoryShowHidden } from '@/lib/directoryShowHidden';
 import { setFilesViewShowGitignored } from '@/lib/filesViewShowGitignored';
 import { loadAppearancePreferences, applyAppearancePreferences } from '@/lib/appearancePersistence';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
-import { buildRuntimeApiHeaders, resolveRuntimeApiEndpoint } from '@/lib/instances/runtimeApiBaseUrl';
+import { normalizeMobileKeyboardMode, setStoredMobileKeyboardMode } from '@/lib/mobileKeyboardMode';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 const persistToLocalStorage = (settings: DesktopSettings) => {
   if (typeof window === 'undefined') {
@@ -1095,12 +1096,36 @@ const fetchWebSettings = async (): Promise<DesktopSettings | null> => {
     return _settingsCache.value;
   }
 
-  try {
-    const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
-      method: 'GET',
-      headers: buildRuntimeApiHeaders(),
-    });
-    if (!response.ok) {
+  // Dedup concurrent calls
+  if (_settingsInflight) return _settingsInflight;
+
+  _settingsInflight = (async (): Promise<DesktopSettings | null> => {
+    const runtimeSettings = getRuntimeSettingsAPI();
+    if (runtimeSettings) {
+      try {
+        const result = await runtimeSettings.load();
+        const settings = sanitizeWebSettings(result.settings);
+        _settingsCache = { value: settings, at: Date.now() };
+        return settings;
+      } catch (error) {
+        console.warn('Failed to load shared settings from runtime settings API:', error);
+      }
+    }
+
+    try {
+      const response = await runtimeFetch('/api/config/settings', {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const data = await response.json().catch(() => null);
+      const settings = sanitizeWebSettings(data);
+      _settingsCache = { value: settings, at: Date.now() };
+      return settings;
+    } catch (error) {
+      console.warn('Failed to load shared settings from server:', error);
       return null;
     }
   })().finally(() => { _settingsInflight = null; });
@@ -1204,7 +1229,7 @@ const _flushSettingsUpdate = async (): Promise<void> => {
   }
 
   try {
-    const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
+    const response = await runtimeFetch('/api/config/settings', {
       method: 'PUT',
       headers: buildRuntimeApiHeaders({
         'Content-Type': 'application/json',

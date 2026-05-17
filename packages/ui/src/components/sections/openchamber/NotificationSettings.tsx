@@ -15,6 +15,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { Icon } from "@/components/icon/Icon";
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 const DEFAULT_NOTIFICATION_TEMPLATES = {
   completion: {
@@ -90,7 +91,7 @@ export const NotificationSettings: React.FC = () => {
 
   React.useEffect(() => {
     const controller = new AbortController();
-    void fetch('/api/zen/models', {
+    void runtimeFetch('/api/zen/models', {
       method: 'GET',
       headers: { Accept: 'application/json' },
       signal: controller.signal,

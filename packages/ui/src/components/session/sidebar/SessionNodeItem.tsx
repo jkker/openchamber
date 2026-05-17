@@ -48,8 +48,7 @@ import type { ChildSessionExport } from '@/lib/exportSession';
 import { buildSessionMessageRecordsSnapshot, useDirectoryStore, useGlobalSessionStatus, useSession, useSessionPermissions } from '@/sync/sync-context';
 import { getCompatibleSessionParentId, getCompatibleSessionShareUrl, getCompatibleSessionSummary } from '@/sync/compat';
 import { useSync } from '@/sync/use-sync';
-import { useSelectionStore } from '@/sync/selection-store';
-import { useViewportStore } from '@/sync/viewport-store';
+import { useViewportStore, viewportSessionKey } from '@/sync/viewport-store';
 import { DraggableSessionRow } from './sessionFolderDnd';
 import type { SessionNode, SessionSummaryMeta } from './types';
 import { getSessionParentId } from './types';
@@ -57,74 +56,10 @@ import { formatSessionCompactDateLabel, formatSessionDateLabel, normalizePath, r
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
 import { useSessionUnseenCount } from '@/sync/notification-store';
-
-// Pre-defined palette with maximally distinct colors across hue + saturation + lightness.
-// Ordered so adjacent entries are perceptually far apart.
-const PROJECT_TAG_PALETTE: Array<[number, number, number]> = [
-  // [hue, saturation%, lightness%]
-  [  4,  80, 60],  // red
-  [210,  80, 62],  // blue
-  [ 38,  88, 56],  // orange
-  [155,  55, 50],  // teal-green
-  [270,  65, 66],  // purple
-  [ 55,  80, 52],  // gold/yellow
-  [330,  70, 64],  // pink
-  [185,  62, 48],  // cyan
-  [ 90,  55, 52],  // lime-green
-  [240,  55, 68],  // periwinkle
-  [ 20,  75, 62],  // amber
-  [300,  55, 62],  // magenta
-  [168,  48, 55],  // seafoam
-  [ 68,  65, 50],  // olive
-  [348,  65, 58],  // rose
-  [195,  70, 52],  // sky
-  [120,  45, 52],  // sage
-  [258,  70, 58],  // indigo
-];
-
-function getProjectTagColor(projectId: string | null | undefined): { text: string; bg: string } {
-  if (!projectId) {
-    const [h, s, l] = PROJECT_TAG_PALETTE[0]!;
-    return { text: `hsl(${h} ${s}% ${l}%)`, bg: `hsl(${h} ${s}% ${l}% / 0.13)` };
-  }
-  // djb2 hash → stable slot per projectId
-  let hash = 5381;
-  for (let i = 0; i < projectId.length; i++) {
-    hash = ((hash << 5) + hash) ^ projectId.charCodeAt(i);
-    hash |= 0;
-  }
-  const [h, s, l] = PROJECT_TAG_PALETTE[Math.abs(hash) % PROJECT_TAG_PALETTE.length]!;
-  return {
-    text: `hsl(${h} ${s}% ${l}%)`,
-    bg:   `hsl(${h} ${s}% ${l}% / 0.13)`,
-  };
-}
-
-const ATTENTION_DIAMOND_INDICES = new Set([1, 3, 4, 5, 7]);
-
-const getAttentionDiamondDelay = (index: number): string => {
-  return index === 4 ? '0ms' : '130ms';
-};
-
-const formatBackendLabel = (backendId: string | null | undefined): string | null => {
-  if (typeof backendId !== 'string' || backendId.trim().length === 0) {
-    return null;
-  }
-
-  const normalized = backendId.trim().toLowerCase();
-  if (normalized === 'opencode') {
-    return 'OpenCode';
-  }
-  if (normalized === 'codex') {
-    return 'Codex';
-  }
-
-  return normalized
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-};
+import { useSessionMultiSelectStore } from '@/stores/useSessionMultiSelectStore';
+import { useI18n } from '@/lib/i18n';
+import { getRuntimeBearerTokenSync } from '@/lib/runtime-auth';
+import { getRuntimeApiBaseUrl } from '@/lib/runtime-switch';
 
 type Folder = { id: string; name: string; sessionIds: string[] };
 
@@ -396,7 +331,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
 
   const menuInstanceKey = `${renderContext}:${archivedBucket ? 'archived' : 'active'}:${session.id}`;
   const isZombie = useViewportStore(
-    React.useCallback((state) => Boolean(state.sessionMemoryState.get(session.id)?.isZombie), [session.id]),
+    React.useCallback((state) => Boolean(state.sessionMemoryState.get(viewportSessionKey(session.id))?.isZombie), [session.id]),
   );
   const sessionStatus = useGlobalSessionStatus(session.id);
   const sessionPermissions = useSessionPermissions(session.id, sessionDirectory ?? undefined);
@@ -574,6 +509,8 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     void invokeDesktop('desktop_open_session_mini_chat_window', {
       sessionId: session.id,
       directory: sessionDirectory,
+      apiBaseUrl: getRuntimeApiBaseUrl(),
+      clientToken: getRuntimeBearerTokenSync(),
     }).catch((error) => {
       console.warn('[session-sidebar] failed to open mini chat window', error);
     });

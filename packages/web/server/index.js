@@ -81,6 +81,7 @@ import { createSessionBindingsRuntime } from './lib/harness/session-bindings.js'
 import { createOpenCodeBackendRuntime } from './lib/harness/opencode-backend.js';
 import { createCodexBackendRuntime } from './lib/harness/codex-backend.js';
 import { createProjectConfigRuntime } from './lib/projects/project-config.js';
+import { createRemoteClientAuthRuntime } from './lib/client-auth/remote-clients.js';
 import { createPreviewProxyRuntime } from './lib/preview/proxy-runtime.js';
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware';
 import webPush from 'web-push';
@@ -1385,21 +1386,10 @@ const SETTINGS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'settings.json');
 const SESSION_BINDINGS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'session-bindings.json');
 const CODEX_SESSIONS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'codex-sessions.json');
 const PUSH_SUBSCRIPTIONS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'push-subscriptions.json');
-const CLOUDFLARE_NAMED_TUNNELS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'cloudflare-named-tunnels.json');
-const CLOUDFLARE_NAMED_TUNNELS_VERSION = 1;
-const PROJECT_ICONS_DIR_PATH = path.join(OPENCHAMBER_DATA_DIR, 'project-icons');
-const PROJECT_ICON_MIME_TO_EXTENSION = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/svg+xml': 'svg',
-  'image/webp': 'webp',
-  'image/x-icon': 'ico',
-};
-const PROJECT_ICON_EXTENSION_TO_MIME = Object.fromEntries(
-  Object.entries(PROJECT_ICON_MIME_TO_EXTENSION).map(([mime, ext]) => [ext, mime])
-);
-const PROJECT_ICON_SUPPORTED_MIMES = new Set(Object.keys(PROJECT_ICON_MIME_TO_EXTENSION));
-const PROJECT_ICON_MAX_BYTES = 5 * 1024 * 1024;
+const REMOTE_CLIENTS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'remote-clients.json');
+const CLOUDFLARE_MANAGED_REMOTE_TUNNELS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'cloudflare-managed-remote-tunnels.json');
+const CLOUDFLARE_LEGACY_NAMED_TUNNELS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'cloudflare-named-tunnels.json');
+const CLOUDFLARE_MANAGED_REMOTE_TUNNELS_VERSION = 1;
 
 const normalizeProjectIconMime = (value) => {
   if (typeof value !== 'string') {
@@ -6099,23 +6089,82 @@ const serverUtilsRuntime = createServerUtilsRuntime({
     }
   })();
 
-  try {
-    await currentRestartPromise;
-  } catch (error) {
-    console.error(`Failed to restart OpenCode: ${error.message}`);
-    lastOpenCodeError = error.message;
-    if (!ENV_CONFIGURED_OPENCODE_PORT) {
-      openCodePort = null;
-      syncToHmrState();
-    }
-    openCodeApiPrefixDetected = true;
-    openCodeApiPrefix = '';
-    throw error;
-  } finally {
-    currentRestartPromise = null;
-    isRestartingOpenCode = false;
-  }
-}
+const setOpenCodePort = (...args) => serverUtilsRuntime.setOpenCodePort(...args);
+const waitForOpenCodePort = (...args) => serverUtilsRuntime.waitForOpenCodePort(...args);
+const buildAugmentedPath = (...args) => serverUtilsRuntime.buildAugmentedPath(...args);
+const buildManagedOpenCodePath = (...args) => serverUtilsRuntime.buildManagedOpenCodePath(...args);
+const parseSseDataPayload = (...args) => serverUtilsRuntime.parseSseDataPayload(...args);
+const staticRoutesRuntime = createStaticRoutesRuntime({
+  fs,
+  path,
+  process,
+  __dirname,
+  express,
+  resolveProjectDirectory,
+  buildOpenCodeUrl,
+  getOpenCodeAuthHeaders,
+  readSettingsFromDiskMigrated,
+  normalizePwaAppName,
+  normalizePwaOrientation,
+});
+const remoteClientAuthRuntime = createRemoteClientAuthRuntime({
+  fsPromises,
+  path,
+  crypto,
+  storePath: REMOTE_CLIENTS_FILE_PATH,
+});
+const featureRoutesRuntime = createFeatureRoutesRuntime({
+  clientReloadDelayMs: CLIENT_RELOAD_DELAY_MS,
+});
+const bootstrapRuntime = createBootstrapRuntime({
+  createUiAuth,
+  registerServerStatusRoutes,
+  registerCommonRequestMiddleware,
+  registerAuthAndAccessRoutes,
+  registerTtsRoutes,
+  registerNotificationRoutes,
+  registerOpenChamberRoutes,
+  express,
+});
+const tunnelWiringRuntime = createTunnelWiringRuntime({
+  crypto,
+  URL,
+  tunnelProviderRegistry,
+  tunnelAuthController,
+  readSettingsFromDiskMigrated,
+  readManagedRemoteTunnelConfigFromDisk,
+  normalizeTunnelProvider,
+  normalizeTunnelMode,
+  normalizeOptionalPath,
+  normalizeManagedRemoteTunnelHostname,
+  normalizeTunnelBootstrapTtlMs,
+  normalizeTunnelSessionTtlMs,
+  isSupportedTunnelMode,
+  upsertManagedRemoteTunnelToken,
+  resolveManagedRemoteTunnelToken,
+  TUNNEL_MODE_QUICK,
+  TUNNEL_MODE_MANAGED_LOCAL,
+  TUNNEL_MODE_MANAGED_REMOTE,
+  TUNNEL_PROVIDER_CLOUDFLARE,
+  TunnelServiceError,
+  getActiveTunnelController: () => activeTunnelController,
+  setActiveTunnelController: (value) => {
+    activeTunnelController = value;
+  },
+  getRuntimeManagedRemoteTunnelHostname: () => runtimeManagedRemoteTunnelHostname,
+  setRuntimeManagedRemoteTunnelHostname: (value) => {
+    runtimeManagedRemoteTunnelHostname = value;
+  },
+  getRuntimeManagedRemoteTunnelToken: () => runtimeManagedRemoteTunnelToken,
+  setRuntimeManagedRemoteTunnelToken: (value) => {
+    runtimeManagedRemoteTunnelToken = value;
+  },
+});
+const startupPipelineRuntime = createStartupPipelineRuntime({
+  createTerminalRuntime,
+  createMessageStreamWsRuntime,
+  createServerStartupRuntime,
+});
 
 async function waitForOpenCodeReady(timeoutMs = 20000, intervalMs = 400) {
   if (!openCodePort) {
@@ -6341,6 +6390,7 @@ async function main(options = {}) {
   const port = Number.isFinite(options.port) && options.port >= 0 ? Math.trunc(options.port) : DEFAULT_PORT;
   const host = typeof options.host === 'string' && options.host.length > 0 ? options.host : undefined;
   const tryCfTunnel = options.tryCfTunnel === true;
+  const apiOnly = options.apiOnly === true || isEnvFlagEnabled(process.env.OPENCHAMBER_API_ONLY);
   const shouldUseCanonicalTunnelConfig = typeof options.tunnelMode === 'string'
     || typeof options.tunnelProvider === 'string'
     || options.tunnelConfigPath === null
@@ -6385,7 +6435,23 @@ async function main(options = {}) {
 
   const app = express();
   const serverStartedAt = new Date().toISOString();
+  const packagedClientOrigins = new Set(['openchamber-ui://app']);
   app.set('trust proxy', true);
+  app.use((req, res, next) => {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : '';
+    if (packagedClientOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,X-Requested-With');
+      res.setHeader('Vary', 'Origin');
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    }
+    next();
+  });
   app.use(compression({
     filter: (req, res) => {
       if (shouldSkipCompression(req, res)) return false;
@@ -11097,6 +11163,7 @@ async function main(options = {}) {
         bunBinaryResolved: resolvedBunBinary || null,
         desktopNotifyEnabled: ENV_DESKTOP_NOTIFY,
         planModeExperimentalEnabled: PLAN_MODE_EXPERIMENT_ENABLED,
+        apiOnly,
       };
 
       const issueCommentsResp = await octokit.rest.issues.listComments({
@@ -13961,6 +14028,7 @@ async function main(options = {}) {
     verboseRequestLogs: OPENCHAMBER_VERBOSE_REQUEST_LOGS,
     uiPassword,
     tunnelAuthController,
+    remoteClientAuthRuntime,
     readSettingsFromDiskMigrated,
     normalizeTunnelSessionTtlMs,
     resolveZenModel,
@@ -14095,6 +14163,7 @@ async function main(options = {}) {
     onTunnelReady,
     tunnelRuntimeContext,
     attachSignals,
+    apiOnly,
   });
   terminalRuntime = startupPipelineResult.terminalRuntime;
   messageStreamRuntime = startupPipelineResult.messageStreamRuntime;

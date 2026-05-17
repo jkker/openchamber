@@ -53,6 +53,7 @@ export const createStartupPipelineRuntime = (dependencies) => {
       onTunnelReady,
       tunnelRuntimeContext,
       attachSignals,
+      apiOnly,
     } = options;
 
     const terminalRuntime = createTerminalRuntime({
@@ -124,7 +125,11 @@ export const createStartupPipelineRuntime = (dependencies) => {
     const codexRuntime = backendRegistry.getRuntime('codex');
     backendRegistry.setBackendAvailability('codex', Boolean(codexRuntime?.isAvailable?.()));
 
-    staticRoutesRuntime.registerStaticRoutes(app);
+    if (apiOnly) {
+      staticRoutesRuntime.registerApiOnlyFallbackRoutes(app);
+    } else {
+      staticRoutesRuntime.registerStaticRoutes(app);
+    }
 
     const serverStartupRuntime = createServerStartupRuntime({
       process,

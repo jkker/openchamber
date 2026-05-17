@@ -8,6 +8,7 @@ import { streamDebugEnabled } from '@/stores/utils/streamDebug';
 import { copyTextToClipboard as copyPlainTextToClipboard } from '@/lib/clipboard';
 import { getSyncSessions, getSyncMessages, getSyncParts } from '@/sync/sync-refs';
 import { useStreamingStore } from '@/sync/streaming';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 export interface DebugMessageInfo {
   messageId: string;
@@ -266,7 +267,7 @@ export const debugUtils = {
     settingsInfo = await safeFetchJson('/api/config/settings');
 
     try {
-      const resp = await fetch('/api/health');
+      const resp = await runtimeFetch('/api/health');
       const contentType = resp.headers.get('content-type') || '';
       const body = await safeText(resp);
       const isJson = contentType.toLowerCase().includes('application/json');

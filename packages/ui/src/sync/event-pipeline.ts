@@ -13,6 +13,8 @@
  */
 
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2/client"
+import { opencodeClient } from "@/lib/opencode/client"
+import { getRuntimeUrlResolver } from "@/lib/runtime-url"
 import { syncDebug } from "./debug"
 
 export type QueuedEvent = {
@@ -30,8 +32,6 @@ const DEFAULT_RECONNECT_DELAY_MS = 250
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 30_000
 const WS_FALLBACK_WINDOW_MS = 60_000
 const DEFAULT_WS_READY_TIMEOUT_MS = 2_000
-const ABSOLUTE_URL_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//
-
 export type EventPipelineInput = {
   sdk: OpencodeClient
   onEvent: (directory: string, payload: Event) => void
@@ -110,39 +110,21 @@ function resolveEventPayload(payload: unknown): Event | null {
   return null
 }
 
-function resolveAbsoluteUrl(candidate: string): string {
-  const normalized = typeof candidate === "string" && candidate.trim().length > 0 ? candidate.trim() : "/api"
-  if (ABSOLUTE_URL_PATTERN.test(normalized)) {
-    return normalized
-  }
-
-  if (typeof window === "undefined") {
-    return normalized
-  }
-
-  const baseReference = window.location?.href || window.location?.origin
-  if (!baseReference) {
-    return normalized
-  }
-
-  return new URL(normalized, baseReference).toString()
-}
-
-function toWebSocketUrl(candidate: string): string {
-  const url = new URL(resolveAbsoluteUrl(candidate))
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
-  return url.toString()
-}
-
 function buildGlobalEventWsUrl(lastEventId?: string): string {
-  // Resolve from the current runtime origin.
-  // The global event endpoint is served by the OpenChamber web server at `/api/*`
-  // in all runtimes (web, desktop, vscode), even when the OpenCode base URL differs.
-  const httpUrl = new URL(resolveAbsoluteUrl("/api/global/event/ws"))
-  if (lastEventId && lastEventId.length > 0) {
-    httpUrl.searchParams.set("lastEventId", lastEventId)
+  let baseUrl = "/api"
+  try {
+    const client = opencodeClient as { getBaseUrl?: () => string }
+    if (typeof client.getBaseUrl === "function") {
+      baseUrl = client.getBaseUrl()
+    }
+  } catch {
+    baseUrl = "/api"
   }
-  return toWebSocketUrl(httpUrl.toString())
+  const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`
+  return getRuntimeUrlResolver().websocket(
+    `${normalizedBase}global/event/ws`,
+    lastEventId && lastEventId.length > 0 ? { lastEventId } : undefined,
+  )
 }
 
 type DirectoryQueue = {

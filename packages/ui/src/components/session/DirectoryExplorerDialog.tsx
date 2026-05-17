@@ -17,19 +17,8 @@ import type { DesktopSettings } from '@/lib/desktop';
 import { updateDesktopSettings } from '@/lib/persistence';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui';
-import {
-  RiArrowDownSLine,
-  RiArrowLeftSLine,
-  RiArrowRightSLine,
-  RiArrowUpSLine,
-  RiCheckboxBlankLine,
-  RiCheckboxLine,
-  RiCornerDownLeftLine,
-  RiFolder6Line,
-  RiFolderAddLine,
-  RiPushpin2Line,
-  RiPushpinLine,
-} from '@remixicon/react';
+import { IdentityDropdown } from '@/components/views/git/GitHeader';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 import { useDeviceInfo } from '@/lib/device';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
@@ -160,7 +149,7 @@ const focusPathInput = (input: HTMLInputElement | null): void => {
 
 const resolveFreshFilesystemHome = async (): Promise<string | null> => {
   try {
-    const response = await fetch('/api/fs/home', {
+    const response = await runtimeFetch('/api/fs/home', {
       method: 'GET',
       headers: { Accept: 'application/json' },
     });

@@ -7,9 +7,8 @@
 import type { FilesAPI, RuntimeAPIs } from './api/types';
 import { getDesktopHomeDirectory } from './desktop';
 import { isVSCodeRuntime } from './desktop';
-import { resolveRuntimeApiBaseUrl } from '@/lib/instances/runtimeApiBaseUrl';
-import { resolveSelectedInstance } from '@/stores/useInstancesStore';
-import { getAccessToken } from '@/lib/auth/tokenStorage';
+import { createProjectIdFromPath } from './projectId';
+import { runtimeFetch } from './runtime-fetch';
 
 type ProjectRef = { id: string; path: string };
 
@@ -168,7 +167,7 @@ const createAuthHeaders = (baseHeaders?: Record<string, string>): Record<string,
 
 const postJson = async <T>(url: string, body: unknown): Promise<{ ok: boolean; data: T | null }> => {
   try {
-    const response = await fetch(url, {
+    const response = await runtimeFetch(url, {
       method: 'POST',
       headers: createAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
@@ -207,15 +206,12 @@ const readTextFile = async (path: string, directory?: string | null): Promise<st
   // would trigger a 404 that shows as a red error in the console even though we
   // catch it here.
   try {
-    const normalizedDirectory = typeof directory === 'string' ? directory.trim() : '';
-    const queryParams = new URLSearchParams({ path, allowMissing: 'true' });
-    if (normalizedDirectory) {
-      queryParams.set('directory', normalizedDirectory);
-    }
-    const response = await fetch(`${getBaseUrl()}/fs/read?${queryParams.toString()}`, {
-      cache: 'no-store',
-      headers: normalizedDirectory ? { 'x-openchamber-directory': normalizedDirectory, 'x-opencode-directory': normalizedDirectory } : undefined,
-    });
+    const response = await runtimeFetch(`${getBaseUrl()}/fs/read?path=${encodeURIComponent(path)}`,
+      {
+        // Avoid conditional requests (304 + empty body).
+        cache: 'no-store',
+      }
+    );
     if (!response.ok) {
       return null;
     }
@@ -247,7 +243,7 @@ const resolveHomeDirectory = async (): Promise<string | null> => {
   // In some runtimes, window.__OPENCHAMBER_HOME__ can be workspace/project-root
   // scoped, which would incorrectly route writes into the project directory.
   try {
-    const response = await fetch(`${getBaseUrl()}/fs/home`, {
+    const response = await runtimeFetch(`${getBaseUrl()}/fs/home`, {
       // Avoid conditional requests (304 + empty body).
       cache: 'no-store',
     });

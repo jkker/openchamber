@@ -18,7 +18,7 @@ import type { HarnessRunConfig } from "@openchamber/harness-contracts"
 import type { AttachedFile, SessionContextUsage, SessionWorktreeAttachment } from "@/stores/types/sessionTypes"
 import type { WorktreeMetadata } from "@/types/worktree"
 import { opencodeClient } from "@/lib/opencode/client"
-import { harnessClient, toOpenCodeHarnessRunConfig } from "@/lib/harness/client"
+import { runtimeFetch } from "@/lib/runtime-fetch"
 import { useConfigStore } from "@/stores/useConfigStore"
 import { useProjectsStore } from "@/stores/useProjectsStore"
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from "@/stores/useGlobalSessionsStore"
@@ -52,14 +52,18 @@ import {
   unshareSession as unshareSessionAction,
   optimisticSend,
   refetchSessionMessages,
+  revertToMessage as revertToMessageAction,
+  unrevertSession as unrevertSessionAction,
+  forkFromMessage as forkFromMessageAction,
 } from "./session-actions"
 import { useInputStore, type SyntheticContextPart } from "./input-store"
 import { useSelectionStore } from "./selection-store"
-import { useViewportStore } from "./viewport-store"
-import { usePermissionStore } from "@/stores/permissionStore"
-import { useBackendsStore } from "@/stores/useBackendsStore"
+import { getViewportSessionMemory, useViewportStore, viewportSessionKey } from "./viewport-store"
 import { useSessionWorktreeStore } from "./session-worktree-store"
 import { getAttachedSessionDirectory } from "./session-worktree-contract"
+import { setSessionOpener } from "./session-navigation"
+import { getRuntimeKey } from "@/lib/runtime-switch"
+import { rememberRuntimeLiveStatus } from "./runtime-live-memory"
 
 export type { AttachedFile }
 
@@ -183,7 +187,7 @@ function routeMessage(params: {
 }
 
 function notifyMessageSent(sessionId: string): void {
-  fetch(`/api/sessions/${sessionId}/message-sent`, { method: "POST" })
+  runtimeFetch(`/api/sessions/${sessionId}/message-sent`, { method: "POST" })
     .catch(() => { /* ignore */ })
 }
 
@@ -250,6 +254,8 @@ export type SessionUIState = {
 
   // Actions — UI state management
   setCurrentSession: (id: string | null, directoryHint?: string | null) => void
+  prepareForRuntimeSwitch: (apiBaseUrl?: string | null) => void
+  restoreForRuntimeSwitch: (apiBaseUrl?: string | null) => void
   openNewSessionDraft: (options?: Partial<NewSessionDraftState>) => void
   closeNewSessionDraft: () => void
   setNewSessionDraftTarget: (target: { projectId?: string | null; directoryOverride?: string | null }, options?: { force?: boolean }) => void
@@ -373,6 +379,31 @@ const DEFAULT_DRAFT: NewSessionDraftState = {
   parentID: null,
 }
 
+const activeSessionByRuntime = new Map<string, string | null>()
+type RuntimeSessionMemory = {
+  sessionId: string | null
+  directory: string | null
+  draft: NewSessionDraftState
+}
+const runtimeSessionMemory = new Map<string, RuntimeSessionMemory>()
+
+const runtimeMemoryKey = (value?: string | null): string => {
+  const key = (value ?? getRuntimeKey()).trim()
+  return key || "default"
+}
+
+const cloneDraft = (draft: NewSessionDraftState): NewSessionDraftState => ({ ...draft })
+
+const writeRuntimeSessionMemory = (key: string, patch: Partial<RuntimeSessionMemory>): void => {
+  const current = runtimeSessionMemory.get(key)
+  runtimeSessionMemory.set(key, {
+    sessionId: current?.sessionId ?? null,
+    directory: current?.directory ?? null,
+    draft: current?.draft ? cloneDraft(current.draft) : { ...DEFAULT_DRAFT },
+    ...patch,
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -402,6 +433,9 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       get().closeNewSessionDraft()
     }
 
+    const key = runtimeMemoryKey()
+    activeSessionByRuntime.set(key, id)
+
     const previousSessionId = get().currentSessionId
 
     // Set currentSessionId immediately so the skeleton renders without delay.
@@ -415,6 +449,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     )
     const fallbackDir = opencodeClient.getDirectory() ?? directoryState.currentDirectory ?? null
     const resolvedDir = (directoryHint ? normalizePath(directoryHint) : null) ?? sessionDir ?? fallbackDir
+    writeRuntimeSessionMemory(key, { sessionId: id, directory: resolvedDir ?? null })
 
     try {
       if (resolvedDir && directoryState.currentDirectory !== resolvedDir) {
@@ -430,7 +465,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     if (previousSessionId && previousSessionId !== id) {
       const prevId = previousSessionId
       setTimeout(() => {
-        const memState = useViewportStore.getState().sessionMemoryState.get(prevId)
+        const memState = getViewportSessionMemory(prevId)
         if (!memState?.isStreaming) {
           const prevMessages = getSyncMessages(prevId)
           if (prevMessages.length > 0) {
@@ -444,6 +479,50 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     if (id) {
       markSessionViewed(id)
       setActiveSession(resolvedDir ?? "", id)
+    }
+  },
+
+  prepareForRuntimeSwitch: (apiBaseUrl?: string | null) => {
+    const key = runtimeMemoryKey(apiBaseUrl)
+    const directory = useDirectoryStore.getState().currentDirectory || null
+    const currentSessionId = get().currentSessionId
+    const directorySnapshot = directory ? getDirectoryState(directory) : null
+    rememberRuntimeLiveStatus({
+      runtimeKey: key,
+      directory,
+      sessionId: currentSessionId,
+      status: currentSessionId ? directorySnapshot?.session_status?.[currentSessionId] : null,
+    })
+    activeSessionByRuntime.set(key, get().currentSessionId)
+    writeRuntimeSessionMemory(key, {
+      sessionId: currentSessionId,
+      directory,
+      draft: cloneDraft(get().newSessionDraft),
+    })
+  },
+
+  restoreForRuntimeSwitch: (apiBaseUrl?: string | null) => {
+    const key = runtimeMemoryKey(apiBaseUrl)
+    const memory = runtimeSessionMemory.get(key)
+    const restoredSessionId = memory?.sessionId ?? activeSessionByRuntime.get(key) ?? null
+    const restoredDraft = memory?.draft ? cloneDraft(memory.draft) : { ...DEFAULT_DRAFT }
+    const restoredDirectory = memory?.directory ?? null
+    if (restoredDirectory) {
+      useDirectoryStore.getState().setDirectory(restoredDirectory, { showOverlay: false })
+    }
+    set({
+      currentSessionId: restoredSessionId,
+      newSessionDraft: restoredSessionId ? { ...DEFAULT_DRAFT } : restoredDraft,
+      abortPromptSessionId: null,
+      abortPromptExpiresAt: null,
+      error: null,
+      sessionAbortFlags: new Map(),
+      pendingChangesBarDismissed: new Map(),
+    })
+    if (restoredSessionId) {
+      setActiveSession(opencodeClient.getDirectory() ?? "", restoredSessionId)
+    } else {
+      setActiveSession("", "")
     }
   },
 
@@ -498,21 +577,23 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
     persistDraftTarget({ projectId: selectedProject?.id ?? null, directory })
 
-    set((s) => ({
+    const nextDraft: NewSessionDraftState = {
+      open: true,
+      selectedProjectId: selectedProject?.id ?? null,
+      directoryOverride: directory,
+      pendingWorktreeRequestId: options?.pendingWorktreeRequestId ?? null,
+      bootstrapPendingDirectory: normalizePath(options?.bootstrapPendingDirectory ?? null),
+      preserveDirectoryOverride: options?.preserveDirectoryOverride === true,
+      parentID: options?.parentID ?? null,
+      title: options?.title,
+      initialPrompt: options?.initialPrompt,
+      syntheticParts: options?.syntheticParts,
+      targetFolderId: options?.targetFolderId,
+    }
+
+    set({
       newSessionDraft: {
-        open: true,
-        requestKey: s.newSessionDraft.requestKey + 1,
-        selectedProjectId: selectedProject?.id ?? null,
-        backendId: options?.backendId ?? null,
-        directoryOverride: directory,
-        pendingWorktreeRequestId: options?.pendingWorktreeRequestId ?? null,
-        bootstrapPendingDirectory: normalizePath(options?.bootstrapPendingDirectory ?? null),
-        preserveDirectoryOverride: options?.preserveDirectoryOverride === true,
-        parentID: options?.parentID ?? null,
-        title: options?.title,
-        initialPrompt: options?.initialPrompt,
-        syntheticParts: options?.syntheticParts,
-        targetFolderId: options?.targetFolderId,
+        ...nextDraft,
       },
       currentSessionId: null,
       error: null,
@@ -522,6 +603,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     // Attachments from the previous session (e.g. restored by revert) must
     // not bleed into the new session's input.
     useInputStore.getState().clearAttachedFiles()
+
+    writeRuntimeSessionMemory(runtimeMemoryKey(), { sessionId: null, directory, draft: nextDraft })
 
     if (options?.initialPrompt) {
       useInputStore.getState().setPendingInputText(options.initialPrompt)
@@ -534,9 +617,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   // closeNewSessionDraft
   // ---------------------------------------------------------------------------
   closeNewSessionDraft: () => {
-    set((s) => ({
-      newSessionDraft: {
-        ...s.newSessionDraft,
+    const nextDraft: NewSessionDraftState = {
         open: false,
         selectedProjectId: null,
         backendId: null,
@@ -549,8 +630,11 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         initialPrompt: undefined,
         syntheticParts: undefined,
         targetFolderId: undefined,
-      },
-    }))
+      }
+    set({
+      newSessionDraft: nextDraft,
+    })
+    writeRuntimeSessionMemory(runtimeMemoryKey(), { draft: nextDraft })
   },
 
   setNewSessionDraftTarget: (target) => {
@@ -895,10 +979,10 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
     if (currentSessionId) {
       const viewportState = useViewportStore.getState()
-      const memState = viewportState.sessionMemoryState.get(currentSessionId)
+      const memState = getViewportSessionMemory(currentSessionId)
       if (!memState || !memState.lastUserMessageAt) {
         const newMemState = new Map(viewportState.sessionMemoryState)
-        newMemState.set(currentSessionId, {
+        newMemState.set(viewportSessionKey(currentSessionId), {
           viewportAnchor: 0,
           isStreaming: false,
           lastAccessedAt: Date.now(),
@@ -1034,11 +1118,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   // revertToMessage — delegates to session-actions (single implementation)
   // ---------------------------------------------------------------------------
   revertToMessage: async (sessionId, messageId) => {
-    // Ensure the complete message range is present before applying the revert
-    // marker. Reverted UI is derived from session.revert + stored messages.
-    await refetchSessionMessages(sessionId)
-    const { revertToMessage: revert } = await import("./session-actions")
-    await revert(sessionId, messageId)
+    await revertToMessageAction(sessionId, messageId)
   },
 
   // ---------------------------------------------------------------------------
@@ -1107,10 +1187,13 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     if (targetMessage) {
       await get().revertToMessage(sessionId, targetMessage.id, { skipRedoPush: true })
       const { toast } = await import("sonner")
-      const { useI18nStore, formatMessage } = await import("@/lib/i18n/store")
-      const { dictionary } = useI18nStore.getState()
-      toast.success(formatMessage(dictionary, "chat.revert.toast.redo"))
-      return
+      toast.success(`Redid to: ${preview}`)
+    } else {
+      // Full unrevert
+      await unrevertSessionAction(sessionId)
+
+      const { toast } = await import("sonner")
+      toast.success("Restored all messages")
     }
 
     const { unrevertSession } = await import("./session-actions")
@@ -1130,8 +1213,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     if (!existingSession) return
 
     try {
-      const { forkFromMessage: fork } = await import("./session-actions")
-      await fork(sessionId, messageId)
+      await forkFromMessageAction(sessionId, messageId)
 
       const { toast } = await import("sonner")
       toast.success(`Forked from ${existingSession.title}`)
@@ -1292,3 +1374,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     return get().sessionPlanAvailable.get(sessionId) ?? false
   },
 }))
+
+setSessionOpener((sessionID, directory) => {
+  useSessionUIStore.getState().setCurrentSession(sessionID, directory)
+})

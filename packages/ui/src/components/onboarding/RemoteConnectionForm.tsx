@@ -37,6 +37,10 @@ function getProbeStatusMessageKey(status: ProbeStatus): string | null {
       return null; // Success is shown separately
     case 'auth':
       return 'onboarding.remoteConnection.probe.authMessage';
+    case 'update-recommended':
+      return 'onboarding.remoteConnection.probe.updateRecommendedMessage';
+    case 'incompatible':
+      return 'onboarding.remoteConnection.probe.incompatibleMessage';
     case 'wrong-service':
       return 'onboarding.remoteConnection.probe.wrongServiceMessage';
     case 'unreachable':
@@ -47,7 +51,7 @@ function getProbeStatusMessageKey(status: ProbeStatus): string | null {
 }
 
 function isBlockingStatus(status: ProbeStatus): boolean {
-  return status === 'wrong-service' || status === 'unreachable';
+  return status === 'wrong-service' || status === 'unreachable' || status === 'incompatible';
 }
 
 export function RemoteConnectionForm({
@@ -89,7 +93,7 @@ export function RemoteConnectionForm({
     try {
       const result = await desktopHostProbe(normalizedUrl);
       setProbeResult(result);
-      setState(result.status === 'ok' ? 'success' : 'error');
+      setState(result.status === 'ok' || result.status === 'update-recommended' ? 'success' : 'error');
     } catch (err) {
       setError(err instanceof Error ? err.message : t('onboarding.remoteConnection.errors.connectionTestFailed'));
       setState('error');
@@ -126,6 +130,7 @@ export function RemoteConnectionForm({
         id: hostId,
         label: hostLabel,
         url: normalizedUrl,
+        apiUrl: normalizedUrl,
       };
 
       const updatedHosts = existingHost
@@ -157,6 +162,7 @@ export function RemoteConnectionForm({
 
   const probeMessageKey = getProbeStatusMessageKey(probeResult?.status ?? null);
   const isSuccess = probeResult?.status === 'ok';
+  const isUpdateRecommended = probeResult?.status === 'update-recommended';
   const isAuth = probeResult?.status === 'auth';
   const isBlocking = isBlockingStatus(probeResult?.status ?? null);
 
@@ -235,6 +241,18 @@ export function RemoteConnectionForm({
             }}
           >
             {t('onboarding.remoteConnection.status.authWarning')}
+          </div>
+        )}
+
+        {probeResult && isUpdateRecommended && (
+          <div
+            className="rounded-lg border p-3 text-sm"
+            style={{
+              borderColor: 'var(--status-warning)',
+              color: 'var(--status-warning)',
+            }}
+          >
+            {probeMessageKey ? t(probeMessageKey as Parameters<typeof t>[0]) : null}
           </div>
         )}
 

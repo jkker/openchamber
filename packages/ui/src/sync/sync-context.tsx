@@ -54,6 +54,10 @@ import { EMPTY_MESSAGES, EMPTY_PARTS, EMPTY_PERMISSION_REQUESTS, EMPTY_QUESTION_
 import type { QuestionRequest } from "@/types/question"
 import * as sessionActions from "./session-actions"
 import { getSessionMaterializationStatus, materializeSessionSnapshots } from "./materialization"
+import { openSessionFromToast } from "./session-navigation"
+import { getRuntimeLiveStatusSeed, LIVE_STATUS_TTL_MS } from "./runtime-live-memory"
+import { getRuntimeKey } from "@/lib/runtime-switch"
+import { getRegisteredRuntimeAPIs } from "@/contexts/runtimeAPIRegistry"
 
 // ---------------------------------------------------------------------------
 // Context
@@ -255,12 +259,56 @@ const getPermissionToastKey = (sessionID?: string, requestID?: string) => {
   return `${sessionID}:${requestID}`
 }
 
-const openSessionFromToast = (sessionID: string, directory: string) => {
-  void import("./session-ui-store")
-    .then(({ useSessionUIStore }) => {
-      useSessionUIStore.getState().setCurrentSession(sessionID, directory)
-    })
-    .catch(() => undefined)
+type UiNotificationPayload = {
+  title?: unknown
+  body?: unknown
+  tag?: unknown
+  kind?: unknown
+  sessionId?: unknown
+  directory?: unknown
+  requireHidden?: unknown
+  desktopStdoutActive?: unknown
+}
+
+const asOptionalString = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+const handleUiNotificationEvent = (payload: Event, fallbackDirectory: string): boolean => {
+  if ((payload as { type?: unknown }).type !== "openchamber:notification") {
+    return false
+  }
+
+  const properties = (payload as { properties?: unknown }).properties
+  if (!properties || typeof properties !== "object") {
+    return true
+  }
+
+  const notification = properties as UiNotificationPayload
+  if (notification.desktopStdoutActive === true && getRuntimeKey() === "local") {
+    return true
+  }
+
+  const notifications = getRegisteredRuntimeAPIs()?.notifications
+  if (!notifications?.notifyAgentCompletion) {
+    return true
+  }
+
+  void notifications.notifyAgentCompletion({
+    title: asOptionalString(notification.title),
+    body: asOptionalString(notification.body),
+    tag: asOptionalString(notification.tag),
+    kind: asOptionalString(notification.kind),
+    sessionId: asOptionalString(notification.sessionId),
+    directory: asOptionalString(notification.directory) ?? (fallbackDirectory && fallbackDirectory !== "global" ? fallbackDirectory : undefined),
+    requireHidden: notification.requireHidden === true,
+  }).catch((error) => {
+    console.warn("[notifications] failed to dispatch UI notification", error)
+  })
+
+  return true
 }
 
 export function setActiveSession(directory: string, sessionId: string) {
@@ -1064,6 +1112,10 @@ function handleEvent(
 ) {
   const directory = resolveDirectoryFromRoutingIndex(routingIndex, rawDirectory, payload, childStores)
 
+  if (handleUiNotificationEvent(payload, directory)) {
+    return
+  }
+
   // Global events
   if (directory === "global" || !directory) {
     const recent = isRecentBoot()
@@ -1548,9 +1600,35 @@ export function SyncProvider(props: {
 
   // Ensure current directory's child store exists
   useEffect(() => {
+    let seedExpiryTimer: ReturnType<typeof setTimeout> | undefined
     if (props.directory) {
       const store = childStores.ensureChild(props.directory)
+      const statusSeed = getRuntimeLiveStatusSeed(getRuntimeKey(), props.directory)
+      if (statusSeed) {
+        store.setState((state: DirectoryStore) => ({
+          session_status: {
+            ...state.session_status,
+            [statusSeed.sessionId]: state.session_status[statusSeed.sessionId] ?? statusSeed.status,
+          },
+        }))
+        seedExpiryTimer = setTimeout(() => {
+          store.setState((state: DirectoryStore) => {
+            if (state.session_status[statusSeed.sessionId] !== statusSeed.status) {
+              return state
+            }
+            return {
+              session_status: {
+                ...state.session_status,
+                [statusSeed.sessionId]: { type: "idle" as const },
+              },
+            }
+          })
+        }, LIVE_STATUS_TTL_MS)
+      }
       ingestDirectoryStateIntoRoutingIndex(routingIndex, props.directory, store.getState())
+    }
+    return () => {
+      if (seedExpiryTimer) clearTimeout(seedExpiryTimer)
     }
   }, [props.directory, childStores, routingIndex])
 
@@ -1571,6 +1649,7 @@ export function SyncProvider(props: {
     if (!props.directory) return
     const store = childStores.getChild(props.directory)
     if (!store) return
+    updateStreamingState(store.getState())
     const unsubscribe = store.subscribe((state) => {
       updateStreamingState(state)
     })

@@ -9,8 +9,10 @@ import { useUIStore } from '@/stores/useUIStore';
 import { useBackendsStore } from '@/stores/useBackendsStore';
 import { BackendIcon } from '@/components/ui/BackendIcon';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
-import { getModifierLabel, cn } from '@/lib/utils';
-import { buildRuntimeApiHeaders, resolveRuntimeApiEndpoint } from '@/lib/instances/runtimeApiBaseUrl';
+import { cn } from '@/lib/utils';
+import { useI18n } from '@/lib/i18n';
+import { parseModelIdentifier } from '@/lib/modelIdentifier';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 const getDisplayModel = (
   storedModel: string | undefined
@@ -90,7 +92,7 @@ export const DefaultsSettings: React.FC = () => {
         }
 
         if (!data) {
-          const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
+          const response = await runtimeFetch('/api/config/settings', {
             method: 'GET',
             headers: buildRuntimeApiHeaders(),
           });
@@ -171,7 +173,7 @@ export const DefaultsSettings: React.FC = () => {
 
       try {
         await updateDesktopSettings({ defaultModel: newValue ?? '', defaultVariant: '' });
-        const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
+        const response = await runtimeFetch('/api/config/settings', {
           method: 'PUT',
           headers: {
             ...buildRuntimeApiHeaders(),

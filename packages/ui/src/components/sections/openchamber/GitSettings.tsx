@@ -6,7 +6,8 @@ import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { setFilesViewShowGitignored, useFilesViewShowGitignored } from '@/lib/filesViewShowGitignored';
-import { buildRuntimeApiHeaders, resolveRuntimeApiEndpoint } from '@/lib/instances/runtimeApiBaseUrl';
+import { useI18n } from '@/lib/i18n';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 export const GitSettings: React.FC = () => {
   const { t } = useI18n();
@@ -63,7 +64,7 @@ export const GitSettings: React.FC = () => {
 
         // 2. Fetch API (Web/server)
         if (!data) {
-          const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
+          const response = await runtimeFetch('/api/config/settings', {
             method: 'GET',
             headers: buildRuntimeApiHeaders(),
           });

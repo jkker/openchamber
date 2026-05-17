@@ -39,7 +39,17 @@ import { usePlanningSessionWatcher } from '@/hooks/usePlanningSessionWatcher';
 import { usePlanningSessionDetector } from '@/hooks/usePlanningSessionDetector';
 import { cn } from '@/lib/utils';
 
-import { ChatView, DiffView, FilesView, GitView, PlanView, SettingsView, SettingsWindow, TerminalView } from '@/components/views';
+import { ChatView } from '@/components/views/ChatView';
+import { DiffView } from '@/components/views/DiffView';
+import { FilesView } from '@/components/views/FilesView';
+import { GitView } from '@/components/views/GitView';
+import { PlanView } from '@/components/views/PlanView';
+
+// Heavy views loaded on-demand to reduce initial bundle parse time.
+const TerminalView = lazyWithChunkRecovery(() => import('@/components/views/TerminalView').then(m => ({ default: m.TerminalView })));
+const SettingsView = lazyWithChunkRecovery(() => import('@/components/views/SettingsView').then(m => ({ default: m.SettingsView })));
+const SettingsWindow = lazyWithChunkRecovery(() => import('@/components/views/SettingsWindow').then(m => ({ default: m.SettingsWindow })));
+const MultiRunWindow = lazyWithChunkRecovery(() => import('@/components/views/MultiRunWindow').then(m => ({ default: m.MultiRunWindow })));
 
 // Mobile drawer width as screen percentage
 const MOBILE_DRAWER_WIDTH_PERCENT = 85;

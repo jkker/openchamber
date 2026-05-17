@@ -45,11 +45,12 @@ import { useChatSurfaceMode } from './useChatSurfaceMode';
 import { MobileAgentButton } from './MobileAgentButton';
 import { MobileModelButton } from './MobileModelButton';
 import { MobileSessionStatusBar } from './MobileSessionStatusBar';
+import { useIsDedicatedMobileApp } from '@/apps/mobileAppContext';
 import { useCurrentSessionActivity } from '@/hooks/useSessionActivity';
 import { toast } from '@/components/ui';
-import { useFileStore } from '@/stores/fileStore';
-import { useMessageStore } from '@/stores/messageStore';
-import { isDesktopLocalOriginActive, isNativeMobileApp, isTauriShell, isVSCodeRuntime, pickFilesFromNativeDialog } from '@/lib/desktop';
+// useMessageStore removed — messages now come from sync system
+import { isTauriShell, isVSCodeRuntime } from '@/lib/desktop';
+import { getRuntimeUrlResolver } from '@/lib/runtime-url';
 import { isIMECompositionEvent } from '@/lib/ime';
 import { StopIcon } from '@/components/icons/StopIcon';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -1005,9 +1006,15 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
     const setAgent = useConfigStore((state) => state.setAgent);
     const getVisibleAgents = useConfigStore((state) => state.getVisibleAgents);
     const agents = getVisibleAgents();
-    const primaryAgents = React.useMemo(() => agents.filter((agent) => agent.mode === 'primary'), [agents]);
-    const { isMobile, inputBarOffset, isKeyboardOpen, setTimelineDialogOpen, cornerRadius, persistChatDraft, isExpandedInput, setExpandedInput, showMobileKeyboardTools } = useUIStore();
-    const { working } = useAssistantStatus();
+    const isMobile = useUIStore((state) => state.isMobile);
+    const isDedicatedMobileApp = useIsDedicatedMobileApp();
+    const inputBarOffset = useUIStore((state) => state.inputBarOffset);
+    const persistChatDraft = useUIStore((state) => state.persistChatDraft);
+    const inputSpellcheckEnabled = useUIStore((state) => state.inputSpellcheckEnabled);
+    const isExpandedInput = useUIStore((state) => state.isExpandedInput);
+    const setExpandedInput = useUIStore((state) => state.setExpandedInput);
+    const setTimelineDialogOpen = useUIStore((state) => state.setTimelineDialogOpen);
+    const { git: runtimeGit, vscode: vscodeApi } = useRuntimeAPIs();
     const { currentTheme } = useThemeSystem();
     const chatSearchDirectory = useChatSearchDirectory();
     const isGitRepo = useIsGitRepo(currentDirectory);
@@ -1731,12 +1738,18 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
                 return;
             }
             else if (commandName === 'compact' && currentSessionId) {
-                const configState = useConfigStore.getState();
-                await sessionActions.compactSession({
-                    sessionId: currentSessionId,
-                    providerID: configState.currentProviderId || '',
-                    modelID: configState.currentModelId || '',
-                });
+                try {
+                    await sessionActions.waitForConnectionOrThrow();
+                    const sdk = opencodeClient.getSdkClient();
+                    const configState = useConfigStore.getState();
+                    await sdk.session.summarize({
+                        sessionID: currentSessionId,
+                        modelID: configState.currentModelId || '',
+                        providerID: configState.currentProviderId || '',
+                    });
+                } catch (error) {
+                    toast.error(error instanceof Error ? error.message : t('chat.chatInput.toast.compactFailed'));
+                }
                 return;
             }
             else if (commandName === 'summary' && currentSessionId) {
@@ -3077,7 +3090,32 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
 
                         for (const path of paths) {
                             try {
-                                const { file } = await readDesktopDroppedFile(path);
+                                const normalizedPath = normalizeDroppedPath(path);
+                                const fileName = normalizedPath.split(/[\\/]/).pop() || normalizedPath;
+                                let file: File;
+
+                                // In Tauri shell, dropped paths are local machine paths.
+                                // Read bytes via native command to avoid workspace-bound /api/fs/raw restrictions.
+                                if (isTauriShell()) {
+                                    const { invoke } = await import('@tauri-apps/api/core');
+                                    const result = await invoke<{ mime: string; base64: string }>('desktop_read_file', { path: normalizedPath });
+                                    const byteCharacters = atob(result.base64);
+                                    const byteNumbers = new Array(byteCharacters.length);
+                                    for (let i = 0; i < byteCharacters.length; i++) {
+                                        byteNumbers[i] = byteCharacters.charCodeAt(i);
+                                    }
+                                    const byteArray = new Uint8Array(byteNumbers);
+                                    const blob = new Blob([byteArray], { type: result.mime || 'application/octet-stream' });
+                                    file = new File([blob], fileName, { type: result.mime || 'application/octet-stream' });
+                                } else {
+                                    const response = await fetch(getRuntimeUrlResolver().rawFile(normalizedPath));
+                                    if (!response.ok) {
+                                        throw new Error(`Failed to read dropped file (${response.status})`);
+                                    }
+                                    const blob = await response.blob();
+                                    file = new File([blob], fileName, { type: blob.type || 'application/octet-stream' });
+                                }
+
                                 await addAttachedFile(file);
                             } catch (error) {
                                 console.error('Failed to attach dropped file:', path, error);
@@ -3123,8 +3161,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
 
     const handleVSCodePickFiles = React.useCallback(async () => {
         try {
-            const response = await fetch('/api/vscode/pick-files');
-            const data = await response.json();
+            const data = (await vscodeApi?.pickFiles?.()) as {
+                files?: Array<{ name: string; mimeType?: string; dataUrl?: string }>;
+                skipped?: Array<{ name?: string; reason?: string }>;
+            } | undefined;
             const picked = Array.isArray(data?.files) ? data.files : [];
             const skipped = Array.isArray(data?.skipped) ? data.skipped : [];
 
@@ -3163,7 +3203,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
             console.error('VS Code file pick failed', error);
             toast.error(error instanceof Error ? error.message : t('chat.chatInput.toast.vscodePickFailed'));
         }
-    }, [attachFiles, t]);
+    }, [attachFiles, t, vscodeApi]);
 
     const handlePickLocalFiles = React.useCallback(() => {
         const openPicker = async () => {
@@ -4200,8 +4240,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
                         )}
                     </div>
 
-                    {/* Mobile Session Status Bar - above input */}
-                    {isMobile && <MobileSessionStatusBar />}
+                    {/* Mobile Session Status Bar — desktop responsive mobile only;
+                        the dedicated MobileApp root has its own header and no sidebars to bridge into. */}
+                    {isMobile && !isDedicatedMobileApp && <MobileSessionStatusBar />}
                 </div>
             </div>
         </form>

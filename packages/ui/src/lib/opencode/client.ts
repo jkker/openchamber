@@ -19,6 +19,9 @@ import type { PermissionRequest } from "@/types/permission";
 import type { QuestionRequest } from "@/types/question";
 import { normalizePath } from "@/lib/pathUtils";
 import { waitForWorktreeBootstrap } from "@/lib/worktrees/worktreeBootstrap";
+import { getRuntimeUrlResolver } from "@/lib/runtime-url";
+import { runtimeFetch } from "@/lib/runtime-fetch";
+import { buildRuntimeAuthHeaders, getRuntimeBearerTokenSync } from "@/lib/runtime-auth";
 import {
   assertProviderCircuitClosed,
   recordProviderSuccess,
@@ -96,6 +99,31 @@ const ensureAbsoluteBaseUrl = (candidate: string): string => {
     console.warn("Failed to normalize OpenCode base URL:", error);
     return normalized;
   }
+};
+
+const resolveRuntimeBaseUrl = (): string | null => {
+  try {
+    return getRuntimeUrlResolver().api('/api');
+  } catch {
+    return null;
+  }
+};
+
+const runtimeSdkFetch: typeof fetch = async (input, init) => {
+  const headers = await buildRuntimeAuthHeaders(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+  if (input instanceof Request) {
+    return fetch(new Request(input, { ...init, headers }));
+  }
+  return fetch(input, { ...init, headers });
+};
+
+const createRuntimeOpencodeClient = (config: { baseUrl: string; directory?: string }): OpencodeClient => {
+  const token = getRuntimeBearerTokenSync();
+  return createOpencodeClient({
+    ...config,
+    ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+    fetch: runtimeSdkFetch,
+  });
 };
 
 interface App {
@@ -177,51 +205,28 @@ class OpencodeService {
   private mountedDrivesInFlight: Promise<FilesystemEntry[]> | null = null;
   private mountedDrivesCache: { entries: FilesystemEntry[]; expiresAt: number } | null = null;
 
-  private getAuthorizationHeader(): string | null {
-    const selectedInstance = resolveSelectedInstance();
-    if (!selectedInstance) {
-      return null;
-    }
-    const accessToken = getAccessToken(selectedInstance.id);
-    if (!accessToken) {
-      return null;
-    }
-    return `Bearer ${accessToken}`;
-  }
-
-  private mergeAuthHeaders(headers?: HeadersInit): Headers {
-    const nextHeaders = new Headers(headers ?? undefined);
-    if (!nextHeaders.has('Authorization')) {
-      const authorization = this.getAuthorizationHeader();
-      if (authorization) {
-        nextHeaders.set('Authorization', authorization);
-      }
-    }
-    return nextHeaders;
-  }
-
-  private fetchWithAuth = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
-    const requestHeaders = input instanceof Request ? input.headers : undefined;
-    const mergedHeaders = this.mergeAuthHeaders(requestHeaders);
-    const initHeaders = new Headers(init.headers ?? undefined);
-    initHeaders.forEach((value, key) => {
-      mergedHeaders.set(key, value);
-    });
-
-    return fetch(input, {
-      ...init,
-      headers: mergedHeaders,
-    });
-  };
-
-  constructor(baseUrl: string = resolveRuntimeApiBaseUrl()) {
-    const requestedBaseUrl = baseUrl || resolveRuntimeApiBaseUrl();
+  constructor(baseUrl: string = DEFAULT_BASE_URL) {
+    const runtimeBase = resolveRuntimeBaseUrl();
+    const requestedBaseUrl = runtimeBase || baseUrl;
     this.baseUrl = ensureAbsoluteBaseUrl(requestedBaseUrl);
-    this.client = createOpencodeClient({ baseUrl: this.baseUrl, fetch: this.fetchWithAuth });
+    this.client = createRuntimeOpencodeClient({ baseUrl: this.baseUrl });
   }
 
   getBaseUrl(): string {
     return this.baseUrl;
+  }
+
+  reconnectToRuntimeBaseUrl(): void {
+    const runtimeBase = resolveRuntimeBaseUrl();
+    const nextBaseUrl = ensureAbsoluteBaseUrl(runtimeBase || DEFAULT_BASE_URL);
+    if (nextBaseUrl === this.baseUrl) {
+      return;
+    }
+    this.baseUrl = nextBaseUrl;
+    this.client = createRuntimeOpencodeClient({ baseUrl: this.baseUrl });
+    this.scopedClients.clear();
+    this.listDirectoryInFlight.clear();
+    this.listDirectoryCache.clear();
   }
 
   /** Expose the raw SDK client for direct use (e.g., SyncProvider) */
@@ -245,7 +250,7 @@ class OpencodeService {
     if (existing) {
       return existing;
     }
-    const scoped = createOpencodeClient({ baseUrl: this.baseUrl, directory: normalized, fetch: this.fetchWithAuth });
+    const scoped = createRuntimeOpencodeClient({ baseUrl: this.baseUrl, directory: normalized });
     this.scopedClients.set(key, scoped);
     return scoped;
   }
@@ -1117,8 +1122,7 @@ class OpencodeService {
     Record<string, { type: string }> | null
   > {
     try {
-      // Web server endpoint - use relative path that works with both dev and prod
-      const response = await this.fetchWithAuth(`${this.baseUrl.replace(/\/+$/, '')}/session-activity`, {
+      const response = await runtimeFetch('/api/session-activity', {
         method: 'GET',
         headers: {
           Accept: 'application/json',

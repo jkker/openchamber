@@ -14,7 +14,8 @@ import { updateDesktopSettings } from "@/lib/persistence";
 import { useDirectoryStore } from "@/stores/useDirectoryStore";
 import { useBackendsStore } from "@/stores/useBackendsStore";
 import { streamDebugEnabled } from "@/stores/utils/streamDebug";
-import { buildRuntimeApiHeaders, resolveRuntimeApiEndpoint } from "@/lib/instances/runtimeApiBaseUrl";
+import { parseModelIdentifier } from "@/lib/modelIdentifier";
+import { runtimeFetch } from "@/lib/runtime-fetch";
 
 const MODELS_DEV_API_URL = "https://models.dev/api.json";
 const MODELS_DEV_PROXY_URL = "/api/openchamber/models-metadata";
@@ -128,7 +129,7 @@ const fetchOpenChamberDefaults = async (): Promise<OpenChamberDefaults> => {
         }
 
         // 2. Fetch API (Web/server)
-        const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
+        const response = await runtimeFetch('/api/config/settings', {
             method: 'GET',
             headers: buildRuntimeApiHeaders(),
         });
@@ -451,7 +452,9 @@ const fetchModelsDevMetadata = async (): Promise<Map<string, ModelMetadata>> => 
                 requestInit.credentials = 'same-origin';
             }
 
-            const response = await fetch(source, requestInit);
+            const response = isAbsoluteUrl
+                ? await fetch(source, requestInit)
+                : await runtimeFetch(source, requestInit);
 
             if (!response.ok) {
                 throw new Error(`Metadata request to ${source} returned status ${response.status}`);

@@ -7,7 +7,8 @@ import { Icon } from "@/components/icon/Icon";
 import { isDesktopShell, isTauriShell } from '@/lib/desktop';
 import { updateDesktopSettings } from '@/lib/persistence';
 import { reloadOpenCodeConfiguration } from '@/stores/useAgentsStore';
-import { buildRuntimeApiHeaders, resolveRuntimeApiEndpoint } from '@/lib/instances/runtimeApiBaseUrl';
+import { useI18n } from '@/lib/i18n';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 export const OpenCodeCliSettings: React.FC = () => {
   const { t } = useI18n();
@@ -21,7 +22,7 @@ export const OpenCodeCliSettings: React.FC = () => {
     let cancelled = false;
     void (async () => {
       try {
-        const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
+        const response = await runtimeFetch('/api/config/settings', {
           method: 'GET',
           headers: buildRuntimeApiHeaders(),
         });

@@ -10,11 +10,7 @@ import {
 } from "@/lib/configUpdate";
 import { emitConfigChange, scopeMatches, subscribeToConfigChanges } from "@/lib/configSync";
 import { useProjectsStore } from "@/stores/useProjectsStore";
-import { useSessionUIStore } from "@/sync/session-ui-store";
-import { useSelectionStore } from "@/sync/selection-store";
-import { useGlobalSessionsStore } from "@/stores/useGlobalSessionsStore";
-import { useBackendsStore } from "@/stores/useBackendsStore";
-import type { BackendCommandSurfaceItem, BackendControlSurface } from "@/lib/api/types";
+import { runtimeFetch } from "@/lib/runtime-fetch";
 
 
 export type CommandScope = 'user' | 'project';
@@ -286,7 +282,7 @@ export const useCommandsStore = create<CommandsStore>()(
                   configurableCommands.map(async (cmd) => {
                     try {
                       // Force no-cache
-                      const response = await fetch(`/api/config/commands/${encodeURIComponent(cmd.name)}${queryParams}`, {
+                      const response = await runtimeFetch(`/api/config/commands/${encodeURIComponent(cmd.name)}${queryParams}`, {
                         headers: {
                           'Cache-Control': 'no-cache',
                           ...(directory ? { 'x-openchamber-directory': directory, 'x-opencode-directory': directory } : {}),
@@ -388,7 +384,7 @@ export const useCommandsStore = create<CommandsStore>()(
             const directory = getRequestDirectory();
             const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
-            const response = await fetch(`/api/config/commands/${encodeURIComponent(config.name)}${queryParams}`, {
+            const response = await runtimeFetch(`/api/config/commands/${encodeURIComponent(config.name)}${queryParams}`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -453,7 +449,7 @@ export const useCommandsStore = create<CommandsStore>()(
             const directory = getRequestDirectory();
             const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
-            const response = await fetch(`/api/config/commands/${encodeURIComponent(name)}${queryParams}`, {
+            const response = await runtimeFetch(`/api/config/commands/${encodeURIComponent(name)}${queryParams}`, {
               method: 'PATCH',
               headers: {
                 'Content-Type': 'application/json',
@@ -507,7 +503,7 @@ export const useCommandsStore = create<CommandsStore>()(
             const directory = getRequestDirectory();
             const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
-            const response = await fetch(`/api/config/commands/${encodeURIComponent(name)}${queryParams}`, {
+            const response = await runtimeFetch(`/api/config/commands/${encodeURIComponent(name)}${queryParams}`, {
               method: 'DELETE',
               headers: directory ? { 'x-openchamber-directory': directory, 'x-opencode-directory': directory } : undefined,
             });
@@ -660,7 +656,7 @@ export async function reloadOpenCodeConfiguration(options?: { message?: string; 
   startConfigUpdate(options?.message || "Reloading OpenCode configuration…");
 
   try {
-    const response = await fetch('/api/config/reload', {
+    const response = await runtimeFetch('/api/config/reload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     });

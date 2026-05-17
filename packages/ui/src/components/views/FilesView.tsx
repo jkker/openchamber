@@ -1,4 +1,5 @@
 import React from 'react';
+import { runtimeFetch } from '@/lib/runtime-fetch';
 
 import {
   RiArrowLeftSLine,
@@ -64,7 +65,7 @@ import { useFileSearchStore } from '@/stores/useFileSearchStore';
 import { useDeviceInfo } from '@/lib/device';
 import { cn, getModifierLabel, getRevealLabelKey, hasModifier } from '@/lib/utils';
 import { getLanguageFromExtension, getImageMimeType, isImageFile } from '@/lib/toolHelpers';
-import { getFileTypeInfo, getBinaryFileWarning, getFileCategory, looksLikeBinaryContent } from '@/lib/fileHelpers';
+import { getRuntimeUrlResolver } from '@/lib/runtime-url';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { EditorView } from '@codemirror/view';
 import type { Extension } from '@codemirror/state';
@@ -1583,7 +1584,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     if (options?.optional) {
       params.set('optional', 'true');
     }
-    const response = await fetch(`/api/fs/read?${params.toString()}`, {
+    const response = await runtimeFetch(`/api/fs/read?${params.toString()}`, {
       // Avoid conditional requests (304 + empty body).
       cache: options?.optional ? 'no-store' : 'default',
     });
@@ -3217,10 +3218,10 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
         : desktopImageSrc)
       : (isSelectedSvg
         ? `data:${getImageMimeType(selectedFile.path)};utf8,${encodeURIComponent(fileContent)}`
-        : `/api/fs/raw?${new URLSearchParams({
+        : getRuntimeUrlResolver().api('/api/fs/raw', {
           path: selectedFile.path,
-          ...(selectedFileReadOptions.allowOutsideWorkspace ? { allowOutsideWorkspace: 'true' } : {}),
-        }).toString()}`))
+          allowOutsideWorkspace: selectedFileReadOptions.allowOutsideWorkspace ? 'true' : undefined,
+        })))
     : '';
 
   const rawFileSrcForPath = React.useCallback(
