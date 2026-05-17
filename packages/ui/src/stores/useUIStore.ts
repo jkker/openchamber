@@ -611,9 +611,12 @@ interface UIStore {
   showMobileKeyboardTools: boolean;
   isMobileSessionStatusBarCollapsed: boolean;
   isExpandedInput: boolean;
-  reportUsage: boolean;
+
+  language: string;
+
   shortcutOverrides: Record<string, ShortcutCombo>;
 
+  setLanguage: (lang: string) => void;
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
   toggleSidebar: () => void;
   setSidebarOpen: (open: boolean) => void;
@@ -879,9 +882,15 @@ export const useUIStore = create<UIStore>()(
         showMobileKeyboardTools: true,
         isMobileSessionStatusBarCollapsed: false,
         isExpandedInput: false,
-        reportUsage: true,
+        language: 'en',
         shortcutOverrides: {},
 
+        setLanguage: (lang) => {
+          set({ language: lang });
+          import('../i18n').then((mod) => {
+            void mod.default.changeLanguage(lang);
+          });
+        },
         setTheme: (theme) => {
           set({ theme });
           get().applyTheme();
