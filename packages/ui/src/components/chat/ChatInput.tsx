@@ -1691,19 +1691,12 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
                 return;
             }
             else if (commandName === 'compact' && currentSessionId) {
-                try {
-                    await sessionActions.waitForConnectionOrThrow();
-                    const { opencodeClient } = await import('@/lib/opencode/client');
-                    const sdk = opencodeClient.getSdkClient();
-                    const configState = useConfigStore.getState();
-                    await sdk.session.summarize({
-                        sessionID: currentSessionId,
-                        modelID: configState.currentModelId || '',
-                        providerID: configState.currentProviderId || '',
-                    });
-                } catch (error) {
-                    toast.error(error instanceof Error ? error.message : t('chat.chatInput.toast.compactFailed'));
-                }
+                const configState = useConfigStore.getState();
+                await sessionActions.compactSession({
+                    sessionId: currentSessionId,
+                    providerID: configState.currentProviderId || '',
+                    modelID: configState.currentModelId || '',
+                });
                 return;
             }
             else if (commandName === 'summary' && currentSessionId) {
