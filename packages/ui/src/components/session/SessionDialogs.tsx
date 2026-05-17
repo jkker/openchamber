@@ -24,22 +24,14 @@ import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useDeviceInfo } from '@/lib/device';
+import { normalizePath, pathsEqual } from '@/lib/pathUtils';
 import { sessionEvents } from '@/lib/sessionEvents';
 import { useI18n } from '@/lib/i18n';
 
 const renderToastDescription = (text?: string) =>
     text ? <span className="text-foreground/80 dark:text-foreground/70">{text}</span> : undefined;
 
-const normalizeProjectDirectory = (path: string | null | undefined): string => {
-    if (!path) {
-        return '';
-    }
-    const replaced = path.replace(/\\/g, '/');
-    if (replaced === '/') {
-        return '/';
-    }
-    return replaced.replace(/\/+$/, '');
-};
+const normalizeProjectDirectory = (path: string | null | undefined): string => normalizePath(path) ?? '';
 
 type DeleteDialogState = {
     sessions: Session[];
@@ -89,7 +81,7 @@ export const SessionDialogs: React.FC = () => {
     const getProjectRefForWorktree = React.useCallback((worktree: WorktreeMetadata) => {
         const normalized = normalizeProjectDirectory(worktree.projectDirectory);
         const fallbackPath = normalized || projectDirectory;
-        const match = projects.find((project) => normalizeProjectDirectory(project.path) === fallbackPath) ?? null;
+        const match = projects.find((project) => pathsEqual(project.path, fallbackPath)) ?? null;
         return { id: match?.id ?? `path:${fallbackPath}`, path: fallbackPath };
     }, [projectDirectory, projects]);
 
@@ -360,7 +352,7 @@ export const SessionDialogs: React.FC = () => {
                 }, { force: true });
             }
 
-            if (normalizeProjectDirectory(currentDirectory) === normalizedWorktreePath && normalizedProjectPath) {
+            if (pathsEqual(currentDirectory, normalizedWorktreePath) && normalizedProjectPath) {
                 useDirectoryStore.getState().setDirectory(normalizedProjectPath, { showOverlay: false });
             }
 

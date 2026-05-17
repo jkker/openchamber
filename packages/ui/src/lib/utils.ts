@@ -1,6 +1,7 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { isTauriShell } from "@/lib/desktop";
+import { normalizePath } from "@/lib/pathUtils";
 import { matchesFuzzyQuery } from "@/lib/search/fuzzySearch";
 import type { I18nKey } from "@/lib/i18n";
 
@@ -91,23 +92,17 @@ export const truncatePathMiddle = (
   return prefix ? `${prefix}…/${fileName}` : `…/${fileName}`;
 };
 
-const normalizePath = (value: string) => {
-  if (!value) return "";
-  if (value === "/") return "/";
-  return value.replace(/\/+$/, "");
-};
-
 export function formatPathForDisplay(path: string | null | undefined, homeDirectory?: string | null): string {
   if (!path) {
     return "";
   }
 
-  const normalizedPath = normalizePath(path);
+  const normalizedPath = normalizePath(path) ?? "";
   if (normalizedPath === "/") {
     return "/";
   }
 
-  const normalizedHome = homeDirectory ? normalizePath(homeDirectory) : undefined;
+  const normalizedHome = homeDirectory ? normalizePath(homeDirectory) ?? undefined : undefined;
 
   if (normalizedHome && normalizedHome !== "/") {
     if (normalizedPath === normalizedHome) {
@@ -127,12 +122,12 @@ export function formatDirectoryName(path: string | null | undefined, homeDirecto
     return "/";
   }
 
-  const normalizedPath = normalizePath(path);
+  const normalizedPath = normalizePath(path) ?? "";
   if (!normalizedPath || normalizedPath === "/") {
     return "/";
   }
 
-  const normalizedHome = homeDirectory ? normalizePath(homeDirectory) : undefined;
+  const normalizedHome = homeDirectory ? normalizePath(homeDirectory) ?? undefined : undefined;
   if (normalizedHome && normalizedHome !== "/" && normalizedPath === normalizedHome) {
     return "~";
   }

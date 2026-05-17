@@ -31,7 +31,8 @@ import { flattenAssistantTextParts } from "@/lib/messages/messageText"
 import { EXECUTION_FORK_META_TEXT } from "@/lib/messages/executionMeta"
 import { waitForWorktreeBootstrap } from "@/lib/worktrees/worktreeBootstrap"
 import { waitForPendingDraftWorktreeRequest } from "@/lib/worktrees/pendingDraftWorktree"
-import { resolveProjectForSessionDirectory } from "@/lib/projectResolution"
+import { isSubpath, normalizePath, pathsEqual } from "@/lib/pathUtils"
+import type { ProjectEntry } from "@/lib/api/types"
 import {
   getSyncSessions,
   getAllSyncSessions,
@@ -309,15 +310,6 @@ export type SessionUIState = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const normalizePath = (value?: string | null): string | null => {
-  if (typeof value !== "string") return null
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const replaced = trimmed.replace(/\\/g, "/")
-  if (replaced === "/") return "/"
-  return replaced.length > 1 ? replaced.replace(/\/+$/, "") : replaced
-}
-
 const resolveDirectoryKey = (session: Session): string | null => {
   return normalizePath(getCompatibleSessionDirectory(session))
     ?? normalizePath(getCompatibleSessionProjectWorktree(session))
@@ -348,11 +340,50 @@ const persistDraftTarget = (target: PersistedDraftTarget): void => {
   } catch { /* ignored */ }
 }
 
-const resolveDraftProjectForDirectory = resolveProjectForSessionDirectory
+const resolveProjectForDirectory = (projects: ProjectEntry[], directory: string | null): ProjectEntry | null => {
+  const nd = normalizePath(directory)
+  if (!nd) return null
+  let best: ProjectEntry | null = null
+  for (const p of projects) {
+    const pp = normalizePath(p.path)
+    if (!pp) continue
+    if (!isSubpath(nd, pp)) continue
+    if (!best || pp.length > (normalizePath(best.path)?.length ?? 0)) best = p
+  }
+  return best
+}
 
-const getAttachmentForSession = (sessionId: string | null | undefined): SessionWorktreeAttachment | undefined => {
-  if (!sessionId) return undefined
-  return useSessionWorktreeStore.getState().getAttachment(sessionId)
+const resolveProjectFromWorktreeDirectory = (
+  projects: ProjectEntry[],
+  availableWorktreesByProject: Map<string, WorktreeMetadata[]>,
+  directory: string | null,
+): ProjectEntry | null => {
+  const nd = normalizePath(directory)
+  if (!nd) return null
+  let matchedWorktree: WorktreeMetadata | null = null
+  let matchedProjectPath: string | null = null
+  let bestLen = -1
+  for (const [projectPath, worktrees] of availableWorktreesByProject.entries()) {
+    for (const wt of worktrees) {
+      const wp = normalizePath(wt.path)
+      if (!wp) continue
+      if (!isSubpath(nd, wp)) continue
+      if (wp.length > bestLen) {
+        bestLen = wp.length
+        matchedWorktree = wt
+        matchedProjectPath = normalizePath(projectPath)
+      }
+    }
+  }
+  if (!matchedWorktree) return null
+  const candidates = [normalizePath(matchedWorktree.projectDirectory), matchedProjectPath].filter((v): v is string => Boolean(v))
+  for (const c of candidates) {
+    const exact = projects.find((p) => pathsEqual(p.path, c)) ?? null
+    if (exact) return exact
+    const nested = resolveProjectForDirectory(projects, c)
+    if (nested) return nested
+  }
+  return null
 }
 
 const resolveSessionDirectory = (

@@ -1,4 +1,4 @@
-import { summarizeText as summarizeSharedText } from '../text/summarization.js';
+import { canonicalPath, pathsEqual } from '../PathUtils.js';
 
 export const createNotificationTemplateRuntime = (deps) => {
   const {
@@ -378,12 +378,12 @@ export const createNotificationTemplateRuntime = (deps) => {
         const normalizedDir = worktreeDir.replace(/\/+$/, '');
         const matchedProject = projects.find((project) => {
           if (!project || typeof project.path !== 'string') return false;
-          return project.path.replace(/\/+$/, '') === normalizedDir;
+          return pathsEqual(project.path, normalizedDir);
         });
         if (matchedProject && typeof matchedProject.label === 'string' && matchedProject.label.trim().length > 0) {
           projectName = matchedProject.label.trim();
         } else {
-          projectName = normalizedDir.split('/').filter(Boolean).pop() || '';
+          projectName = canonicalPath(normalizedDir).split('/').filter(Boolean).pop() || '';
         }
       } else {
         const activeId = typeof settings.activeProjectId === 'string' ? settings.activeProjectId : '';
@@ -399,7 +399,7 @@ export const createNotificationTemplateRuntime = (deps) => {
       }
     } catch {
       if (worktreeDir && !projectName) {
-        projectName = worktreeDir.split('/').filter(Boolean).pop() || '';
+        projectName = canonicalPath(worktreeDir).split('/').filter(Boolean).pop() || '';
       }
     }
 
@@ -410,6 +410,7 @@ export const createNotificationTemplateRuntime = (deps) => {
           baseDir: worktreeDir,
           spawnOptions: { windowsHide: true },
           binary: resolveGitBinaryForSpawn(),
+          config: ['core.autocrlf=false', ...(process.platform === 'win32' ? ['core.longpaths=true'] : [])],
         });
         branch = await Promise.race([
           git.revparse(['--abbrev-ref', 'HEAD']),

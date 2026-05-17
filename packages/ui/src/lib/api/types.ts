@@ -722,8 +722,7 @@ export interface SettingsPayload {
   showSplitAssistantMessageActions?: boolean;
   fontSize?: number;
   terminalFontSize?: number;
-  uiFont?: string;
-  monoFont?: string;
+  terminalShell?: 'default' | 'powershell' | 'cmd' | 'bash' | 'wsl';
   padding?: number;
   cornerRadius?: number;
   inputBarOffset?: number;

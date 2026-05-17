@@ -1,3 +1,5 @@
+import { canonicalPath, toNativePath } from '../PathUtils.js';
+
 export const createProjectDirectoryRuntime = (dependencies) => {
   const {
     fsPromises,
@@ -26,7 +28,7 @@ export const createProjectDirectoryRuntime = (dependencies) => {
       return null;
     }
     const normalized = normalizeDirectoryPath(trimmed);
-    return path.resolve(normalized);
+    return toNativePath(canonicalPath(normalized));
   };
 
   const validateDirectoryPath = async (candidate) => {
@@ -39,7 +41,11 @@ export const createProjectDirectoryRuntime = (dependencies) => {
       if (!stats.isDirectory()) {
         return { ok: false, error: 'Specified path is not a directory' };
       }
-      return { ok: true, directory: resolved };
+      return {
+        ok: true,
+        directory: resolved,
+        canonicalDirectory: canonicalPath(resolved),
+      };
     } catch (error) {
       const err = error;
       if (err && typeof err === 'object' && err.code === 'ENOENT') {
