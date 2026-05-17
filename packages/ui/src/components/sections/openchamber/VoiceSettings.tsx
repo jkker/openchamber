@@ -1,5 +1,4 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { useBrowserVoice } from '@/hooks/useBrowserVoice';
 import { useServerTTS } from '@/hooks/useServerTTS';
 import { useSayTTS } from '@/hooks/useSayTTS';
 import { useConfigStore } from '@/stores/useConfigStore';
@@ -24,6 +23,7 @@ import type { WasmModelStatus } from '@/lib/voice/wasmSttService';
 import { OPENAI_TTS_VOICE_OPTIONS, SPEECH_SDK_PROVIDER_OPTIONS, getSpeechSdkProviderDefaults, getTtsProviderLabel, isServerTtsProvider, type SpeechSdkProviderId } from '@/lib/voice/ttsConfig';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
+import { useBrowserVoiceRuntime } from '@/hooks/useBrowserVoiceRuntime';
 const LANGUAGE_OPTIONS = [
     { value: 'en-US', label: 'English' },
     { value: 'es-ES', label: 'Español' },
@@ -120,7 +120,7 @@ export const VoiceSettings: React.FC = () => {
         isSupported,
         language,
         setLanguage,
-    } = useBrowserVoice();
+    } = useBrowserVoiceRuntime();
     const voiceProvider = useConfigStore((state) => state.ttsProvider);
     const setVoiceProvider = useConfigStore((state) => state.setTtsProvider);
     const speechSdkProvider = useConfigStore((state) => state.ttsSpeechSdkProvider);
