@@ -59,6 +59,26 @@ export default defineConfig({
       },
     },
     themeStoragePlugin(),
+    VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
+      registerType: 'autoUpdate',
+      injectRegister: false,
+      manifest: false,
+      injectManifest: {
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,ttf,otf,eot}'],
+        // iOS Safari/PWA is much more reliable with a classic (non-module) SW bundle.
+        rollupFormat: 'iife',
+        // We already keep a custom manifest in index.html
+        injectionPoint: 'self.__WB_MANIFEST',
+        maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
+      },
+      devOptions: {
+        enabled: pwaDevEnabled,
+        type: 'module',
+      },
+    }),
   ],
   resolve: {
     alias: [

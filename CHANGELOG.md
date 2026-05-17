@@ -4,8 +4,78 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Tooling: rebuilt TypeScript validation around project references and incremental declaration output for `@openchamber/ui`, cutting warm `type-check` runs from repeated ~50s full-program checks down to about 3s at the repo root, added fast local build scripts that skip the React compiler when release-grade transforms are not needed, and serialized root workspace builds to avoid concurrent Vite memory exhaustion.
-- Tooling/Bundle Size: lazy-loaded Prism grammars for virtualized code blocks and moved CodeMirror language resolution to async per-extension loading, trimming the initial frontend module graph and improving fast local build times further.
+## [1.9.10-TWA] - 2026-04-30
+
+- Android: synced APK version with upstream OpenChamber v1.9.10 (versionCode 10910, versionName 1.9.10)
+- Android: built with guard-android-sdk — local.properties generated from env vars at build time, no plaintext secrets on disk
+- Android: merged 18 upstream commits including embedded dev-server preview pane, fork-aware GitHub listing, wide layout, SSE wake-from-sleep reconnect, Korean localization polish, and multiple chat/UI/terminal improvements
+- Upstream v1.9.10 changes: Korean interface translations, unified model picker, improved project directory picker, chat polish, session sidebar fixes, VSCode Windows path normalization, hardened managed OpenCode startup
+
+- Preview: added an embedded dev-server Preview pane for loopback apps, with authenticated proxying, Vite/HMR support, same-origin API request handling, and safer local dev-server shutdown so apps can run inside OpenChamber more like they do in the browser (thanks to @wpbiggs).
+- Preview: added preview console capture, DOM element inspection, annotation context, and Electron screenshot attachments so UI feedback can be sent to the assistant with richer context.
+- Projects/Terminal: added Auto-discover for local dev servers, background terminal startup, action-linked Preview reopen controls, and cleaner terminal tab styling for a smoother Project Actions workflow (thanks to @wpbiggs).
+- GitHub: improved fork-aware issue and pull-request listing, PR status handling, and startup loading feedback so GitHub-backed workspaces are easier to open and track (thanks to @corrm).
+- Chat/UI: added a wide layout option and softened aborted-turn wording so chat can be tuned for roomier review workflows with less alarming interruption messages.
+- UI/Settings: centered empty states more consistently and fixed terminal toolbar overlap, improving polish in settings and docked terminal layouts (thanks to @Yabuku-xD).
+- Reliability/Streaming: reconnects now recover immediately after OS wake-from-sleep, reducing stale chat/session state after a machine resumes (thanks to @jwcrystal).
+
+## [1.9.10] - 2026-04-28
+
+- UI/Localization: added Korean interface translations and default new installs back to English when no language has been chosen (thanks to @An-jinu).
+- Chat/Models: unified the model picker across desktop and mobile with a cleaner, more consistent selection flow (thanks to @daveotero).
+- Projects: improved the project directory picker with expandable pinned folders and better file/path handling for faster project selection.
+- Chat/UI: improved split-response action placement, error-message alignment, tab close affordances, and overscroll behavior for a more polished conversation view.
+- Sessions/Sidebar: fixed stale session, folder, project, and worktree state after mutations, and polished pinned-session indicators so navigation stays accurate (thanks to @corrm, @Yabuku-xD).
+- VSCode/Windows: normalized Windows drive-letter paths in extension webviews and added MiniMax/Ollama quota support, improving file handling and usage visibility in the extension (thanks to @sdunfeng).
+- Reliability/Startup: hardened managed OpenCode startup, preserved shell PATH more reliably, ignored stale downgrade update prompts, and improved stream/proxy recovery with heartbeat support.
+
+## [1.9.9] - 2026-04-26
+
+- UI/Localization: added a localization foundation with translated interface strings for Spanish, Brazilian Portuguese, Ukrainian, and Simplified Chinese.
+- Settings/Appearance: added selectable interface and code fonts with 10 choices each.
+- Chat/Workflow: added keyboard turn navigation, widened chat content, and introduced a local workspace review and summarize slash commands for faster review handoff.
+- Chat/Mobile: improved mention and autocomplete behavior with complete results, clearer active-tab scoping, and less context-switching while drafting prompts.
+- Chat/Tasks: todo list progress now updates live as task status changes, and task/model status hints are steadier during active runs (thanks to @Yabuku-xD).
+- Files/Editor: added an "Open files in preview mode" setting and improved multi-file edit/diff safety so review flows stay cleaner (thanks to @daveotero).
+- Reliability/Performance: improved cold start and streaming responsiveness with lazy-loaded heavy components, chunk-load recovery, lower re-render churn, and safer reconnect/local-stream recovery (thanks to @Yabuku-xD, @jwcrystal, @vhqtvn).
+- Desktop/Web/Mobile: improved Electron update restart behavior, PWA service-worker notifications, mobile keyboard handling, and the Add Project panel flow (thanks to @Jovines, @vhqtvn).
+
+## [1.9.8] - 2026-04-22
+
+- Sessions/Reliability: fixed parent-child session sync during reconnects and navigation, so status and progress stay aligned in complex session trees (thanks to @jwcrystal).
+- Settings/Sync: settings updates now sync more reliably across clients, and sidebar session pagination is steadier in larger workspaces.
+- Sessions/Folders: folder changes now persist through server-backed endpoints, improving consistency across environments and path setups.
+- Notifications: permission notifications are now suppressed when auto-accept is enabled, reducing noise during trusted runs.
+- Chat/Files: improved changed-files handling in chat and restored quick file-open flows from pending changes, so jump-to-edit stays fast (thanks to @jwcrystal).
+- UI: improved bottom scroll shadow behavior and hide the tasks row when there is no active work for a cleaner conversation view.
+- Reliability/Desktop: improved live event-stream recovery after transient stalls, wait briefly before failing chat actions during reconnects, and persist Electron server logs for easier disconnect debugging.
+- Desktop/macOS: System color mode now tracks OS theme changes, traffic-light controls stay visible after dock restore, and update restart/changelog handling is more reliable.
+- Chat/Commands: added `/summary` slash command for a non-destructive session summary - optional topic hint after the command focuses the output, and the prompt is customizable under Settings: Magic Prompts.
+
+## [1.9.7] - 2026-04-22
+
+- Desktop: added an Electron desktop runtime in parallel with the current Tauri app, with Electron planned to become the default path in an upcoming release.
+- Plans/Notes/Todos: added editable project plans from assistant messages, external plan upload, configurable planning magic prompts, and quicker note/todo handoff into new sessions or worktrees.
+- Chat/Files: you can now drag files and folders from the file tree into chat, with improved `@folder` autocomplete for faster context building (thanks to @youfch).
+- Sessions/UI: added bulk session selection in the sidebar and fixed pinned sessions so they persist reliably after reloads (thanks to @yart).
+- Files/Git: added a file-change summary bar and auto-refresh for open files changed outside the app, improving review flow and keeping editors in sync (thanks to @jwcrystal).
+- Git/Worktrees: improved branch/worktree reliability by allowing checkout with uncommitted changes, tightening worktree cache invalidation, and reducing incorrect remote prefetches (thanks to @jwcrystal, @jasonalsing).
+- Settings/MCP: improved MCP auth flow with better remote-config support and clearer diagnostics, and aligned config resolution with OpenCode behavior for more predictable setup (thanks to @daveotero, @cyan).
+- Reliability/Chat: hardened bootstrap and stream-connection recovery, preserved session/connect state more reliably, and reduced streaming UI churn for smoother long runs.
+- Web/PWA: added install orientation controls and fixed loopback-origin handling for web push notifications in local setups (thanks to @vhqtvn, @yart).
+
+## [1.9.6] - 2026-04-17
+
+- Reliability/Streaming: switched live message events to a WebSocket-first transport with SSE fallback, added response compression, and hardened proxy/compression handling so long runs stay smoother on slower or proxied networks (thanks to @geekifan, @jwcrystal).
+- Sessions/Scheduled Tasks: added scheduled task creation and management with locale-aware scheduling, so recurring prompts run at the right local time without manual re-entry.
+- Sessions/Worktrees: enforced session worktree isolation and tightened session-switch safety, reducing cross-worktree mix-ups when resuming chats or running Git actions (thanks to @jwcrystal).
+- Files: added a full Go to Line workflow (toolbar + shortcut + dialog) and a new Copy Relative Path action, making in-editor navigation and path sharing much faster (thanks to @coldbrow).
+- Files: file trees now auto-refresh when files change outside the app, so new, renamed, or updated files appear without manual reloads (thanks to @jwcrystal).
+- Chat/Export: added export session as Markdown and improved empty-state/export behavior, making conversation handoff and documentation cleaner (thanks to @coldbrow).
+- Chat/Requests: restored blocking request visibility in sub-sessions, scoped auto-approve to the active session tree, and reduced noisy auto-approved notifications during multi-session work.
+- Desktop: added quick open and a LAN access toggle, plus safer quit behavior around scheduled tasks for smoother local-network and day-to-day desktop workflows (thanks to @An-jinu).
+- Chat/Markdown: added LaTeX rendering support for clearer math and technical notation in messages (thanks to @ricautomation).
+- Settings/Skills: skills are now sorted within groups so larger skill lists are easier to scan (thanks to @roctom).
 
 ## [1.9.5] - 2026-04-14
 

@@ -1,11 +1,10 @@
 import React from 'react';
-import { RiFileCopyLine, RiCheckLine, RiExternalLinkLine } from '@remixicon/react';
-import { isDesktopShell, isTauriShell } from '@/lib/desktop';
-import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
-import { updateDesktopSettings } from '@/lib/persistence';
-import { buildRuntimeApiHeaders, resolveRuntimeApiEndpoint } from '@/lib/instances/runtimeApiBaseUrl';
-import { copyTextToClipboard } from '@/lib/clipboard';
+import { ChooserScreen } from './ChooserScreen';
+import { LocalSetupScreen } from './LocalSetupScreen';
+import { RecoveryScreen } from './RecoveryScreen';
+import type { RecoveryVariant } from './DesktopConnectionRecovery';
+import { useIsAndroidTwa } from '@/hooks/useIsAndroidTwa';
+import { RemoteConnectionForm } from './RemoteConnectionForm';
 
 export type OnboardingScreenMode = 'first-launch' | 'local-setup' | 'recovery';
 
@@ -39,6 +38,7 @@ export function OnboardingScreen({
 }: OnboardingScreenProps) {
   const [showRecoveryRemoteForm, setShowRecoveryRemoteForm] = React.useState(false);
   const [recoveryEnteredLocalSetup, setRecoveryEnteredLocalSetup] = React.useState(false);
+  const isAndroidTwa = useIsAndroidTwa();
 
   // Reset transient recovery subflow state when the flow identity changes, so
   // stale local-setup or remote-form views don't bleed across prop updates.
@@ -91,6 +91,14 @@ export function OnboardingScreen({
   }
 
   // First-launch mode (default)
+  if (isAndroidTwa) {
+    return (
+      <RemoteConnectionForm
+        onBack={() => {}}
+        showBackButton={false}
+      />
+    );
+  }
   return (
     <div className="flex items-center justify-center gap-3">
       <code>

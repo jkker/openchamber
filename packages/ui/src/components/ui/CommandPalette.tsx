@@ -26,8 +26,9 @@ import { useDeviceInfo } from '@/lib/device';
 import { RiAddLine, RiChatAi3Line, RiCheckLine, RiCodeLine, RiComputerLine, RiGitBranchLine, RiLayoutGridLine, RiLayoutLeftLine, RiLayoutRightLine, RiMoonLine, RiQuestionLine, RiSettings3Line, RiSunLine, RiTerminalBoxLine, RiTimeLine } from '@remixicon/react';
 import { createWorktreeSession } from '@/lib/worktreeSessionCreator';
 import { formatShortcutForDisplay, getEffectiveShortcutCombo } from '@/lib/shortcuts';
-import { canUseElectronDesktopIPC, invokeDesktop, isDesktopShell, isVSCodeRuntime, isWebRuntime } from '@/lib/desktop';
-import { SETTINGS_PAGE_METADATA, type SettingsRuntimeContext } from '@/lib/settings/metadata';
+import { isDesktopShell, isVSCodeRuntime, isWebRuntime } from '@/lib/desktop';
+import { useIsAndroidTwa } from '@/hooks/useIsAndroidTwa';
+import { SETTINGS_PAGE_METADATA, SETTINGS_GROUP_LABELS, type SettingsRuntimeContext } from '@/lib/settings/metadata';
 import { getSettingsNavIcon } from '@/components/views/SettingsView';
 import { Icon } from "@/components/icon/Icon";
 import { scoreByFuzzyQuery } from '@/lib/search/fuzzySearch';
@@ -265,13 +266,11 @@ export const CommandPalette: React.FC = () => {
     activeProject?.path,
   ]);
 
-  // ---------------------------------------------------------------------------
-  // Settings sub-pages (only show when there's a query)
-  // ---------------------------------------------------------------------------
+  const isAndroidTwa = useIsAndroidTwa();
   const settingsRuntimeCtx = React.useMemo<SettingsRuntimeContext>(() => {
     const isDesktop = isDesktopShell();
-    return { isVSCode: isVSCodeRuntime(), isWeb: !isDesktop && isWebRuntime(), isDesktop };
-  }, []);
+    return { isVSCode: isVSCodeRuntime(), isWeb: !isDesktop && isWebRuntime(), isDesktop, isAndroidTwa };
+  }, [isAndroidTwa]);
 
   const settingsEntries = React.useMemo<CommandEntry[]>(() => {
     return SETTINGS_PAGE_METADATA

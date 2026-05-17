@@ -9,6 +9,7 @@ import { NotificationSettings } from './NotificationSettings';
 import { GitHubSettings } from './GitHubSettings';
 import { VoiceSettings } from './VoiceSettings';
 import { TunnelSettings } from './TunnelSettings';
+import { AppSettings } from './AppSettings';
 import { OpenCodeCliSettings } from './OpenCodeCliSettings';
 import { TerminalSettings } from './TerminalSettings';
 import { DesktopNetworkSettings } from './DesktopNetworkSettings';
@@ -91,6 +92,8 @@ export const OpenChamberPage: React.FC<OpenChamberPageProps> = ({ section, userC
                 return <VoiceSectionContent />;
             case 'tunnel':
                 return <TunnelSectionContent />;
+    case 'app':
+      return <AppSettings />;
             default:
                 return null;
         }

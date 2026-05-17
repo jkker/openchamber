@@ -58,4 +58,12 @@ packages/intellij/
 
 # OS
 Thumbs.db
-test-project
+
+# Local runtime state (docker/dev)
+data/
+workspaces/
+*.pid
+
+# Android TWA build artifacts
+packages/android-twa/configurable-wrapper/app/build/
+packages/android-twa/configurable-wrapper/local.properties
