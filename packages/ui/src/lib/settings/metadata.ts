@@ -7,7 +7,7 @@ export type SettingsPageSlug =
   | 'providers'
   | 'usage'
   | 'agents'
-  | 'behavior'
+  | 'profiles'
   | 'commands'
   | 'mcp'
   | 'skills.installed'
@@ -105,11 +105,11 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     keywords: ['agent', 'agents', 'prompts', 'tools', 'permissions'],
   },
   {
-    slug: 'behavior',
-    title: 'Behavior',
+    slug: 'profiles',
+    title: 'Model Profiles',
     group: 'opencode',
-    kind: 'single',
-    keywords: ['behavior', 'agents.md', 'system prompt', 'global rules', 'instructions', 'override'],
+    kind: 'split',
+    keywords: ['profile', 'profiles', 'model', 'preset', 'switch'],
   },
   {
     slug: 'commands',
