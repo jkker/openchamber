@@ -608,6 +608,7 @@ interface UIStore {
   stickyUserHeader: boolean;
   showSplitAssistantMessageActions: boolean;
   showMobileSessionStatusBar: boolean;
+  showMobileKeyboardTools: boolean;
   isMobileSessionStatusBarCollapsed: boolean;
   isExpandedInput: boolean;
   reportUsage: boolean;
@@ -740,6 +741,7 @@ interface UIStore {
   setStickyUserHeader: (value: boolean) => void;
   setShowSplitAssistantMessageActions: (value: boolean) => void;
   setShowMobileSessionStatusBar: (value: boolean) => void;
+  setShowMobileKeyboardTools: (value: boolean) => void;
   setIsMobileSessionStatusBarCollapsed: (value: boolean) => void;
   viewPagerPage: 'left' | 'center' | 'right';
   setViewPagerPage: (page: 'left' | 'center' | 'right') => void;
@@ -874,6 +876,7 @@ export const useUIStore = create<UIStore>()(
         stickyUserHeader: true,
         showSplitAssistantMessageActions: false,
         showMobileSessionStatusBar: true,
+        showMobileKeyboardTools: true,
         isMobileSessionStatusBarCollapsed: false,
         isExpandedInput: false,
         reportUsage: true,
@@ -1918,6 +1921,9 @@ export const useUIStore = create<UIStore>()(
         setShowMobileSessionStatusBar: (value) => {
           set({ showMobileSessionStatusBar: value });
         },
+        setShowMobileKeyboardTools: (value) => {
+          set({ showMobileKeyboardTools: value });
+        },
         setIsMobileSessionStatusBarCollapsed: (value) => {
           set({ isMobileSessionStatusBarCollapsed: value });
         },
@@ -2119,6 +2125,7 @@ export const useUIStore = create<UIStore>()(
           stickyUserHeader: state.stickyUserHeader,
           showSplitAssistantMessageActions: state.showSplitAssistantMessageActions,
           showMobileSessionStatusBar: state.showMobileSessionStatusBar,
+          showMobileKeyboardTools: state.showMobileKeyboardTools,
           isMobileSessionStatusBarCollapsed: state.isMobileSessionStatusBarCollapsed,
           shortcutOverrides: state.shortcutOverrides,
         })

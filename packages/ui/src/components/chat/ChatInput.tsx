@@ -972,18 +972,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
     const setAgent = useConfigStore((state) => state.setAgent);
     const getVisibleAgents = useConfigStore((state) => state.getVisibleAgents);
     const agents = getVisibleAgents();
-    const isMobile = useUIStore((state) => state.isMobile);
-    const inputBarOffset = useUIStore((state) => state.inputBarOffset);
-    const persistChatDraft = useUIStore((state) => state.persistChatDraft);
-    const inputSpellcheckEnabled = useUIStore((state) => state.inputSpellcheckEnabled);
-    const isExpandedInput = useUIStore((state) => state.isExpandedInput);
-    const setExpandedInput = useUIStore((state) => state.setExpandedInput);
-    const setTimelineDialogOpen = useUIStore((state) => state.setTimelineDialogOpen);
-    const cycleAgentShortcutOverride = useUIStore((state) => state.shortcutOverrides.cycle_agent);
-    const cycleAgentShortcut = React.useMemo(() => (
-        getEffectiveShortcutCombo('cycle_agent', cycleAgentShortcutOverride ? { cycle_agent: cycleAgentShortcutOverride } : undefined)
-    ), [cycleAgentShortcutOverride]);
-    const { git: runtimeGit } = useRuntimeAPIs();
+    const primaryAgents = React.useMemo(() => agents.filter((agent) => agent.mode === 'primary'), [agents]);
+    const { isMobile, inputBarOffset, isKeyboardOpen, setTimelineDialogOpen, cornerRadius, persistChatDraft, isExpandedInput, setExpandedInput, showMobileKeyboardTools } = useUIStore();
+    const { working } = useAssistantStatus();
     const { currentTheme } = useThemeSystem();
     const chatSearchDirectory = useChatSearchDirectory();
     const isGitRepo = useIsGitRepo(currentDirectory);
@@ -3992,37 +3983,22 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
                         {isMobile ? (
                             <>
                                 <div className="flex w-full items-center justify-between gap-x-1.5">
-                                    <div className="flex items-center gap-x-1.5">
-                                        <ComposerAttachmentControls
-                                            isMobile={isMobile}
-                                            isVSCode={isVSCode}
-                                            footerIconButtonClass={footerIconButtonClass}
-                                            iconSizeClass={iconSizeClass}
-                                            fileInputRef={fileInputRef}
-                                            handleLocalFileSelect={handleLocalFileSelect}
-                                            handlePickLocalFiles={handlePickLocalFiles}
-                                            handleOpenCommandMenu={handleOpenCommandMenu}
-                                            openIssuePicker={openIssuePicker}
-                                            openPrPicker={openPrPicker}
-                                            onOpenSettings={onOpenSettings}
-                                        />
-                                        <PermissionAutoAcceptButton
-                                            footerIconButtonClass={footerIconButtonClass}
-                                            iconSizeClass={iconSizeClass}
-                                            permissionScopeSessionId={permissionScopeSessionId}
-                                            permissionAutoAcceptEnabled={permissionAutoAcceptEnabled}
-                                            handlePermissionAutoAcceptToggle={handlePermissionAutoAcceptToggle}
-                                        />
-                                    </div>
-                                    <div className="flex items-center min-w-0 gap-x-1 justify-end">
-                                        <div className="flex items-center gap-x-1 min-w-0 max-w-[60vw] flex-shrink">
-                                            <MemoMobileModelButton onOpenModel={() => handleOpenMobilePanel('model')} className="min-w-0 flex-shrink" />
-                                            <MemoMobileAgentButton
-                                                onOpenAgentPanel={handleOpenAgentPanel}
-                                                onCycleAgent={handleCycleAgent}
-                                                className="min-w-0 flex-shrink"
-                                            />
+                                    {showMobileKeyboardTools && (
+                                        <div className="flex items-center gap-x-1">
+                                            {attachmentsControls}
                                         </div>
+                                    )}
+                                    <div className={cn("flex items-center min-w-0 gap-x-1 justify-end", !showMobileKeyboardTools && "w-full")}>
+                                        {showMobileKeyboardTools && (
+                                            <div className="flex items-center gap-x-1 min-w-0 max-w-[60vw] flex-shrink">
+                                                <MobileModelButton onOpenModel={handleOpenMobileControls} className="min-w-0 flex-shrink" />
+                                                <MobileAgentButton
+                                                    onOpenAgentPanel={() => setMobileControlsPanel('agent')}
+                                                    onCycleAgent={handleCycleAgent}
+                                                    className="min-w-0 flex-shrink"
+                                                />
+                                            </div>
+                                        )}
                                         <div className="flex items-center gap-x-1 flex-shrink-0">
                                             <MemoBrowserVoiceButton />
                                             <ComposerActionButtons

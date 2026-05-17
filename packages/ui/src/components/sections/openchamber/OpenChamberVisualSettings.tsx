@@ -96,7 +96,31 @@ const MERMAID_RENDERING_OPTIONS: Option<'svg' | 'ascii'>[] = [
     },
 ];
 
-export type VisibleSetting = 'theme' | 'fontSize' | 'terminalFontSize' | 'spacing' | 'cornerRadius' | 'inputBarOffset' | 'navRail' | 'toolOutput' | 'mermaidRendering' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'reasoning' | 'queueMode' | 'textJustificationActivity' | 'terminalQuickKeys' | 'persistDraft' | 'mobileHaptics';
+const DEFAULT_PWA_INSTALL_NAME = 'OpenChamber - AI Coding Assistant';
+
+type PwaInstallNameWindow = Window & {
+    __OPENCHAMBER_SET_PWA_INSTALL_NAME__?: (value: string) => string;
+    __OPENCHAMBER_UPDATE_PWA_MANIFEST__?: () => void;
+};
+
+const USER_MESSAGE_RENDERING_OPTIONS: Option<'markdown' | 'plain'>[] = [
+    {
+        id: 'markdown',
+        label: 'Markdown',
+        description: 'Render user text with markdown formatting.',
+    },
+    {
+        id: 'plain',
+        label: 'Plain text',
+        description: 'Render user text with preserved whitespace and links.',
+    },
+];
+
+const normalizeUserMessageRenderingMode = (mode: unknown): 'markdown' | 'plain' => {
+    return mode === 'markdown' ? 'markdown' : 'plain';
+};
+
+export type VisibleSetting = 'theme' | 'pwaInstallName' | 'fontSize' | 'terminalFontSize' | 'spacing' | 'cornerRadius' | 'inputBarOffset' | 'navRail' | 'toolOutput' | 'mermaidRendering' | 'userMessageRendering' | 'stickyUserHeader' | 'diffLayout' | 'mobileStatusBar' | 'mobileKeyboardTools' | 'dotfiles' | 'reasoning' | 'queueMode' | 'textJustificationActivity' | 'activityHeaderTimestamps' | 'terminalQuickKeys' | 'persistDraft';
 
 interface OpenChamberVisualSettingsProps {
     /** Which settings to show. If undefined, shows all. */
@@ -157,9 +181,8 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
     const setNavRailExpanded = useUIStore(state => state.setNavRailExpanded);
     const showMobileSessionStatusBar = useUIStore(state => state.showMobileSessionStatusBar);
     const setShowMobileSessionStatusBar = useUIStore(state => state.setShowMobileSessionStatusBar);
-    const messageStreamTransport = useConfigStore((state) => state.settingsMessageStreamTransport);
-    const setMessageStreamTransport = useConfigStore((state) => state.setSettingsMessageStreamTransport);
-    const isSettingsDialogOpen = useUIStore(state => state.isSettingsDialogOpen);
+    const showMobileKeyboardTools = useUIStore(state => state.showMobileKeyboardTools);
+    const setShowMobileKeyboardTools = useUIStore(state => state.setShowMobileKeyboardTools);
     const {
         themeMode,
         setThemeMode,
@@ -351,7 +374,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
         || shouldShow('splitAssistantMessageActions')
         || shouldShow('diffLayout')
         || (shouldShow('mobileStatusBar') && isMobile)
-        || (shouldShow('mobileHaptics') && isNativeMobile)
+        || (shouldShow('mobileKeyboardTools') && isMobile)
         || shouldShow('dotfiles')
         || shouldShow('reasoning')
         || shouldShow('queueMode')
@@ -1105,41 +1128,30 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                 </section>
                             )}
 
-                            {shouldShow('diffLayout') && !isVSCodeRuntime() && (
-                                <section className="p-2">
-                                    <h4 className="typography-ui-header font-medium text-foreground">Diff Layout</h4>
-                                    <div role="radiogroup" aria-label="Diff layout" className="mt-1 space-y-0">
-                                        {DIFF_LAYOUT_OPTIONS.map((option) => {
-                                            const selected = diffLayoutPreference === option.id;
-                                            return (
-                                                <div
-                                                    key={option.id}
-                                                    role="button"
-                                                    tabIndex={0}
-                                                    aria-pressed={selected}
-                                                    onClick={() => setDiffLayoutPreference(option.id)}
-                                                    onKeyDown={(event) => {
-                                                        if (event.key === ' ' || event.key === 'Enter') {
-                                                            event.preventDefault();
-                                                            setDiffLayoutPreference(option.id);
-                                                        }
-                                                    }}
-                                                    className="flex w-full items-center gap-2 py-0.5 text-left"
-                                                >
-                                                    <Radio
-                                                        checked={selected}
-                                                        onChange={() => setDiffLayoutPreference(option.id)}
-                                                        ariaLabel={`Diff layout: ${option.label}`}
-                                                    />
-                                                    <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
-                                                        {option.label}
-                                                    </span>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                </section>
-                            )}
+                            {(shouldShow('stickyUserHeader') || (shouldShow('mobileStatusBar') && isMobile) || (shouldShow('mobileKeyboardTools') && isMobile) || shouldShow('dotfiles') || shouldShow('queueMode') || shouldShow('persistDraft') || shouldShow('reasoning') || shouldShow('textJustificationActivity')) && (
+                                <section className="p-2 space-y-0.5">
+                                    {shouldShow('stickyUserHeader') && (
+                                        <div
+                                            className="group flex cursor-pointer items-center gap-2 py-1.5"
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-pressed={stickyUserHeader}
+                                            onClick={() => handleStickyUserHeaderChange(!stickyUserHeader)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === ' ' || event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    handleStickyUserHeaderChange(!stickyUserHeader);
+                                                }
+                                            }}
+                                        >
+                                            <Checkbox
+                                                checked={stickyUserHeader}
+                                                onChange={handleStickyUserHeaderChange}
+                                                ariaLabel="Sticky user header"
+                                            />
+                                            <span className="typography-ui-label text-foreground">Sticky User Header</span>
+                                        </div>
+                                    )}
 
                             {shouldShow('diffLayout') && !isVSCodeRuntime() && (
                                 <section className="p-2">
@@ -1199,6 +1211,29 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                                 ariaLabel="Show mobile status bar"
                                             />
                                             <span className="typography-ui-label text-foreground">Show Mobile Status Bar</span>
+                                        </div>
+                                    )}
+
+                                    {shouldShow('mobileKeyboardTools') && isMobile && (
+                                        <div
+                                            className="group flex cursor-pointer items-center gap-2 py-1.5"
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-pressed={showMobileKeyboardTools}
+                                            onClick={() => setShowMobileKeyboardTools(!showMobileKeyboardTools)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === ' ' || event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    setShowMobileKeyboardTools(!showMobileKeyboardTools);
+                                                }
+                                            }}
+                                        >
+                                            <Checkbox
+                                                checked={showMobileKeyboardTools}
+                                                onChange={setShowMobileKeyboardTools}
+                                                ariaLabel="Show mobile keyboard tools"
+                                            />
+                                            <span className="typography-ui-label text-foreground">Show Mobile Keyboard Tools</span>
                                         </div>
                                     )}
 
