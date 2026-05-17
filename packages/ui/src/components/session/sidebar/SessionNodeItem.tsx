@@ -55,6 +55,7 @@ import { getSessionParentId } from './types';
 import { formatSessionCompactDateLabel, formatSessionDateLabel, normalizePath, renderHighlightedText, resolveSessionDiffStats } from './utils';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
+import { useSessionExpansionStore } from '@/stores/useSessionExpansionStore';
 import { useSessionUnseenCount } from '@/sync/notification-store';
 import { useSessionMultiSelectStore } from '@/stores/useSessionMultiSelectStore';
 import { useI18n } from '@/lib/i18n';
@@ -76,8 +77,8 @@ type Props = {
   archivedBucket?: boolean;
   directoryStatus: Map<string, 'unknown' | 'exists' | 'missing'>;
   currentSessionId: string | null;
+  optimisticActiveSessionId?: string | null;
   pinnedSessionIds: Set<string>;
-  expandedParents: Set<string>;
   hasSessionSearchQuery: boolean;
   normalizedSessionSearchQuery: string;
   notifyOnSubtasks: boolean;
@@ -87,7 +88,6 @@ type Props = {
   setEditTitle: (value: string) => void;
   handleSaveEdit: () => void;
   handleCancelEdit: () => void;
-  toggleParent: (sessionId: string) => void;
   handleSessionSelect: (sessionId: string, sessionDirectory: string | null, isMissingDirectory: boolean, projectId?: string | null) => void;
   handleSessionDoubleClick: () => void;
   togglePinnedSession: (sessionId: string) => void;
@@ -112,14 +112,16 @@ type Props = {
   projectColor?: string | null;
 };
 
-const getNodeChildSignature = (node: SessionNode): string => {
-  if (node.children.length === 0) {
-    return '';
+const subtreeIdentityChanged = (prev: SessionNode, next: SessionNode): boolean => {
+  if (prev === next) return false;
+  if (prev.session !== next.session) return true;
+  if (prev.children.length !== next.children.length) return true;
+  for (let i = 0; i < prev.children.length; i += 1) {
+    if (subtreeIdentityChanged(prev.children[i]!, next.children[i]!)) {
+      return true;
+    }
   }
-
-  return node.children
-    .map((child) => `${child.session.id}:${child.children.length}`)
-    .join('|');
+  return false;
 };
 
 const treeContainsSessionId = (node: SessionNode, sessionId: string | null): boolean => {
@@ -164,15 +166,59 @@ const treeContainsMenuKey = (
   return false;
 };
 
-const areEqual = (prev: Props, next: Props): boolean => {
-  const prevSession = prev.node.session;
-  const nextSession = next.node.session;
-  const prevSessionId = prevSession.id;
-  const nextSessionId = nextSession.id;
+const treePinnedMembershipChanged = (
+  node: SessionNode,
+  prev: Set<string>,
+  next: Set<string>,
+): boolean => {
+  if (prev === next) return false;
+  const id = node.session.id;
+  if (prev.has(id) !== next.has(id)) {
+    return true;
+  }
+  for (const child of node.children) {
+    if (treePinnedMembershipChanged(child, prev, next)) {
+      return true;
+    }
+  }
+  return false;
+};
 
-  if (prevSessionId !== nextSessionId) return false;
-  if (prev.node.session !== next.node.session) return false;
-  if (getNodeChildSignature(prev.node) !== getNodeChildSignature(next.node)) return false;
+const collectSubtreeDirectories = (
+  node: SessionNode,
+  groupDirectory: string | null | undefined,
+  out: Set<string>,
+): void => {
+  const directory = normalizePath((node.session as Session & { directory?: string | null }).directory ?? null)
+    ?? normalizePath(groupDirectory ?? null);
+  if (directory) {
+    out.add(directory);
+  }
+  for (const child of node.children) {
+    collectSubtreeDirectories(child, groupDirectory, out);
+  }
+};
+
+const directoryStatusChangedForSubtree = (
+  node: SessionNode,
+  groupDirectory: string | null | undefined,
+  prev: Map<string, 'unknown' | 'exists' | 'missing'>,
+  next: Map<string, 'unknown' | 'exists' | 'missing'>,
+): boolean => {
+  if (prev === next) return false;
+  const directories = new Set<string>();
+  collectSubtreeDirectories(node, groupDirectory, directories);
+  for (const directory of directories) {
+    if (prev.get(directory) !== next.get(directory)) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const areEqual = (prev: Props, next: Props): boolean => {
+  if (subtreeIdentityChanged(prev.node, next.node)) return false;
   if (prev.depth !== next.depth) return false;
   if (prev.groupDirectory !== next.groupDirectory) return false;
   if (prev.projectId !== next.projectId) return false;
@@ -184,8 +230,14 @@ const areEqual = (prev: Props, next: Props): boolean => {
       return false;
     }
   }
-  if (prev.pinnedSessionIds.has(prevSessionId) !== next.pinnedSessionIds.has(nextSessionId)) return false;
-  if (prev.expandedParents.has(prevSessionId) !== next.expandedParents.has(nextSessionId)) return false;
+  if (prev.optimisticActiveSessionId !== next.optimisticActiveSessionId) {
+    const prevOptimisticInTree = treeContainsSessionId(prev.node, prev.optimisticActiveSessionId ?? null);
+    const nextOptimisticInTree = treeContainsSessionId(next.node, next.optimisticActiveSessionId ?? null);
+    if (prevOptimisticInTree || nextOptimisticInTree) {
+      return false;
+    }
+  }
+  if (treePinnedMembershipChanged(prev.node, prev.pinnedSessionIds, next.pinnedSessionIds)) return false;
   if (prev.hasSessionSearchQuery !== next.hasSessionSearchQuery) return false;
   if (prev.normalizedSessionSearchQuery !== next.normalizedSessionSearchQuery) return false;
   if (prev.notifyOnSubtasks !== next.notifyOnSubtasks) return false;
@@ -203,18 +255,21 @@ const areEqual = (prev: Props, next: Props): boolean => {
       return false;
     }
   }
-  if ((prev.copiedSessionId === prevSessionId) !== (next.copiedSessionId === nextSessionId)) return false;
+  if (prev.copiedSessionId !== next.copiedSessionId) {
+    const prevCopiedInTree = treeContainsSessionId(prev.node, prev.copiedSessionId);
+    const nextCopiedInTree = treeContainsSessionId(next.node, next.copiedSessionId);
+    if (prevCopiedInTree || nextCopiedInTree) {
+      return false;
+    }
+  }
 
-  const prevMenuInTree = treeContainsMenuKey(prev.node, prev.openSidebarMenuKey, prev.renderContext ?? 'project', prev.archivedBucket ?? false);
+  const renderContext = prev.renderContext ?? 'project';
+  const archivedBucket = prev.archivedBucket ?? false;
+  const prevMenuInTree = treeContainsMenuKey(prev.node, prev.openSidebarMenuKey, renderContext, archivedBucket);
   const nextMenuInTree = treeContainsMenuKey(next.node, next.openSidebarMenuKey, next.renderContext ?? 'project', next.archivedBucket ?? false);
   if (prevMenuInTree !== nextMenuInTree) return false;
 
-  const prevDirectory = normalizePath((prevSession as Session & { directory?: string | null }).directory ?? null)
-    ?? normalizePath(prev.groupDirectory ?? null);
-  const nextDirectory = normalizePath((nextSession as Session & { directory?: string | null }).directory ?? null)
-    ?? normalizePath(next.groupDirectory ?? null);
-  if (prevDirectory !== nextDirectory) return false;
-  if ((prevDirectory ? prev.directoryStatus.get(prevDirectory) : null) !== (nextDirectory ? next.directoryStatus.get(nextDirectory) : null)) return false;
+  if (directoryStatusChangedForSubtree(prev.node, prev.groupDirectory, prev.directoryStatus, next.directoryStatus)) return false;
 
   if ((prev.secondaryMeta?.projectLabel ?? null) !== (next.secondaryMeta?.projectLabel ?? null)) return false;
   if ((prev.secondaryMeta?.branchLabel ?? null) !== (next.secondaryMeta?.branchLabel ?? null)) return false;
@@ -236,8 +291,8 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     archivedBucket = false,
     directoryStatus,
     currentSessionId,
+    optimisticActiveSessionId,
     pinnedSessionIds,
-    expandedParents,
     hasSessionSearchQuery,
     normalizedSessionSearchQuery,
     notifyOnSubtasks,
@@ -247,7 +302,6 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     setEditTitle,
     handleSaveEdit,
     handleCancelEdit,
-    toggleParent,
     handleSessionSelect,
     handleSessionDoubleClick,
     togglePinnedSession,
@@ -272,8 +326,21 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     renderContext = 'project',
     projectColor,
   } = props;
+  const session = node.session;
+  const liveSession = useSession(session.id);
+  const resolvedSession = liveSession ?? session;
+  // Use the session's own archive state for menu and action decisions — `archivedBucket`
+  // only describes the tree root, and a cross-archive subagent should still get its own
+  // menu (e.g. "Delete" for an already-archived child, not "Archive" again).
+  const isSessionArchived = Boolean(resolvedSession.time?.archived);
   const hasSecondaryProjectLabel = Boolean(secondaryMeta?.projectLabel);
   const hasSecondaryBranchLabel = Boolean(secondaryMeta?.branchLabel);
+  const depthPaddingStyle = depth > 0 ? { paddingLeft: `${8 + depth * 8}px` } : undefined;
+  const indicatorLeftPx = -10 + depth * 8;
+  const indicatorLeftStyle = { left: `${indicatorLeftPx}px` };
+  const statusPinnedLeftStyle = { left: `${indicatorLeftPx - 8}px` };
+  const treeGuideVerticalStyle = depth > 0 ? { left: `${4 + (depth - 1) * 8}px` } : undefined;
+  const treeGuideHorizontalStyle = depth > 0 ? { left: `${4 + (depth - 1) * 8}px`, width: '8px' } : undefined;
 
   const displayMode = useSessionDisplayStore((state) => state.displayMode);
   const isMinimalMode = displayMode === 'minimal';
@@ -285,7 +352,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   const hideOnHoverClass = isVSCode
     ? 'group-hover:opacity-0'
     : 'group-hover:opacity-0 group-focus-within:opacity-0';
-  const showQuickArchiveAction = !archivedBucket && !mobileVariant;
+  const showQuickArchiveAction = !isSessionArchived && !mobileVariant;
   const revealPaddingClass = isMinimalMode
     ? (isVSCode
         ? 'group-hover:pr-2'
@@ -296,10 +363,8 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   const alwaysActionPaddingClass = showQuickArchiveAction ? 'pr-13' : 'pr-7';
   const suppressNextSelectRef = React.useRef(false);
   const [isTouchPressed, setIsTouchPressed] = React.useState(false);
-
-  const session = node.session;
-  const liveSession = useSession(session.id);
-  const resolvedSession = liveSession ?? session;
+  const [isClickFeedbackVisible, setIsClickFeedbackVisible] = React.useState(false);
+  const clickFeedbackTimerRef = React.useRef<number | null>(null);
 
   const sessionDirectory =
     normalizePath((session as Session & { directory?: string | null }).directory ?? null)
@@ -356,11 +421,58 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   const directoryState = sessionDirectory ? directoryStatus.get(sessionDirectory) : null;
   const isMissingDirectory = directoryState === 'missing';
   const isActive = currentSessionId === session.id;
+  const isOptimisticTarget = optimisticActiveSessionId === session.id && !isActive;
+  // Surface cross-archive nesting: a session whose own archive state disagrees
+  // with the tree root it's rendered under (e.g. an archived subagent inside an
+  // active session, or an active subagent inside an archived session). Cross-
+  // archive parent/child links are intentionally allowed by useSessionGrouping;
+  // this indicator makes the mismatch visible at a glance.
+  const hasArchiveMismatch = depth > 0 && isSessionArchived !== archivedBucket;
+  const archiveMismatchTooltipKey = isSessionArchived
+    ? 'sessions.sidebar.session.archiveMismatch.archivedNested'
+    : 'sessions.sidebar.session.archiveMismatch.activeNested';
+  const archiveMismatchIcon = isSessionArchived ? 'archive' : 'pulse';
+  const archiveMismatchIndicator = hasArchiveMismatch ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className={cn(
+            'inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-sm',
+            isSessionArchived
+              ? 'text-muted-foreground/80'
+              : 'text-status-success/80',
+          )}
+          aria-label={t(archiveMismatchTooltipKey)}
+        >
+          <Icon name={archiveMismatchIcon} className="h-3 w-3" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="right" sideOffset={6} className="max-w-xs text-left text-xs">
+        {t(archiveMismatchTooltipKey)}
+      </TooltipContent>
+    </Tooltip>
+  ) : null;
   const sessionTitle = resolvedSession.title || t('sessions.sidebar.session.untitled');
   const hasChildren = node.children.length > 0;
+  const expansionKey = `${renderContext}:${archivedBucket ? 'archived' : 'active'}:${session.id}`;
   const isPinnedSession = pinnedSessionIds.has(session.id);
-  const isExpanded = hasSessionSearchQuery ? true : expandedParents.has(session.id);
-  const isSubtaskSession = Boolean(getCompatibleSessionParentId(resolvedSession));
+  const isExpandedFromStore = useSessionExpansionStore(
+    React.useCallback((state) => state.keys.has(expansionKey), [expansionKey]),
+  );
+  const isExpanded = hasSessionSearchQuery ? true : isExpandedFromStore;
+  const toggleParent = useSessionExpansionStore((state) => state.toggle);
+  const collapseExpandedSubagentSessions = useSessionExpansionStore((state) => state.collapseMany);
+  const childPageSize = 5;
+  const [childPage, setChildPage] = React.useState(1);
+  const childTotalPages = Math.max(1, Math.ceil(node.children.length / childPageSize));
+  const childCurrentPage = Math.max(1, Math.min(childPage, childTotalPages));
+  const childStartIndex = (childCurrentPage - 1) * childPageSize;
+  const visibleChildren = React.useMemo(
+    () => node.children.slice(childStartIndex, childStartIndex + childPageSize),
+    [node.children, childStartIndex],
+  );
+  const expansionKeyPrefix = `${renderContext}:${archivedBucket ? 'archived' : 'active'}:`;
+  const isSubtaskSession = Boolean((resolvedSession as Session & { parentID?: string | null }).parentID);
   const unseenCount = useSessionUnseenCount(session.id);
   const needsAttention = unseenCount > 0 && (!isSubtaskSession || notifyOnSubtasks);
   const sessionSummary = getCompatibleSessionSummary(resolvedSession) as SessionSummaryMeta | undefined;
@@ -369,53 +481,85 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
   const sessionUpdatedLabel = formatSessionDateLabel(sessionTimestamp);
   const sessionCompactUpdatedLabel = formatSessionCompactDateLabel(sessionTimestamp);
   const isMenuOpen = openSidebarMenuKey === menuInstanceKey;
-  const providerBadgeId = sessionAgentModelSelection?.providerId
-    ?? sessionModelSelection?.providerId
-    ?? null;
-  const providerBadgeName = useConfigStore(
-    React.useCallback((state) => {
-      if (!providerBadgeId) {
-        return null;
+
+  React.useEffect(() => {
+    setChildPage((prev) => Math.min(Math.max(prev, 1), childTotalPages));
+  }, [childTotalPages]);
+
+  // When the selected session is somewhere under this node, make sure that
+  // ancestor chain is visible: expand this node and page its child list so the
+  // ancestor that contains the selection is on the visible page. Runs on
+  // currentSessionId or tree changes, so URL/programmatic selection of a deep
+  // subagent surfaces the whole chain without manual page/expand clicks.
+  React.useEffect(() => {
+    if (!currentSessionId || currentSessionId === session.id) return;
+    if (node.children.length === 0) return;
+    const subtreeContains = (n: SessionNode): boolean => {
+      if (n.session.id === currentSessionId) return true;
+      for (const child of n.children) {
+        if (subtreeContains(child)) return true;
       }
-      const providers = [...state.providers, ...state.virtualProviders];
-      return providers.find((provider) => provider.id === providerBadgeId)?.name ?? null;
-    }, [providerBadgeId]),
-  );
-  const backendBadgeId = (resolvedSession as Session & { backendId?: string | null }).backendId
-    ?? sessionBackendSelection
-    ?? null;
-  const normalizedBackendId = typeof backendBadgeId === 'string' ? backendBadgeId.trim().toLowerCase() : '';
-  const canShareSession = normalizedBackendId === '' || normalizedBackendId === 'opencode';
-  const backendBadgeLabel = formatBackendLabel(backendBadgeId);
-  const providerBadgeLabel = providerBadgeName
-    ?? (providerBadgeId && providerBadgeId.trim().length > 0 ? providerBadgeId : null);
-  const sessionRuntimeLabel = providerBadgeLabel ?? backendBadgeLabel;
-  const tooltipRuntimeLabel = providerBadgeLabel && backendBadgeLabel && providerBadgeLabel !== backendBadgeLabel
-    ? `${providerBadgeLabel} via ${backendBadgeLabel}`
-    : sessionRuntimeLabel;
-  const runtimeLogoId = backendBadgeId ?? providerBadgeId ?? undefined;
-  const { src: runtimeLogoSrc, onError: handleRuntimeLogoError, hasLogo: hasRuntimeLogo } = useProviderLogo(runtimeLogoId);
-  const shouldUseBackendIcon = Boolean(backendBadgeId);
-  const shouldShowRuntimeLogo = shouldUseBackendIcon || (hasRuntimeLogo && runtimeLogoSrc);
-  const runtimeMetaLogo = shouldShowRuntimeLogo ? (
-    <span
-      className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-sm text-foreground/90"
-      title={tooltipRuntimeLabel ?? undefined}
-      aria-hidden="true"
-    >
-      {backendBadgeId ? (
-        <BackendIcon backendId={backendBadgeId} className="h-3 w-3 text-foreground/90" />
-      ) : runtimeLogoSrc ? (
-        <img
-          src={runtimeLogoSrc}
-          alt=""
-          className="h-3.5 w-3.5 object-contain brightness-0 invert opacity-90"
-          onError={handleRuntimeLogoError}
-        />
-      ) : null}
-    </span>
-  ) : null;
+      return false;
+    };
+    let foundIndex = -1;
+    for (let i = 0; i < node.children.length; i += 1) {
+      if (subtreeContains(node.children[i]!)) {
+        foundIndex = i;
+        break;
+      }
+    }
+    if (foundIndex === -1) return;
+    const targetPage = Math.floor(foundIndex / childPageSize) + 1;
+    if (targetPage !== childCurrentPage) {
+      setChildPage(targetPage);
+    }
+    useSessionExpansionStore.getState().expand(expansionKey);
+  }, [currentSessionId, node, session.id, childCurrentPage, childPageSize, expansionKey]);
+
+  React.useEffect(() => {
+    return () => {
+      if (clickFeedbackTimerRef.current !== null) {
+        window.clearTimeout(clickFeedbackTimerRef.current);
+      }
+    };
+  }, []);
+  const isMultiRunLikeSession = React.useMemo(() => parseMultiRunSessionTitle(resolvedSession.title) !== null, [resolvedSession.title]);
+  const [fusionDialogOpen, setFusionDialogOpen] = React.useState(false);
+
   const descendantCount = React.useMemo(() => collectNodeDescendantIds(node).length, [collectNodeDescendantIds, node]);
+  const changeChildPage = React.useCallback((nextPage: number) => {
+    const resolvedPage = Math.max(1, Math.min(childTotalPages, nextPage));
+    if (resolvedPage === childCurrentPage) {
+      return;
+    }
+    // Collapse only the subtrees that are leaving the visible page so their
+    // expansion state doesn't bleed across pages. Children that remain on the
+    // new page keep their (and their descendants') expanded state.
+    const nextStartIndex = (resolvedPage - 1) * childPageSize;
+    const nextVisibleSet = new Set(
+      node.children.slice(nextStartIndex, nextStartIndex + childPageSize).map((child) => child.session.id),
+    );
+    const collapseKeys: string[] = [];
+    for (const child of node.children) {
+      if (nextVisibleSet.has(child.session.id)) continue;
+      collapseKeys.push(`${expansionKeyPrefix}${child.session.id}`);
+      for (const descendantId of collectNodeDescendantIds(child)) {
+        collapseKeys.push(`${expansionKeyPrefix}${descendantId}`);
+      }
+    }
+    if (collapseKeys.length > 0) {
+      collapseExpandedSubagentSessions(collapseKeys);
+    }
+    setChildPage(resolvedPage);
+  }, [
+    childCurrentPage,
+    childPageSize,
+    childTotalPages,
+    collapseExpandedSubagentSessions,
+    collectNodeDescendantIds,
+    expansionKeyPrefix,
+    node.children,
+  ]);
 
   const collectChildExports = React.useCallback(async (children: SessionNode[]): Promise<{ children: ChildSessionExport[]; skipped: number }> => {
     const results: ChildSessionExport[] = [];
@@ -520,8 +664,23 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     return (
       <div
         key={session.id}
-        className={cn('group relative flex items-center rounded-sm px-1.5 py-1', depth > 0 && 'pl-[20px]')}
+        className="group relative flex items-center rounded-sm px-1.5 py-1"
+        style={depthPaddingStyle}
       >
+        {depth > 0 ? (
+          <>
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-y-0 border-l border-border/50"
+              style={treeGuideVerticalStyle}
+            />
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 -translate-y-1/2 border-t border-border/50"
+              style={treeGuideHorizontalStyle}
+            />
+          </>
+        ) : null}
         <div className="flex min-w-0 flex-1 flex-col gap-0">
           <form
             className="flex w-full items-center gap-2"
@@ -615,9 +774,10 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
       className={cn(
         'pointer-events-none absolute inline-flex h-3.5 items-center justify-center gap-0.5 transition-opacity',
         isMinimalMode ? 'top-1/2 -translate-y-1/2' : 'top-[14.5px] -translate-y-1/2',
-        showStatusMarker && isPinnedSession ? 'left-[-18px] w-6' : 'left-[-10px] w-3.5',
+        showStatusMarker && isPinnedSession ? 'w-6' : 'w-3.5',
         hasChildren && !alwaysShowActions ? 'opacity-100 group-hover:opacity-0 group-focus-within:opacity-0' : '',
       )}
+      style={showStatusMarker && isPinnedSession ? statusPinnedLeftStyle : indicatorLeftStyle}
     >
       {showStatusMarker ? statusMarkerContent : null}
       {isPinnedSession ? <Icon name="pushpin" className="h-3 w-3 flex-shrink-0 text-primary"  aria-label={t('sessions.sidebar.session.status.pinned')}/> : null}
@@ -629,22 +789,23 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
       tabIndex={0}
       onClick={(event) => {
         event.stopPropagation();
-        toggleParent(session.id);
+        toggleParent(expansionKey);
       }}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           event.stopPropagation();
-          toggleParent(session.id);
+          toggleParent(expansionKey);
         }
       }}
       className={cn(
-        'absolute left-[-10px] inline-flex h-3.5 w-3.5 items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 transition-opacity',
+        'absolute inline-flex h-3.5 w-3.5 items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 transition-opacity',
         isMinimalMode ? 'top-1/2 -translate-y-1/2' : 'top-[14.5px] -translate-y-1/2',
         isMinimalMode && showStatusMarker && !alwaysShowActions
           ? 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto'
           : '',
       )}
+      style={indicatorLeftStyle}
       aria-label={isExpanded
         ? t('sessions.sidebar.session.subsessions.collapse')
         : t('sessions.sidebar.session.subsessions.expand')}
@@ -691,7 +852,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
     event.preventDefault();
     event.stopPropagation();
     setOpenSidebarMenuKey(null);
-    handleDeleteSession(session, { archivedBucket });
+    handleDeleteSession(session, { archivedBucket: isSessionArchived });
   };
 
   const handleRowSelect = (event?: React.MouseEvent<HTMLButtonElement>) => {
@@ -717,6 +878,21 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
       }
       toggleRowSelected(session.id, sessionDirectory ?? null, collectNodeDescendantIds(node));
       return;
+    }
+    // Skip the click-feedback animation for missing-directory rows (nothing
+    // visibly responds to the click on those), but still call
+    // handleSessionSelect with isMissingDirectory=true so the receiver can
+    // surface its own feedback (toast/dialog) — silently swallowing the click
+    // here would leave the user with no signal that the row is unreachable.
+    if (!isActive && !isMissingDirectory) {
+      setIsClickFeedbackVisible(true);
+      if (clickFeedbackTimerRef.current !== null) {
+        window.clearTimeout(clickFeedbackTimerRef.current);
+      }
+      clickFeedbackTimerRef.current = window.setTimeout(() => {
+        setIsClickFeedbackVisible(false);
+        clickFeedbackTimerRef.current = null;
+      }, 220);
     }
     handleSessionSelect(session.id, sessionDirectory, isMissingDirectory, projectId);
   };
@@ -782,7 +958,7 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
         </DropdownMenuItem>
       ) : null}
 
-      {sessionDirectory && !archivedBucket ? (() => {
+      {sessionDirectory && !isSessionArchived ? (() => {
         const scopeFolders = getFoldersForScope(sessionDirectory);
         const currentFolderId = getSessionFolderId(sessionDirectory, session.id);
         return (
@@ -849,9 +1025,9 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
       ) : null}
 
       <DropdownMenuSeparator />
-      <DropdownMenuItem className="text-destructive focus:text-destructive [&>svg]:mr-1" onClick={() => handleDeleteSession(session, { archivedBucket })}>
-        <Icon name={archivedBucket ? "delete-bin" : "archive"} className="mr-1 h-4 w-4" />
-        {archivedBucket ? t('sessions.sidebar.bulkActions.delete') : t('sessions.sidebar.bulkActions.archive')}
+      <DropdownMenuItem className="text-destructive focus:text-destructive [&>svg]:mr-1" onClick={() => handleDeleteSession(session, { archivedBucket: isSessionArchived })}>
+        <Icon name="delete-bin" className="mr-1 h-4 w-4" />
+        {isSessionArchived ? t('sessions.sidebar.bulkActions.delete') : t('sessions.sidebar.bulkActions.archive')}
       </DropdownMenuItem>
     </DropdownMenuContent>
   );
@@ -862,14 +1038,30 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
         <div
           data-session-row={session.id}
           data-session-scope={sessionDirectory ?? ''}
-          data-session-archived={archivedBucket ? '1' : '0'}
+          data-session-archived={isSessionArchived ? '1' : '0'}
           className={cn(
             'group relative my-0.5 flex items-center rounded-sm px-1.5 py-1',
             isMissingDirectory ? 'opacity-75' : '',
-            depth > 0 && 'pl-[20px]',
             isRowSelected && 'bg-primary/15',
+            isOptimisticTarget && 'bg-primary/18 ring-1 ring-primary/45',
+            isClickFeedbackVisible && 'bg-primary/22 ring-1 ring-primary/55',
           )}
+          style={depthPaddingStyle}
         >
+          {depth > 0 ? (
+            <>
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 border-l border-border/50"
+                style={treeGuideVerticalStyle}
+              />
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute top-1/2 -translate-y-1/2 border-t border-border/50"
+                style={treeGuideHorizontalStyle}
+              />
+            </>
+          ) : null}
           {leadingIndicators}
           {subsessionChevron}
           <div className="flex min-w-0 flex-1 items-center">
@@ -897,13 +1089,23 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
                     )}
                   >
                     <div className={cn('flex w-full items-center min-w-0 flex-1 overflow-hidden', isMinimalMode ? 'gap-1' : 'gap-1')}>
-                      <div className={cn('block min-w-0 flex-1 truncate typography-ui-label font-normal', isActive ? 'text-primary' : 'text-foreground')}>{renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}</div>
-                      {alwaysShowActions ? (
-                        <span className="ml-2 inline-flex flex-shrink-0 items-center gap-1 text-[0.72rem] text-muted-foreground/75">
-                          {runtimeMetaLogo}
-                          <span>{sessionCompactUpdatedLabel}</span>
-                        </span>
+                      {isOptimisticTarget ? (
+                        <span
+                          className="h-3.5 w-3.5 flex-shrink-0 animate-spin rounded-full border-2 border-primary/35 border-t-primary"
+                          aria-label="Switching session"
+                          title="Switching session"
+                        />
                       ) : null}
+                      {archiveMismatchIndicator}
+                      <div className={cn(
+                        'block min-w-0 flex-1 truncate typography-ui-label font-normal',
+                        isActive
+                          ? 'text-primary'
+                          : hasArchiveMismatch
+                            ? 'text-muted-foreground'
+                            : 'text-foreground',
+                      )}>{renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}</div>
+                      {alwaysShowActions ? <span className="ml-2 flex-shrink-0 text-[0.72rem] text-muted-foreground/75">{sessionCompactUpdatedLabel}</span> : null}
                       {!alwaysShowActions ? (
                         <div className="relative ml-1 flex h-4 min-w-4 flex-shrink-0 items-center justify-end">
                           <span className={cn(
@@ -972,7 +1174,22 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
                 {/* Content column */}
                 <div className="flex min-w-0 flex-1 flex-col gap-0 overflow-hidden">
                 <div className={cn('flex w-full items-center min-w-0 flex-1 overflow-hidden', isMinimalMode ? 'gap-1' : 'gap-1')}>
-                    <div className={cn('block min-w-0 flex-1 truncate typography-ui-label font-normal', isActive ? 'text-primary' : 'text-foreground')}>{renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}</div>
+                    {isOptimisticTarget ? (
+                      <span
+                        className="h-3.5 w-3.5 flex-shrink-0 animate-spin rounded-full border-2 border-primary/35 border-t-primary"
+                        aria-label="Switching session"
+                        title="Switching session"
+                      />
+                    ) : null}
+                    {archiveMismatchIndicator}
+                    <div className={cn(
+                        'block min-w-0 flex-1 truncate typography-ui-label font-normal',
+                        isActive
+                          ? 'text-primary'
+                          : hasArchiveMismatch
+                            ? 'text-muted-foreground'
+                            : 'text-foreground',
+                      )}>{renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}</div>
                     {pendingPermissionCount > 0 ? (
                       <span className="inline-flex items-center gap-1 rounded bg-destructive/10 px-1 py-0.5 text-[0.7rem] text-destructive flex-shrink-0" title={t('sessions.sidebar.session.status.permissionRequired')} aria-label={t('sessions.sidebar.session.status.permissionRequired')}>
                         <Icon name="shield" className="h-3 w-3" />
@@ -1063,8 +1280,33 @@ function SessionNodeItemComponent(props: Props): React.ReactNode {
         </div>
       </DraggableSessionRow>
       {hasChildren && isExpanded
-        ? node.children.map((child) => renderSessionNode(child, depth + 1, sessionDirectory ?? groupDirectory, projectId, archivedBucket, undefined, renderContext, projectColor))
+        ? visibleChildren.map((child) => (
+          <React.Fragment key={child.session.id}>
+            {renderSessionNode(child, depth + 1, sessionDirectory ?? groupDirectory, projectId, archivedBucket, undefined, renderContext)}
+          </React.Fragment>
+        ))
         : null}
+      {hasChildren && isExpanded && childTotalPages > 1 ? (
+        <div className="ml-6 mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+          <button
+            type="button"
+            onClick={() => changeChildPage(childCurrentPage - 1)}
+            disabled={childCurrentPage <= 1}
+            className="rounded px-1 py-0.5 enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {t('sessions.sidebar.group.pagination.prev')}
+          </button>
+          <span>{t('sessions.sidebar.group.pagination.subagents', { current: childCurrentPage, total: childTotalPages })}</span>
+          <button
+            type="button"
+            onClick={() => changeChildPage(childCurrentPage + 1)}
+            disabled={childCurrentPage >= childTotalPages}
+            className="rounded px-1 py-0.5 enabled:hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {t('sessions.sidebar.group.pagination.next')}
+          </button>
+        </div>
+      ) : null}
       <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
         <DialogContent showCloseButton={false} className="max-w-sm gap-5">
           <DialogHeader>

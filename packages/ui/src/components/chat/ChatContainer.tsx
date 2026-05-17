@@ -337,29 +337,25 @@ interface ChatContainerProps {
   aboveInput?: React.ReactNode;
 }
 
-export const ChatContainer: React.FC<ChatContainerProps> = ({ aboveInput }) => {
-    const {
-        currentSessionId,
-        isLoading,
-        loadMessages,
-        loadMoreMessages,
-        updateViewportAnchor,
-        openNewSessionDraft,
-        setCurrentSession,
-        trimToViewportWindow,
-        newSessionDraft,
-    } = useSessionStore(
-        useShallow((state) => ({
-            currentSessionId: state.currentSessionId,
-            isLoading: state.isLoading,
-            loadMessages: state.loadMessages,
-            loadMoreMessages: state.loadMoreMessages,
-            updateViewportAnchor: state.updateViewportAnchor,
-            openNewSessionDraft: state.openNewSessionDraft,
-            setCurrentSession: state.setCurrentSession,
-            trimToViewportWindow: state.trimToViewportWindow,
-            newSessionDraft: state.newSessionDraft,
-        }))
+export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = true, readOnly = false }) => {
+    const { t } = useI18n();
+    // Session UI state
+    const currentSessionId = useSessionUIStore((s) => s.currentSessionId);
+    const previousSessionIdRef = React.useRef<string | null>(null);
+    const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
+    const setCurrentSession = useSessionUIStore((s) => s.setCurrentSession);
+    const newSessionDraft = useSessionUIStore((s) => s.newSessionDraft);
+
+    // Sync actions
+    const sync = useSync();
+    const ensureSessionRenderable = React.useCallback(
+        (sessionId: string) => sync.ensureSessionRenderable(sessionId),
+        [sync],
+    );
+    const loadMoreMessages = React.useCallback(
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        (sessionId: string, _direction: 'up' | 'down') => sync.loadMore(sessionId),
+        [sync],
     );
 
     // UI store
@@ -721,18 +717,40 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ aboveInput }) => {
 
     const lastScrolledSessionRef = React.useRef<string | null>(null);
 
+    const didSwitchFromAnotherSession = Boolean(
+        currentSessionId
+        && previousSessionIdRef.current
+        && previousSessionIdRef.current !== currentSessionId,
+    );
     const isSessionHydrating =
         Boolean(currentSessionId)
         && !hasRenderableSessionSnapshot;
 
     React.useEffect(() => {
+        // Invalidate the "already restored this session" guard whenever the
+        // active session changes. Otherwise once we restore session X and
+        // navigate away, returning to X is treated as `alreadyRestored` and
+        // skipped — even though a fresh restore is exactly what's wanted.
+        if (previousSessionIdRef.current !== currentSessionId) {
+            lastScrolledSessionRef.current = null;
+        }
+        previousSessionIdRef.current = currentSessionId;
+    }, [currentSessionId]);
+
+    React.useEffect(() => {
         if (!currentSessionId) return;
         if (lastScrolledSessionRef.current === currentSessionId) return;
+        // Gate on rendered messages instead of `hasRenderableSessionSnapshot`:
+        // the latter goes false whenever any assistant message has
+        // unmaterialized parts (stuck streams, history rows missing part rows)
+        // and can stay false for the rest of the visit even though messages
+        // are on screen. `restoreSnapshot` falls back to
+        // `pendingInitialRestoreRef` if the container isn't attached yet.
+        if (sessionMessages.length === 0) return;
 
         const hasHashTarget = typeof window !== 'undefined' && window.location.hash.length > 0;
         lastScrolledSessionRef.current = currentSessionId;
         if (hasHashTarget) {
-            // Hash navigation handler will scroll to target; we just release auto-follow.
             releaseAutoFollow();
             return;
         }
@@ -743,9 +761,11 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ aboveInput }) => {
         if (typeof window === 'undefined') {
             run();
         } else {
-            window.requestAnimationFrame(run);
+            window.requestAnimationFrame(() => {
+                window.requestAnimationFrame(run);
+            });
         }
-    }, [currentSessionId, releaseAutoFollow, restoreSnapshot]);
+    }, [currentSessionId, releaseAutoFollow, restoreSnapshot, sessionMessages.length]);
 
     React.useEffect(() => {
         if (!currentSessionId) return;
@@ -754,77 +774,13 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ aboveInput }) => {
     }, [currentSessionId, ensureSessionRenderable, hasRenderableSessionSnapshot]);
 
     React.useEffect(() => {
-        if (!currentSessionId) return;
-        let cancelled = false;
-        const directory = opencodeClient.getDirectory() || undefined;
-        void Promise.all([
-            opencodeClient.getSessionStatusForDirectory(directory),
-            opencodeClient.listPendingPermissions({ directories: [directory] }),
-            opencodeClient.listPendingQuestions({ directories: [directory] }),
-        ]).then(([statuses, permissions, questions]) => {
-            if (cancelled) return;
-            syncStore.setState((state) => ({
-                session_status: statuses[currentSessionId]
-                    ? { ...state.session_status, [currentSessionId]: statuses[currentSessionId] as (typeof state.session_status)[string] }
-                    : state.session_status,
-                permission: {
-                    ...state.permission,
-                    [currentSessionId]: permissions.filter((item) => item.sessionID === currentSessionId),
-                },
-                question: {
-                    ...state.question,
-                    [currentSessionId]: questions.filter((item) => item.sessionID === currentSessionId),
-                },
-            }));
-        }).catch(() => undefined);
-        return () => {
-            cancelled = true;
-        };
-    }, [currentSessionId, syncStore]);
-
-    React.useEffect(() => {
-        if (!currentSessionId || hasRenderableSessionSnapshot) return;
-        if (!sessions.some((session) => session.id === currentSessionId)) return;
-
-        let cancelled = false;
-        let attempts = 0;
-        let timer: number | null = null;
-
-        const run = () => {
-            if (cancelled) return;
-            attempts += 1;
-            void sync.syncSession(currentSessionId, true).finally(() => {
-                const directory = opencodeClient.getDirectory() || undefined;
-                void Promise.all([
-                    opencodeClient.getSessionStatusForDirectory(directory),
-                    opencodeClient.listPendingPermissions({ directories: [directory] }),
-                    opencodeClient.listPendingQuestions({ directories: [directory] }),
-                ]).then(([statuses, permissions, questions]) => {
-                    syncStore.setState((state) => ({
-                        session_status: statuses[currentSessionId]
-                            ? { ...state.session_status, [currentSessionId]: statuses[currentSessionId] as (typeof state.session_status)[string] }
-                            : state.session_status,
-                        permission: {
-                            ...state.permission,
-                            [currentSessionId]: permissions.filter((item) => item.sessionID === currentSessionId),
-                        },
-                        question: {
-                            ...state.question,
-                            [currentSessionId]: questions.filter((item) => item.sessionID === currentSessionId),
-                        },
-                    }));
-                }).catch(() => undefined);
-                if (cancelled || attempts >= 5) return;
-                timer = window.setTimeout(run, 700);
-            });
-        };
-
-        timer = window.setTimeout(run, syncStatus === 'complete' ? 0 : 300);
-        return () => {
-            cancelled = true;
-            if (timer) window.clearTimeout(timer);
-        };
-    }, [currentSessionId, hasRenderableSessionSnapshot, sessions, sync, syncStatus, syncStore]);
+        if (!currentSessionId || !hasRenderableSessionSnapshot || typeof window === 'undefined') {
+            return;
+        }
+        window.dispatchEvent(new CustomEvent('openchamber:session-ready', {
+            detail: { sessionId: currentSessionId },
+        }));
+    }, [currentSessionId, hasRenderableSessionSnapshot]);
 
 	if (!currentSessionId && !draftOpen) {
 		return (
@@ -861,7 +817,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ aboveInput }) => {
         return null;
     }
 
-	if (isSessionHydrating && sessionMessages.length === 0 && !sessionIsWorking) {
+	if (isSessionHydrating && sessionMessages.length === 0 && !sessionIsWorking && !didSwitchFromAnotherSession) {
 		return (
 			<div className="relative flex flex-col h-full bg-background">
 				{returnToParentButton}

@@ -51,6 +51,7 @@ const SETTLE_FRAMES = 4;
 const TOUCH_FINGER_DOWN_THRESHOLD = 2;
 const SETTLE_BURST_DURATION_MS = 280;
 const REPIN_GRACE_AFTER_RELEASE_MS = 1200;
+const RESTORE_STABILIZE_DURATION_MS = 1800;
 
 // The bottom of the chat has an empty spacer (10vh on desktop, 40px on mobile)
 // — its height is exactly how far above scrollHeight the user can be while still
@@ -135,13 +136,26 @@ export const useChatAutoFollow = ({
     const settledFramesRef = React.useRef(0);
     const lastScrollTopRef = React.useRef(0);
     const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    const pendingSaveRef = React.useRef<{ sessionId: string; anchor: number } | null>(null);
+    const pendingSaveRef = React.useRef<{
+        sessionId: string;
+        anchor: number;
+        scrollTop: number;
+        scrollHeight: number;
+        clientHeight: number;
+    } | null>(null);
     const settleBurstRafRef = React.useRef<number | null>(null);
     const lastUserReleaseAtRef = React.useRef(0);
     // When restoreSnapshot is invoked while ChatViewport is still hydrating
     // (skeleton rendered, no scroll container yet), we record the session here
     // so a follow-up effect can replay the restore once the container mounts.
     const pendingInitialRestoreRef = React.useRef<string | null>(null);
+    const restoreStabilizeRef = React.useRef<{
+        sessionId: string;
+        ratio: number;
+        until: number;
+        lastHeight: number;
+    } | null>(null);
+    const restoreReapplyRafRef = React.useRef<number | null>(null);
 
     const updateViewportAnchor = useViewportStore((s) => s.updateViewportAnchor);
 
@@ -277,7 +291,20 @@ export const useChatAutoFollow = ({
         setStateValue('released');
     }, [setStateValue, stopFollowLoop, stopSettleBurst]);
 
+    const cancelRestoreStabilization = React.useCallback(() => {
+        restoreStabilizeRef.current = null;
+        if (restoreReapplyRafRef.current !== null && typeof window !== 'undefined') {
+            window.cancelAnimationFrame(restoreReapplyRafRef.current);
+            restoreReapplyRafRef.current = null;
+        }
+    }, []);
+
     const releaseFromUserIntent = React.useCallback(() => {
+        // Real user input cancels the post-restore stabilization so we don't
+        // fight the user's scroll. (Pure scroll events don't clear it — browser
+        // scroll-anchoring during message rendering fires scroll events outside
+        // the programmatic write window and was inadvertently killing restore.)
+        cancelRestoreStabilization();
         if (stateRef.current === 'following') {
             stopFollowLoop();
             stopSettleBurst();
@@ -286,10 +313,11 @@ export const useChatAutoFollow = ({
         } else {
             lastUserReleaseAtRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
         }
-    }, [setStateValue, stopFollowLoop, stopSettleBurst]);
+    }, [cancelRestoreStabilization, setStateValue, stopFollowLoop, stopSettleBurst]);
 
     const goToBottom = React.useCallback((mode: 'instant' | 'smooth' = 'instant') => {
         const container = scrollRef.current;
+        cancelRestoreStabilization();
         setStateValue('following');
         lastUserReleaseAtRef.current = 0;
         if (!container) return;
@@ -304,7 +332,7 @@ export const useChatAutoFollow = ({
         } else {
             startSettleBurst();
         }
-    }, [setStateValue, startFollowLoop, startSettleBurst, writeScrollTopInstant]);
+    }, [cancelRestoreStabilization, setStateValue, startFollowLoop, startSettleBurst, writeScrollTopInstant]);
 
     const flushSave = React.useCallback(() => {
         if (saveTimerRef.current !== null) {
@@ -313,15 +341,16 @@ export const useChatAutoFollow = ({
         }
         const pending = pendingSaveRef.current;
         if (!pending) return;
-        const container = scrollRef.current;
-        if (!container) {
-            pendingSaveRef.current = null;
-            return;
-        }
+        // Commit the values captured at queueSave time, not the live
+        // container's. By the time flushSave fires (debounce timer or the
+        // sessionReset effect), the container may already be showing a
+        // different session's content and the browser may have clamped
+        // scrollTop to the new scrollHeight — persisting that snapshot to the
+        // outgoing session writes garbage.
         updateViewportAnchor(pending.sessionId, pending.anchor, {
-            scrollTop: container.scrollTop,
-            scrollHeight: container.scrollHeight,
-            clientHeight: container.clientHeight,
+            scrollTop: pending.scrollTop,
+            scrollHeight: pending.scrollHeight,
+            clientHeight: pending.clientHeight,
         });
         pendingSaveRef.current = null;
     }, [updateViewportAnchor]);
@@ -338,7 +367,7 @@ export const useChatAutoFollow = ({
             : 0;
         const anchor = Math.floor(anchorRatio * sessionMessageCountRef.current);
 
-        pendingSaveRef.current = { sessionId, anchor };
+        pendingSaveRef.current = { sessionId, anchor, scrollTop, scrollHeight, clientHeight };
         if (saveTimerRef.current !== null) return;
         saveTimerRef.current = setTimeout(() => {
             saveTimerRef.current = null;
@@ -356,35 +385,80 @@ export const useChatAutoFollow = ({
 
         const container = scrollRef.current;
         if (!container) {
-            // ChatViewport not mounted yet (e.g., session still hydrating).
-            // Record the request so the container-attach effect can replay it.
+            // ChatViewport not mounted yet — record the request so the
+            // container-attach effect can replay it.
             pendingInitialRestoreRef.current = sessionId;
             setStateValue('following');
             return false;
         }
         pendingInitialRestoreRef.current = null;
 
-        const saved = getViewportSessionMemory(sessionId)?.scrollPosition;
-
-        if (!saved || isAtBottomSnapshot(saved, isMobile)) {
+        const saved = useViewportStore.getState().sessionMemoryState.get(sessionId)?.scrollPosition;
+        const isNoSavedOrBottom = !saved || isAtBottomSnapshot(saved, isMobile);
+        let ratio: number;
+        let targetTop: number;
+        if (isNoSavedOrBottom) {
+            ratio = 1;
+            targetTop = Math.max(0, container.scrollHeight - container.clientHeight);
+            cancelRestoreStabilization();
             setStateValue('following');
             lastUserReleaseAtRef.current = 0;
-            const target = Math.max(0, container.scrollHeight - container.clientHeight);
-            writeScrollTopInstant(target);
-            if (sessionWorkingRef.current) {
-                startFollowLoop();
-            }
-            startSettleBurst();
-            return false;
+        } else {
+            const savedMaxScroll = Math.max(0, saved!.scrollHeight - saved!.clientHeight);
+            ratio = savedMaxScroll > 0 ? saved!.scrollTop / savedMaxScroll : 0;
+            const currentMaxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+            targetTop = Math.round(ratio * currentMaxScroll);
+            setStateValue('released');
         }
 
-        const savedMaxScroll = Math.max(0, saved.scrollHeight - saved.clientHeight);
-        const ratio = savedMaxScroll > 0 ? saved.scrollTop / savedMaxScroll : 0;
-        const currentMaxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-        const targetTop = Math.round(ratio * currentMaxScroll);
-
-        setStateValue('released');
         writeScrollTopInstant(targetTop);
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        restoreStabilizeRef.current = {
+            sessionId,
+            ratio,
+            until: now + RESTORE_STABILIZE_DURATION_MS,
+            lastHeight: container.scrollHeight,
+        };
+
+        // Actively re-apply for the stabilize window. ResizeObserver alone only
+        // fires on layout changes — virtualizer auto-snaps, MessageList's own
+        // measure-and-snap effect, and browser scroll-anchoring can move
+        // scrollTop without a resize event we can observe. Re-applying each
+        // frame keeps the target position pinned while the list is settling.
+        if (typeof window !== 'undefined') {
+            if (restoreReapplyRafRef.current !== null) {
+                window.cancelAnimationFrame(restoreReapplyRafRef.current);
+            }
+            const tick = () => {
+                restoreReapplyRafRef.current = null;
+                const state = restoreStabilizeRef.current;
+                if (!state) return;
+                const nowTick = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                if (nowTick > state.until || currentSessionIdRef.current !== state.sessionId) {
+                    restoreStabilizeRef.current = null;
+                    return;
+                }
+                const c = scrollRef.current;
+                if (!c) {
+                    restoreReapplyRafRef.current = window.requestAnimationFrame(tick);
+                    return;
+                }
+                const max = Math.max(0, c.scrollHeight - c.clientHeight);
+                const expected = Math.round(state.ratio * max);
+                if (Math.abs(c.scrollTop - expected) > 1) {
+                    markProgrammaticWrite();
+                    c.scrollTop = expected;
+                    lastScrollTopRef.current = c.scrollTop;
+                }
+                state.lastHeight = c.scrollHeight;
+                restoreReapplyRafRef.current = window.requestAnimationFrame(tick);
+            };
+            restoreReapplyRafRef.current = window.requestAnimationFrame(tick);
+        }
+
+        if (isNoSavedOrBottom && sessionWorkingRef.current) {
+            startFollowLoop();
+        }
 
         const memState = getViewportSessionMemory(sessionId);
         updateViewportAnchor(sessionId, memState?.viewportAnchor ?? 0, {
@@ -394,12 +468,13 @@ export const useChatAutoFollow = ({
         });
 
         return true;
-    }, [isMobile, setStateValue, startFollowLoop, startSettleBurst, updateViewportAnchor, writeScrollTopInstant]);
+    }, [cancelRestoreStabilization, isMobile, markProgrammaticWrite, setStateValue, startFollowLoop, startSettleBurst, updateViewportAnchor, writeScrollTopInstant]);
 
     React.useEffect(() => {
         if (!currentSessionId || currentSessionId === lastSessionIdRef.current) {
             return;
         }
+        cancelRestoreStabilization();
         lastSessionIdRef.current = currentSessionId;
         MessageFreshnessDetector.getInstance().recordSessionStart(currentSessionId);
         flushSave();
@@ -410,7 +485,10 @@ export const useChatAutoFollow = ({
         if (pendingInitialRestoreRef.current && pendingInitialRestoreRef.current !== currentSessionId) {
             pendingInitialRestoreRef.current = null;
         }
-    }, [currentSessionId, flushSave, markProgrammaticWrite, stopFollowLoop, stopSettleBurst]);
+    }, [cancelRestoreStabilization, currentSessionId, flushSave, markProgrammaticWrite, stopFollowLoop, stopSettleBurst, updateViewportAnchor]);
+
+    // Cancel any pending re-apply loop on unmount.
+    React.useEffect(() => () => { cancelRestoreStabilization(); }, [cancelRestoreStabilization]);
 
     React.useEffect(() => {
         if (!sessionIsWorking) {
@@ -492,7 +570,13 @@ export const useChatAutoFollow = ({
         const container = containerEl;
         if (!container) return;
 
+        // Cancel post-restore stabilization on any genuine user scroll gesture,
+        // independent of whether the gesture should also release auto-follow.
+        // Without this, downward wheel/touch (which doesn't release follow) would
+        // be fought by the re-apply loop as content settles.
         const handleWheel = (event: WheelEvent) => {
+            if (event.deltaY === 0) return;
+            cancelRestoreStabilization();
             if (event.deltaY >= 0) return;
             if (nestedScrollableCanConsumeUp(container, event.target)) return;
             releaseFromUserIntent();
@@ -513,6 +597,13 @@ export const useChatAutoFollow = ({
             touchLastY = touch.clientY;
             if (previousY === null) return;
             const fingerDelta = touch.clientY - previousY;
+            if (Math.abs(fingerDelta) > TOUCH_FINGER_DOWN_THRESHOLD) {
+                // Any direction of real touch scroll should free the saved
+                // position. Mobile touchend can be delayed (finger lingers,
+                // momentum scrolling continues) so we cancel as soon as we see
+                // movement rather than waiting for touchend.
+                cancelRestoreStabilization();
+            }
             if (fingerDelta <= TOUCH_FINGER_DOWN_THRESHOLD) return;
             if (nestedScrollableCanConsumeUp(container, event.target)) return;
             releaseFromUserIntent();
@@ -522,6 +613,20 @@ export const useChatAutoFollow = ({
         };
 
         const handleKeyDown = (event: KeyboardEvent) => {
+            // Any arrow/page/home/end keypress is a scroll intent.
+            switch (event.key) {
+                case 'ArrowUp':
+                case 'ArrowDown':
+                case 'PageUp':
+                case 'PageDown':
+                case 'Home':
+                case 'End':
+                case ' ':
+                    cancelRestoreStabilization();
+                    break;
+                default:
+                    break;
+            }
             if (!isReleaseKey(event)) return;
             releaseFromUserIntent();
         };
@@ -530,6 +635,7 @@ export const useChatAutoFollow = ({
             const target = event.target;
             if (!(target instanceof Element)) return;
             if (!target.closest('[data-overlay-scrollbar-thumb]')) return;
+            cancelRestoreStabilization();
             releaseFromUserIntent();
         };
 
@@ -556,7 +662,7 @@ export const useChatAutoFollow = ({
                 window.removeEventListener('pointerdown', handlePointerDownIntent, true);
             }
         };
-    }, [containerEl, handleScrollEvent, releaseFromUserIntent]);
+    }, [cancelRestoreStabilization, containerEl, handleScrollEvent, releaseFromUserIntent]);
 
     React.useEffect(() => {
         const container = containerEl;
@@ -564,6 +670,28 @@ export const useChatAutoFollow = ({
 
         const observer = new ResizeObserver(() => {
             updateOverflowAndButton();
+            const restoreState = restoreStabilizeRef.current;
+            if (restoreState && stateRef.current === 'released') {
+                const sessionId = currentSessionIdRef.current;
+                const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                const containerNow = scrollRef.current;
+                if (
+                    containerNow
+                    && sessionId === restoreState.sessionId
+                    && now <= restoreState.until
+                    && containerNow.scrollHeight !== restoreState.lastHeight
+                ) {
+                    const max = Math.max(0, containerNow.scrollHeight - containerNow.clientHeight);
+                    const targetTop = Math.round(restoreState.ratio * max);
+                    markProgrammaticWrite();
+                    containerNow.scrollTop = Math.max(0, Math.min(targetTop, max));
+                    lastScrollTopRef.current = containerNow.scrollTop;
+                    restoreState.lastHeight = containerNow.scrollHeight;
+                }
+                if (now > restoreState.until || sessionId !== restoreState.sessionId) {
+                    cancelRestoreStabilization();
+                }
+            }
             if (stateRef.current === 'following' && sessionWorkingRef.current) {
                 startFollowLoop();
             }
@@ -574,7 +702,7 @@ export const useChatAutoFollow = ({
             observer.observe(inner);
         }
         return () => observer.disconnect();
-    }, [containerEl, startFollowLoop, updateOverflowAndButton]);
+    }, [cancelRestoreStabilization, containerEl, markProgrammaticWrite, startFollowLoop, updateOverflowAndButton]);
 
     React.useEffect(() => {
         updateOverflowAndButton();

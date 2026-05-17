@@ -28,10 +28,13 @@ type Args = {
   isVSCode: boolean;
 };
 
-const isArchivedSession = (session: Session): boolean => Boolean(getCompatibleSessionArchivedAt(session));
-
 export const useSessionGrouping = (args: Args) => {
   const { t } = useI18n();
+  // WeakMap keyed by the Session object itself: when a session is removed
+  // from the store and no longer referenced, its cached SessionNode becomes
+  // eligible for garbage collection. A plain Map keyed by session.id would
+  // accumulate forever as sessions are deleted.
+  const nodeCacheRef = React.useRef<WeakMap<Session, SessionNode>>(new WeakMap());
   const buildGroupSearchText = React.useCallback((group: SessionGroup): string => {
     return [group.label, group.branch ?? '', group.description ?? '', group.directory ?? ''].join(' ').toLowerCase();
   }, []);
@@ -83,7 +86,7 @@ export const useSessionGrouping = (args: Args) => {
         const parentID = getCompatibleSessionParentId(session);
         if (!parentID) return;
         const parentSession = sessionMap.get(parentID);
-        if (!parentSession || isArchivedSession(parentSession) !== isArchivedSession(session)) {
+        if (!parentSession) {
           return;
         }
         const collection = childrenMap.get(parentID) ?? [];
@@ -114,17 +117,30 @@ export const useSessionGrouping = (args: Args) => {
         return null;
       };
 
+      const nodeCache = nodeCacheRef.current;
       const buildProjectNode = (session: Session): SessionNode => {
         const children = childrenMap.get(session.id) ?? [];
-        return { session, children: children.map((child) => buildProjectNode(child)), worktree: getSessionWorktree(session) };
+        const childNodes = children.map((child) => buildProjectNode(child));
+        const worktree = getSessionWorktree(session);
+        const cached = nodeCache.get(session);
+        if (
+          cached
+          && cached.worktree === worktree
+          && cached.children.length === childNodes.length
+          && cached.children.every((c, i) => c === childNodes[i])
+        ) {
+          return cached;
+        }
+        const node: SessionNode = { session, children: childNodes, worktree };
+        nodeCache.set(session, node);
+        return node;
       };
 
       const roots = sortedProjectSessions.filter((session) => {
         const parentID = getCompatibleSessionParentId(session);
         if (!parentID) return true;
         const parentSession = sessionMap.get(parentID);
-        if (!parentSession) return true;
-        return isArchivedSession(parentSession) !== isArchivedSession(session);
+        return !parentSession;
       });
 
       const groupedNodes = new Map<string, SessionNode[]>();

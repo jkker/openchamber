@@ -3,6 +3,7 @@ import type { Session } from '@opencode-ai/sdk/v2';
 import { toast } from '@/components/ui';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { useI18n } from '@/lib/i18n';
+import { useSessionUIStore } from '@/sync/session-ui-store';
 
 type DeleteSessionConfirmSetter = React.Dispatch<React.SetStateAction<{
   session: Session;
@@ -26,6 +27,8 @@ type Args = {
   setActiveMainTab: (tab: 'chat' | 'plan' | 'git' | 'diff' | 'terminal' | 'files') => void;
   setSessionSwitcherOpen: (open: boolean) => void;
   setCurrentSession: (sessionId: string | null, directoryHint?: string | null) => void;
+  markSessionActivating?: (sessionId: string) => void;
+  dispatchSessionTransition?: (sessionId: string, runSwitch: () => void) => void;
   updateSessionTitle: (id: string, title: string) => Promise<void>;
   shareSession: (id: string) => Promise<Session | null>;
   unshareSession: (id: string) => Promise<Session | null>;
@@ -83,16 +86,29 @@ export const useSessionActions = (args: Args) => {
         args.setSessionSwitcherOpen(false);
       }
 
-      if (sessionId === args.currentSessionId) {
+      // Read directly from the store (not the prop) to get the most recent value,
+      // since React batching may leave `args.currentSessionId` stale during rapid clicks.
+      const liveCurrentSessionId = useSessionUIStore.getState().currentSessionId;
+      if (sessionId === liveCurrentSessionId) {
         if (args.allowReselect) {
           args.onSessionSelected?.(sessionId);
         }
         resetSessionSearch();
         return;
       }
-      args.setCurrentSession(sessionId, sessionDirectory ?? null);
-      args.onSessionSelected?.(sessionId);
-      resetSessionSearch();
+      args.markSessionActivating?.(sessionId);
+      const runSwitch = () => {
+        args.setCurrentSession(sessionId, sessionDirectory ?? null);
+        args.onSessionSelected?.(sessionId);
+        resetSessionSearch();
+      };
+      if (args.dispatchSessionTransition) {
+        args.dispatchSessionTransition(sessionId, runSwitch);
+      } else if (typeof window !== 'undefined') {
+        window.requestAnimationFrame(runSwitch);
+      } else {
+        runSwitch();
+      }
     },
     [args],
   );
@@ -168,11 +184,25 @@ export const useSessionActions = (args: Args) => {
     return collected;
   }, [args.childrenMap]);
 
+  // Archive cascades to subagents that aren't already archived; hard-delete
+  // cascades to every descendant unconditionally. We collect once and filter
+  // per-action so the dialog count and the executed ID list always agree.
+  const filterDescendantsForAction = React.useCallback(
+    (descendants: Session[], shouldHardDelete: boolean): Session[] => {
+      if (shouldHardDelete) return descendants;
+      return descendants.filter((s) => !s.time?.archived);
+    },
+    [],
+  );
+
   const executeDeleteSession = React.useCallback(
     async (session: Session, source?: { archivedBucket?: boolean }) => {
-      const descendants = collectDescendants(session.id);
       const shouldHardDelete = source?.archivedBucket === true;
-      if (descendants.length === 0) {
+      const effectiveDescendants = filterDescendantsForAction(
+        collectDescendants(session.id),
+        shouldHardDelete,
+      );
+      if (effectiveDescendants.length === 0) {
         const success = shouldHardDelete
           ? await args.deleteSession(session.id)
           : await args.archiveSession(session.id);
@@ -188,7 +218,7 @@ export const useSessionActions = (args: Args) => {
         return;
       }
 
-      const ids = [session.id, ...descendants.map((s) => s.id)];
+      const ids = [session.id, ...effectiveDescendants.map((s) => s.id)];
       if (shouldHardDelete) {
         const { deletedIds, failedIds } = await args.deleteSessions(ids);
         if (deletedIds.length > 0) {
@@ -216,19 +246,23 @@ export const useSessionActions = (args: Args) => {
           : t('sessions.sidebar.bulkActions.failedArchivePlural', { count: failedIds.length }));
       }
     },
-    [args, collectDescendants, t],
+    [args, collectDescendants, filterDescendantsForAction, t],
   );
 
   const handleDeleteSession = React.useCallback(
     (session: Session, source?: { archivedBucket?: boolean }) => {
-      const descendants = collectDescendants(session.id);
+      const shouldHardDelete = source?.archivedBucket === true;
+      const effectiveDescendants = filterDescendantsForAction(
+        collectDescendants(session.id),
+        shouldHardDelete,
+      );
       if (!args.showDeletionDialog) {
         void executeDeleteSession(session, source);
         return;
       }
-      args.setDeleteSessionConfirm({ session, descendantCount: descendants.length, archivedBucket: source?.archivedBucket === true });
+      args.setDeleteSessionConfirm({ session, descendantCount: effectiveDescendants.length, archivedBucket: shouldHardDelete });
     },
-    [args, collectDescendants, executeDeleteSession],
+    [args, collectDescendants, executeDeleteSession, filterDescendantsForAction],
   );
 
   const confirmDeleteSession = React.useCallback(async () => {
