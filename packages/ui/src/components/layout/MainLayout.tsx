@@ -15,13 +15,29 @@ import { Header } from './Header';
 import { NavRail } from './NavRail';
 import { RightSidebar } from './RightSidebar';
 import { RightSidebarTabs } from './RightSidebarTabs';
-import { Sidebar } from './Sidebar';
+import { ContextPanel } from './ContextPanel';
+import { ErrorBoundary } from '../ui/ErrorBoundary';
+import { CommandPalette } from '../ui/CommandPalette';
+import { HelpDialog } from '../ui/HelpDialog';
+import { OpenCodeStatusDialog } from '../ui/OpenCodeStatusDialog';
+import { SessionSidebar } from '@/components/session/SessionSidebar';
+import { SessionDialogs } from '@/components/session/SessionDialogs';
+import { DiffWorkerProvider } from '@/contexts/DiffWorkerProvider';
+import { MultiRunLauncher } from '@/components/multirun';
+import { AgentLoopLauncher } from '@/components/agentloop';
+import { DrawerProvider } from '@/contexts/DrawerContext';
 
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useDeviceInfo } from '@/lib/device';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 import { useUpdateStore } from '@/stores/useUpdateStore';
+import { useDeviceInfo } from '@/lib/device';
+import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
+import { useAgentLoopPolling } from '@/hooks/useAgentLoopPolling';
+import { usePlanningSessionWatcher } from '@/hooks/usePlanningSessionWatcher';
+import { usePlanningSessionDetector } from '@/hooks/usePlanningSessionDetector';
+import { cn } from '@/lib/utils';
 
 import { ChatView, DiffView, FilesView, GitView, PlanView, SettingsView, SettingsWindow, TerminalView } from '@/components/views';
 
@@ -57,25 +73,31 @@ export const MainLayout: React.FC = () => {
     const RIGHT_SIDEBAR_AUTO_OPEN_WIDTH = 1220;
     const BOTTOM_TERMINAL_AUTO_CLOSE_HEIGHT = 640;
     const BOTTOM_TERMINAL_AUTO_OPEN_HEIGHT = 700;
-    const isSidebarOpen = useUIStore((state) => state.isSidebarOpen);
-    const isRightSidebarOpen = useUIStore((state) => state.isRightSidebarOpen);
-    const isBottomTerminalOpen = useUIStore((state) => state.isBottomTerminalOpen);
-    const setRightSidebarOpen = useUIStore((state) => state.setRightSidebarOpen);
-    const setBottomTerminalOpen = useUIStore((state) => state.setBottomTerminalOpen);
-    const activeMainTab = useUIStore((state) => state.activeMainTab);
-    const setIsMobile = useUIStore((state) => state.setIsMobile);
-    const isSessionSwitcherOpen = useUIStore((state) => state.isSessionSwitcherOpen);
-    const isSettingsDialogOpen = useUIStore((state) => state.isSettingsDialogOpen);
-    const setSettingsDialogOpen = useUIStore((state) => state.setSettingsDialogOpen);
-    const isMultiRunLauncherOpen = useUIStore((state) => state.isMultiRunLauncherOpen);
-    const setMultiRunLauncherOpen = useUIStore((state) => state.setMultiRunLauncherOpen);
-    const multiRunLauncherPrefillPrompt = useUIStore((state) => state.multiRunLauncherPrefillPrompt);
+    const {
+        isSidebarOpen,
+        isRightSidebarOpen,
+        isBottomTerminalOpen,
+        setRightSidebarOpen,
+        setBottomTerminalOpen,
+        activeMainTab,
+        setIsMobile,
+        isSessionSwitcherOpen,
+        isSettingsDialogOpen,
+        setSettingsDialogOpen,
+        isMultiRunLauncherOpen,
+        setMultiRunLauncherOpen,
+        multiRunLauncherPrefillPrompt,
+        isAgentLoopLauncherOpen,
+        setAgentLoopLauncherOpen,
+        agentLoopLauncherPrefill,
+    } = useUIStore();
 
-    const { isMobile, isTablet } = useDeviceInfo();
-    const isDesktopShellRuntime = React.useMemo(() => isDesktopShell(), []);
-    const sidebarWidth = useUIStore((state) => state.sidebarWidth);
-    const rightSidebarWidth = useUIStore((state) => state.rightSidebarWidth);
-    const [desktopRightSidebarActionsHost, setDesktopRightSidebarActionsHost] = React.useState<HTMLDivElement | null>(null);
+    // Poll backend for agent loop state and watch planning session completions
+    useAgentLoopPolling();
+    usePlanningSessionWatcher();
+    usePlanningSessionDetector();
+
+    const { isMobile } = useDeviceInfo();
     const effectiveDirectory = useEffectiveDirectory() ?? '';
     const directoryKey = React.useMemo(() => normalizeDirectoryKey(effectiveDirectory), [effectiveDirectory]);
     const isContextPanelOpen = useUIStore((state) => {
@@ -708,7 +730,7 @@ export const MainLayout: React.FC = () => {
                     setRightSidebarOpen,
                 }}>
                     {/* Mobile: header + drawer mode */}
-                    {!isSettingsDialogOpen && <Header 
+                    {!(isSettingsDialogOpen || isMultiRunLauncherOpen || isAgentLoopLauncherOpen) && <Header 
                         onToggleLeftDrawer={() => {
                             if (isRightSidebarOpen) {
                                 setRightSidebarOpen(false);
@@ -855,7 +877,7 @@ export const MainLayout: React.FC = () => {
                         data-page-scroll-lock="true"
                         className={cn(
                             'flex flex-1 overflow-hidden relative',
-                            isSettingsDialogOpen && 'hidden'
+                            (isSettingsDialogOpen || isMultiRunLauncherOpen || isAgentLoopLauncherOpen) && 'hidden'
                         )}
                     >
                         <main className="w-full h-full overflow-hidden bg-background relative" data-page-scroll-lock="true">
@@ -881,6 +903,32 @@ export const MainLayout: React.FC = () => {
                         </main>
                     </div>
 
+                    {/* Mobile multi-run launcher: full screen */}
+                    {isMultiRunLauncherOpen && (
+                        <div className="absolute inset-0 z-10 bg-background header-safe-area">
+                            <ErrorBoundary>
+                                <MultiRunLauncher
+                                    initialPrompt={multiRunLauncherPrefillPrompt}
+                                    onCreated={() => setMultiRunLauncherOpen(false)}
+                                    onCancel={() => setMultiRunLauncherOpen(false)}
+                                />
+                            </ErrorBoundary>
+                        </div>
+                    )}
+
+                    {/* Mobile agent loop launcher: full screen */}
+                    {isAgentLoopLauncherOpen && (
+                        <div className="absolute inset-0 z-10 bg-background header-safe-area">
+                            <ErrorBoundary>
+                                <AgentLoopLauncher
+                                    onCreated={() => setAgentLoopLauncherOpen(false)}
+                                    onCancel={() => setAgentLoopLauncherOpen(false)}
+                                    prefill={agentLoopLauncherPrefill}
+                                />
+                            </ErrorBoundary>
+                        </div>
+                    )}
+
                     {/* Mobile settings: full screen */}
                     {isSettingsDialogOpen && (
                         <div
@@ -897,103 +945,23 @@ export const MainLayout: React.FC = () => {
                 </DrawerProvider>
             ) : (
                 <>
-                    {/* Desktop: Sidebar is a left column; header belongs to content column */}
-                    <div className="flex flex-1 overflow-hidden relative">
-                        <div className={cn(
-                            'absolute inset-0 flex overflow-hidden',
-                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
-                        )} data-page-scroll-lock="true">
-                            {isSidebarOpen ? (
-                                <>
-                                    <div
-                                        aria-hidden
-                                        className={cn(
-                                            'pointer-events-none absolute top-0 z-0',
-                                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
-                                        )}
-                                        style={{
-                                            left: `${visibleSidebarWidth}px`,
-                                            width: '10px',
-                                            height: '10px',
-                                            WebkitMaskImage: 'radial-gradient(circle at 100% 100%, transparent calc(10px - 1px), black 10px)',
-                                            maskImage: 'radial-gradient(circle at 100% 100%, transparent calc(10px - 1px), black 10px)',
-                                        }}
-                                    />
-                                    <div
-                                        aria-hidden
-                                        className={cn(
-                                            'pointer-events-none absolute bottom-0 z-0',
-                                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
-                                        )}
-                                        style={{
-                                            left: `${visibleSidebarWidth}px`,
-                                            width: '10px',
-                                            height: '10px',
-                                            WebkitMaskImage: 'radial-gradient(circle at 100% 0%, transparent calc(10px - 1px), black 10px)',
-                                            maskImage: 'radial-gradient(circle at 100% 0%, transparent calc(10px - 1px), black 10px)',
-                                        }}
-                                    />
-                                </>
-                            ) : null}
-                            {isRightSidebarOpen ? (
-                                <>
-                                    <div
-                                        aria-hidden
-                                        className={cn(
-                                            'pointer-events-none absolute top-0 z-0',
-                                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
-                                        )}
-                                        style={{
-                                            right: `${visibleRightSidebarWidth}px`,
-                                            width: '10px',
-                                            height: '10px',
-                                            WebkitMaskImage: 'radial-gradient(circle at 0 100%, transparent calc(10px - 1px), black 10px)',
-                                            maskImage: 'radial-gradient(circle at 0 100%, transparent calc(10px - 1px), black 10px)',
-                                        }}
-                                    />
-                                    <div
-                                        aria-hidden
-                                        className={cn(
-                                            'pointer-events-none absolute bottom-0 z-0',
-                                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
-                                        )}
-                                        style={{
-                                            right: `${visibleRightSidebarWidth}px`,
-                                            width: '10px',
-                                            height: '10px',
-                                            WebkitMaskImage: 'radial-gradient(circle at 0 0, transparent calc(10px - 1px), black 10px)',
-                                            maskImage: 'radial-gradient(circle at 0 0, transparent calc(10px - 1px), black 10px)',
-                                        }}
-                                    />
-                                </>
-                            ) : null}
-                            <Sidebar
-                                isOpen={isSidebarOpen}
-                                isMobile={isMobile}
-                                className="border-0"
-                            >
-                                <SessionSidebar />
-                            </Sidebar>
-                            <div className={cn(
-                                'relative flex flex-1 min-w-0 flex-col overflow-hidden',
-                                'bg-sidebar',
-                                isSidebarOpen && 'border-l border-border/50 rounded-tl-[10px] rounded-bl-[10px]',
-                                isRightSidebarOpen && 'border-r border-border/50 rounded-tr-[10px] rounded-br-[10px]'
-                            )} data-page-scroll-lock="true">
-                                <Header desktopRightSidebarActionsHost={desktopRightSidebarActionsHost} />
-                                <div className={cn(
-                                    'flex flex-1 min-h-0 overflow-hidden',
-                                    isSidebarOpen || isChatActive ? '' : 'border-l border-border/50',
-                                    isRightSidebarOpen ? '' : 'border-r border-border/50'
-                                )} data-page-scroll-lock="true">
-                                    <div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden" data-page-scroll-lock="true">
-                                        <main className="flex-1 overflow-hidden bg-background relative" data-page-scroll-lock="true">
-                                            <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
-                                                <ErrorBoundary><ChatView /></ErrorBoundary>
-                                            </div>
-                                            {secondaryView && (
-                                                <div className="absolute inset-0">
-                                                    <ErrorBoundary>{secondaryView}</ErrorBoundary>
+                    {/* Desktop: Header always on top, then Sidebar + Content below */}
+                    <div className="flex flex-1 flex-col overflow-hidden relative">
+                        {/* Normal view: Header above Sidebar + content (like SettingsView) */}
+                        <div className={cn('absolute inset-0 flex flex-col', (isMultiRunLauncherOpen || isAgentLoopLauncherOpen) && 'invisible')}>
+                            <Header />
+                            <div className="flex flex-1 overflow-hidden">
+                                <NavRail />
+                                <div className="flex flex-1 min-w-0 overflow-hidden border-t border-l border-border/50 rounded-tl-xl">
+                                <Sidebar isOpen={isSidebarOpen} isMobile={isMobile}>
+                                    <SessionSidebar hideProjectSelector />
+                                </Sidebar>
+                                <div className="flex flex-1 min-w-0 flex-col overflow-hidden">
+                                    <div className="flex flex-1 min-h-0 overflow-hidden">
+                                        <div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
+                                            <main className="flex-1 overflow-hidden bg-background relative">
+                                                <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
+                                                    <ErrorBoundary><ChatView /></ErrorBoundary>
                                                 </div>
                                             )}
                                         </main>
@@ -1019,6 +987,31 @@ export const MainLayout: React.FC = () => {
                             </RightSidebar>
                         </div>
 
+                        {/* Multi-Run Launcher: replaces tabs content only */}
+                        {isMultiRunLauncherOpen && (
+                            <div className={cn('absolute inset-0 z-10 bg-background')}>
+                                <ErrorBoundary>
+                                    <MultiRunLauncher
+                                        initialPrompt={multiRunLauncherPrefillPrompt}
+                                        onCreated={() => setMultiRunLauncherOpen(false)}
+                                        onCancel={() => setMultiRunLauncherOpen(false)}
+                                    />
+                                </ErrorBoundary>
+                            </div>
+                        )}
+
+                        {/* Agent Loop Launcher: replaces tabs content only */}
+                        {isAgentLoopLauncherOpen && (
+                            <div className={cn('absolute inset-0 z-10 bg-background')}>
+                                <ErrorBoundary>
+                                    <AgentLoopLauncher
+                                        onCreated={() => setAgentLoopLauncherOpen(false)}
+                                        onCancel={() => setAgentLoopLauncherOpen(false)}
+                                        prefill={agentLoopLauncherPrefill}
+                                    />
+                                </ErrorBoundary>
+                            </div>
+                        )}
                     </div>
 
                     {/* Desktop settings: windowed dialog with blur */}

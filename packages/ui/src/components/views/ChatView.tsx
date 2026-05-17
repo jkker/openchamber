@@ -1,7 +1,9 @@
 import React from 'react';
 import { ChatContainer } from '@/components/chat/ChatContainer';
 import { ChatErrorBoundary } from '@/components/chat/ChatErrorBoundary';
-import { useSessionUIStore } from '@/sync/session-ui-store';
+import { AgentLoopStatusView, PlanSessionBar } from '@/components/agentloop';
+import { useSessionStore } from '@/stores/useSessionStore';
+import { useAgentLoopStore } from '@/stores/useAgentLoopStore';
 
 type ChatViewProps = {
     readOnly?: boolean;
@@ -10,9 +12,30 @@ type ChatViewProps = {
 export const ChatView: React.FC<ChatViewProps> = ({ readOnly = false }) => {
     const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
 
+    const agentLoopId = useAgentLoopStore((state) => {
+        if (!currentSessionId) return undefined;
+        for (const loop of state.loops.values()) {
+            if (loop.parentSessionId === currentSessionId) return loop.id;
+        }
+        return undefined;
+    });
+
+    const isPlanningSession = useAgentLoopStore((state) => {
+        if (!currentSessionId) return false;
+        return state.planningSessions.has(currentSessionId);
+    });
+
+    if (agentLoopId) {
+        return <AgentLoopStatusView loopId={agentLoopId} />;
+    }
+
+    const planBar = isPlanningSession && currentSessionId
+        ? <PlanSessionBar sessionId={currentSessionId} />
+        : undefined;
+
     return (
         <ChatErrorBoundary sessionId={currentSessionId || undefined}>
-            <ChatContainer readOnly={readOnly} />
+            <ChatContainer aboveInput={planBar} />
         </ChatErrorBoundary>
     );
 };

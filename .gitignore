@@ -58,8 +58,4 @@ packages/intellij/
 
 # OS
 Thumbs.db
-.worktrees/
-.worktrees
-
-# Sisyphus (oh-my-opencode plugin)
-.sisyphus/
+test-project

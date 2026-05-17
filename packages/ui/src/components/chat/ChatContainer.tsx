@@ -327,29 +327,34 @@ const ReadOnlyPromptBanner: React.FC = () => {
     );
 };
 
-type ChatContainerProps = {
-    autoOpenDraft?: boolean;
-    readOnly?: boolean;
-};
+interface ChatContainerProps {
+  /** Optional content rendered between the message list and the input box */
+  aboveInput?: React.ReactNode;
+}
 
-export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = true, readOnly = false }) => {
-    const { t } = useI18n();
-    // Session UI state
-    const currentSessionId = useSessionUIStore((s) => s.currentSessionId);
-    const openNewSessionDraft = useSessionUIStore((s) => s.openNewSessionDraft);
-    const setCurrentSession = useSessionUIStore((s) => s.setCurrentSession);
-    const newSessionDraft = useSessionUIStore((s) => s.newSessionDraft);
-
-    // Sync actions
-    const sync = useSync();
-    const ensureSessionRenderable = React.useCallback(
-        (sessionId: string) => sync.ensureSessionRenderable(sessionId),
-        [sync],
-    );
-    const loadMoreMessages = React.useCallback(
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        (sessionId: string, _direction: 'up' | 'down') => sync.loadMore(sessionId),
-        [sync],
+export const ChatContainer: React.FC<ChatContainerProps> = ({ aboveInput }) => {
+    const {
+        currentSessionId,
+        isLoading,
+        loadMessages,
+        loadMoreMessages,
+        updateViewportAnchor,
+        openNewSessionDraft,
+        setCurrentSession,
+        trimToViewportWindow,
+        newSessionDraft,
+    } = useSessionStore(
+        useShallow((state) => ({
+            currentSessionId: state.currentSessionId,
+            isLoading: state.isLoading,
+            loadMessages: state.loadMessages,
+            loadMoreMessages: state.loadMoreMessages,
+            updateViewportAnchor: state.updateViewportAnchor,
+            openNewSessionDraft: state.openNewSessionDraft,
+            setCurrentSession: state.setCurrentSession,
+            trimToViewportWindow: state.trimToViewportWindow,
+            newSessionDraft: state.newSessionDraft,
+        }))
     );
 
     // UI store
@@ -760,14 +765,15 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
                 <div
                     className={cn(
                         'relative z-10',
-						isDesktopExpandedInput
-							? 'flex-1 min-h-0 bg-background'
-							: 'bg-background'
-					)}
-				>
-						{promptReadOnly ? <ReadOnlyPromptBanner /> : <ChatInput scrollToBottom={resumeToLatestInstant} />}
-				</div>
-			</div>
+                        isDesktopExpandedInput
+                            ? 'flex-1 min-h-0 bg-background'
+                            : 'bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80'
+                    )}
+                >
+                    {aboveInput}
+                    <ChatInput scrollToBottom={scrollToBottom} />
+                </div>
+            </div>
         );
     }
 
@@ -816,17 +822,20 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
                             ))}
                         </div>
                     </div>
+                    {aboveInput}
+                    <ChatInput scrollToBottom={scrollToBottom} />
                 </div>
                 <div
                     className={cn(
                         'relative z-10',
-						isDesktopExpandedInput
-							? 'flex-1 min-h-0 bg-background'
-							: 'bg-background'
-					)}
-				>
-					{promptReadOnly ? <ReadOnlyPromptBanner /> : <ChatInput scrollToBottom={resumeToLatestInstant} />}
-				</div>
+                        isDesktopExpandedInput
+                            ? 'flex-1 min-h-0 bg-background'
+                            : 'bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80'
+                    )}
+                >
+                    {aboveInput}
+                    <ChatInput scrollToBottom={scrollToBottom} />
+                </div>
             </div>
         );
     }
@@ -906,7 +915,8 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({ autoOpenDraft = tr
                         onClick={navigation.resumeToLatest}
                     />
                 )}
-                {promptReadOnly ? <ReadOnlyPromptBanner /> : <ChatInput scrollToBottom={resumeToLatestInstant} />}
+                {aboveInput}
+                <ChatInput scrollToBottom={scrollToBottom} />
             </div>
 
             <TimelineDialog

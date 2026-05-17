@@ -28,9 +28,8 @@ import {
   normalizeTunnelProvider,
 } from './lib/tunnels/types.js';
 import { prepareNotificationLastMessage } from './lib/notifications/index.js';
-import { registerTtsRoutes } from './lib/tts/routes.js';
-import { detectSayTtsCapability } from './lib/tts/capability-runtime.js';
-import { createTerminalRuntime } from './lib/terminal/runtime.js';
+import { AgentLoopService } from './lib/agent-loop/service.js';
+import { registerAgentLoopRoutes } from './lib/agent-loop/routes.js';
 import {
   createGlobalUiEventBroadcaster,
   createGlobalMessageStreamHub,
@@ -2917,6 +2916,7 @@ let openCodeBaseUrl = hmrState.openCodeBaseUrl ?? null;
 let isShuttingDown = hmrState.isShuttingDown;
 let signalsAttached = hmrState.signalsAttached;
 let openCodeWorkingDirectory = hmrState.openCodeWorkingDirectory;
+let agentLoopService = null;
 
 const {
   configuredOpenCodePort: ENV_CONFIGURED_OPENCODE_PORT,
@@ -3157,7 +3157,1725 @@ const processForwardedEventPayload = (payload, emitSyntheticEvent) => {
           ? statusInfo.next
           : (typeof info.next === 'number' ? info.next : undefined),
       },
-      needsAttention: false,
+    );
+
+    if (result.status !== 0) {
+      return null;
+    }
+
+    const lines = (result.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const found = lines[0] || '';
+    if (!found) {
+      return null;
+    }
+
+    return {
+      wslBinary,
+      opencodePath: found,
+      distro: ENV_CONFIGURED_OPENCODE_WSL_DISTRO,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function applyWslOpencodeResolution({ wslBinary, opencodePath, source = 'wsl', distro = null } = {}) {
+  const resolvedWsl = wslBinary || resolveWslExecutablePath();
+  if (!resolvedWsl) {
+    return null;
+  }
+
+  useWslForOpencode = true;
+  resolvedWslBinary = resolvedWsl;
+  resolvedWslOpencodePath = typeof opencodePath === 'string' && opencodePath.trim().length > 0
+    ? opencodePath.trim()
+    : 'opencode';
+  resolvedWslDistro = typeof distro === 'string' && distro.trim().length > 0 ? distro.trim() : ENV_CONFIGURED_OPENCODE_WSL_DISTRO;
+  resolvedOpencodeBinary = `wsl:${resolvedWslOpencodePath}`;
+  resolvedOpencodeBinarySource = source;
+
+  // Keep OPENCODE_BINARY empty in WSL mode to avoid native spawn attempts.
+  delete process.env.OPENCODE_BINARY;
+  return resolvedOpencodeBinary;
+}
+
+function resolveOpencodeCliPath() {
+  const explicit = [
+    process.env.OPENCODE_BINARY,
+    process.env.OPENCODE_PATH,
+    process.env.OPENCHAMBER_OPENCODE_PATH,
+    process.env.OPENCHAMBER_OPENCODE_BIN,
+  ]
+    .map((v) => (typeof v === 'string' ? v.trim() : ''))
+    .filter(Boolean);
+
+  for (const candidate of explicit) {
+    if (isExecutable(candidate)) {
+      clearWslOpencodeResolution();
+      resolvedOpencodeBinarySource = 'env';
+      return candidate;
+    }
+  }
+
+  const resolvedFromPath = searchPathFor('opencode');
+  if (resolvedFromPath) {
+    clearWslOpencodeResolution();
+    resolvedOpencodeBinarySource = 'path';
+    return resolvedFromPath;
+  }
+
+  const home = os.homedir();
+  const unixFallbacks = [
+    path.join(home, '.opencode', 'bin', 'opencode'),
+    path.join(home, '.bun', 'bin', 'opencode'),
+    path.join(home, '.local', 'bin', 'opencode'),
+    path.join(home, 'bin', 'opencode'),
+    '/opt/homebrew/bin/opencode',
+    '/usr/local/bin/opencode',
+    '/usr/bin/opencode',
+    '/bin/opencode',
+  ];
+
+  const winFallbacks = (() => {
+    const userProfile = process.env.USERPROFILE || home;
+    const appData = process.env.APPDATA || '';
+    const localAppData = process.env.LOCALAPPDATA || '';
+    const programData = process.env.ProgramData || 'C:\\ProgramData';
+
+    return [
+      path.join(userProfile, '.opencode', 'bin', 'opencode.exe'),
+      path.join(userProfile, '.opencode', 'bin', 'opencode.cmd'),
+      path.join(appData, 'npm', 'opencode.cmd'),
+      path.join(userProfile, 'scoop', 'shims', 'opencode.cmd'),
+      path.join(programData, 'chocolatey', 'bin', 'opencode.exe'),
+      path.join(programData, 'chocolatey', 'bin', 'opencode.cmd'),
+      path.join(userProfile, '.bun', 'bin', 'opencode.exe'),
+      path.join(userProfile, '.bun', 'bin', 'opencode.cmd'),
+      localAppData ? path.join(localAppData, 'Programs', 'opencode', 'opencode.exe') : '',
+    ].filter(Boolean);
+  })();
+
+  const fallbacks = process.platform === 'win32' ? winFallbacks : unixFallbacks;
+  for (const candidate of fallbacks) {
+    if (isExecutable(candidate)) {
+      clearWslOpencodeResolution();
+      resolvedOpencodeBinarySource = 'fallback';
+      return candidate;
+    }
+  }
+
+  if (process.platform === 'win32') {
+    try {
+      const result = spawnSync('where', ['opencode'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (result.status === 0) {
+        const lines = (result.stdout || '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const found = lines.find((line) => isExecutable(line));
+        if (found) {
+          clearWslOpencodeResolution();
+          resolvedOpencodeBinarySource = 'where';
+          return found;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    const wsl = probeWslForOpencode();
+    if (wsl) {
+      return applyWslOpencodeResolution({
+        wslBinary: wsl.wslBinary,
+        opencodePath: wsl.opencodePath,
+        source: 'wsl',
+        distro: wsl.distro,
+      });
+    }
+    return null;
+  }
+
+  const shells = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter(Boolean);
+  for (const shell of shells) {
+    if (!isExecutable(shell)) continue;
+    try {
+      const result = spawnSync(shell, ['-lic', 'command -v opencode'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (result.status === 0) {
+        const found = (result.stdout || '').trim().split(/\s+/).pop() || '';
+        if (found && isExecutable(found)) {
+          clearWslOpencodeResolution();
+          resolvedOpencodeBinarySource = 'shell';
+          return found;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+function resolveNodeCliPath() {
+  const explicit = [process.env.NODE_BINARY, process.env.OPENCHAMBER_NODE_BINARY]
+    .map((v) => (typeof v === 'string' ? v.trim() : ''))
+    .filter(Boolean);
+
+  for (const candidate of explicit) {
+    if (isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  const resolvedFromPath = searchPathFor('node');
+  if (resolvedFromPath) {
+    return resolvedFromPath;
+  }
+
+  const unixFallbacks = [
+    '/opt/homebrew/bin/node',
+    '/usr/local/bin/node',
+    '/usr/bin/node',
+    '/bin/node',
+  ];
+  for (const candidate of unixFallbacks) {
+    if (isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (process.platform === 'win32') {
+    try {
+      const result = spawnSync('where', ['node'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (result.status === 0) {
+        const lines = (result.stdout || '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const found = lines.find((line) => isExecutable(line));
+        if (found) return found;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  const shells = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter(Boolean);
+  for (const shell of shells) {
+    if (!isExecutable(shell)) continue;
+    try {
+      const result = spawnSync(shell, ['-lic', 'command -v node'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (result.status === 0) {
+        const found = (result.stdout || '').trim().split(/\s+/).pop() || '';
+        if (found && isExecutable(found)) {
+          return found;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+function resolveBunCliPath() {
+  const explicit = [process.env.BUN_BINARY, process.env.OPENCHAMBER_BUN_BINARY]
+    .map((v) => (typeof v === 'string' ? v.trim() : ''))
+    .filter(Boolean);
+
+  for (const candidate of explicit) {
+    if (isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  const resolvedFromPath = searchPathFor('bun');
+  if (resolvedFromPath) {
+    return resolvedFromPath;
+  }
+
+  const home = os.homedir();
+  const unixFallbacks = [
+    path.join(home, '.bun', 'bin', 'bun'),
+    '/opt/homebrew/bin/bun',
+    '/usr/local/bin/bun',
+    '/usr/bin/bun',
+    '/bin/bun',
+  ];
+  for (const candidate of unixFallbacks) {
+    if (isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (process.platform === 'win32') {
+    const userProfile = process.env.USERPROFILE || home;
+    const winFallbacks = [
+      path.join(userProfile, '.bun', 'bin', 'bun.exe'),
+      path.join(userProfile, '.bun', 'bin', 'bun.cmd'),
+    ];
+    for (const candidate of winFallbacks) {
+      if (isExecutable(candidate)) return candidate;
+    }
+
+    try {
+      const result = spawnSync('where', ['bun'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (result.status === 0) {
+        const lines = (result.stdout || '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const found = lines.find((line) => isExecutable(line));
+        if (found) return found;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  const shells = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter(Boolean);
+  for (const shell of shells) {
+    if (!isExecutable(shell)) continue;
+    try {
+      const result = spawnSync(shell, ['-lic', 'command -v bun'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      if (result.status === 0) {
+        const found = (result.stdout || '').trim().split(/\s+/).pop() || '';
+        if (found && isExecutable(found)) {
+          return found;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+function ensureBunCliEnv() {
+  if (resolvedBunBinary) {
+    return resolvedBunBinary;
+  }
+
+  const resolved = resolveBunCliPath();
+  if (resolved) {
+    prependToPath(path.dirname(resolved));
+    resolvedBunBinary = resolved;
+    return resolved;
+  }
+
+  return null;
+}
+
+function ensureNodeCliEnv() {
+  if (resolvedNodeBinary) {
+    return resolvedNodeBinary;
+  }
+
+  const resolved = resolveNodeCliPath();
+  if (resolved) {
+    prependToPath(path.dirname(resolved));
+    resolvedNodeBinary = resolved;
+    return resolved;
+  }
+
+  return null;
+}
+
+function readShebang(opencodePath) {
+  if (!opencodePath || typeof opencodePath !== 'string') {
+    return null;
+  }
+  try {
+    // Best effort: detect "#!/usr/bin/env <runtime>" without reading whole file.
+    const fd = fs.openSync(opencodePath, 'r');
+    try {
+      const buf = Buffer.alloc(256);
+      const bytes = fs.readSync(fd, buf, 0, buf.length, 0);
+      const head = buf.subarray(0, bytes).toString('utf8');
+      const firstLine = head.split(/\r?\n/, 1)[0] || '';
+      if (!firstLine.startsWith('#!')) {
+        return null;
+      }
+      const shebang = firstLine.slice(2).trim();
+      if (!shebang) {
+        return null;
+      }
+      return shebang;
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    return null;
+  }
+}
+
+function opencodeShimInterpreter(opencodePath) {
+  const shebang = readShebang(opencodePath);
+  if (!shebang) return null;
+  if (/\bnode\b/i.test(shebang)) return 'node';
+  if (/\bbun\b/i.test(shebang)) return 'bun';
+  return null;
+}
+
+function ensureOpencodeShimRuntime(opencodePath) {
+  const runtime = opencodeShimInterpreter(opencodePath);
+  if (runtime === 'node') {
+    ensureNodeCliEnv();
+  }
+  if (runtime === 'bun') {
+    ensureBunCliEnv();
+  }
+}
+
+function normalizeOpencodeBinarySetting(raw) {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const trimmed = normalizeDirectoryPath(raw).trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  try {
+    const stat = fs.statSync(trimmed);
+    if (stat.isDirectory()) {
+      const bin = process.platform === 'win32' ? 'opencode.exe' : 'opencode';
+      return path.join(trimmed, bin);
+    }
+  } catch {
+    // ignore
+  }
+
+  return trimmed;
+}
+
+async function applyOpencodeBinaryFromSettings() {
+  try {
+    const settings = await readSettingsFromDiskMigrated();
+    if (!settings || typeof settings !== 'object') {
+      return null;
+    }
+    if (!Object.prototype.hasOwnProperty.call(settings, 'opencodeBinary')) {
+      return null;
+    }
+
+    const normalized = normalizeOpencodeBinarySetting(settings.opencodeBinary);
+
+    if (normalized === '') {
+      delete process.env.OPENCODE_BINARY;
+      resolvedOpencodeBinary = null;
+      resolvedOpencodeBinarySource = null;
+      clearWslOpencodeResolution();
+      return null;
+    }
+
+    const raw = typeof settings.opencodeBinary === 'string' ? settings.opencodeBinary.trim() : '';
+
+    const explicitWslPath = process.platform === 'win32' && typeof raw === 'string'
+      ? raw.match(/^wsl:\s*(.+)$/i)
+      : null;
+
+    if (explicitWslPath && explicitWslPath[1] && explicitWslPath[1].trim().length > 0) {
+      const probe = probeWslForOpencode();
+      const applied = applyWslOpencodeResolution({
+        wslBinary: probe?.wslBinary || resolveWslExecutablePath(),
+        opencodePath: explicitWslPath[1].trim(),
+        source: 'settings-wsl-path',
+        distro: probe?.distro || ENV_CONFIGURED_OPENCODE_WSL_DISTRO,
+      });
+      if (applied) {
+        return applied;
+      }
+    }
+
+    if (process.platform === 'win32' && (isWslExecutableValue(raw) || isWslExecutableValue(normalized || ''))) {
+      const probe = probeWslForOpencode();
+      const applied = applyWslOpencodeResolution({
+        wslBinary: probe?.wslBinary || normalized || raw || null,
+        opencodePath: probe?.opencodePath || 'opencode',
+        source: 'settings-wsl',
+        distro: probe?.distro || ENV_CONFIGURED_OPENCODE_WSL_DISTRO,
+      });
+      if (applied) {
+        return applied;
+      }
+    }
+
+    if (normalized && isExecutable(normalized)) {
+      clearWslOpencodeResolution();
+      process.env.OPENCODE_BINARY = normalized;
+      prependToPath(path.dirname(normalized));
+      resolvedOpencodeBinary = normalized;
+      resolvedOpencodeBinarySource = 'settings';
+      ensureOpencodeShimRuntime(normalized);
+      return normalized;
+    }
+
+    if (raw) {
+      console.warn(`Configured settings.opencodeBinary is not executable: ${raw}`);
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+function ensureOpencodeCliEnv() {
+  if (resolvedOpencodeBinary) {
+    if (useWslForOpencode) {
+      return resolvedOpencodeBinary;
+    }
+    ensureOpencodeShimRuntime(resolvedOpencodeBinary);
+    return resolvedOpencodeBinary;
+  }
+
+  const existing = typeof process.env.OPENCODE_BINARY === 'string' ? process.env.OPENCODE_BINARY.trim() : '';
+  if (existing && isExecutable(existing)) {
+    clearWslOpencodeResolution();
+    resolvedOpencodeBinary = existing;
+    resolvedOpencodeBinarySource = resolvedOpencodeBinarySource || 'env';
+    prependToPath(path.dirname(existing));
+    ensureOpencodeShimRuntime(existing);
+    return resolvedOpencodeBinary;
+  }
+
+  const resolved = resolveOpencodeCliPath();
+  if (resolved) {
+    if (useWslForOpencode) {
+      resolvedOpencodeBinary = resolved;
+      resolvedOpencodeBinarySource = resolvedOpencodeBinarySource || 'wsl';
+      console.log(`Resolved opencode CLI via WSL: ${resolvedWslOpencodePath || 'opencode'}`);
+      return resolved;
+    }
+
+    process.env.OPENCODE_BINARY = resolved;
+    prependToPath(path.dirname(resolved));
+    ensureOpencodeShimRuntime(resolved);
+    resolvedOpencodeBinary = resolved;
+    resolvedOpencodeBinarySource = resolvedOpencodeBinarySource || 'unknown';
+    console.log(`Resolved opencode CLI: ${resolved}`);
+    return resolved;
+  }
+
+  clearWslOpencodeResolution();
+  return null;
+}
+
+const startGlobalEventWatcher = async () => {
+  if (globalEventWatcherAbortController) {
+    return;
+  }
+
+  await waitForOpenCodePort();
+
+  globalEventWatcherAbortController = new AbortController();
+  const signal = globalEventWatcherAbortController.signal;
+
+  let attempt = 0;
+
+  const run = async () => {
+    while (!signal.aborted) {
+      attempt += 1;
+      let upstream;
+      let reader;
+      try {
+        const url = buildOpenCodeUrl('/global/event', '');
+        upstream = await fetch(url, {
+          headers: {
+            Accept: 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+            ...getOpenCodeAuthHeaders(),
+          },
+          signal,
+        });
+
+        if (!upstream.ok || !upstream.body) {
+          throw new Error(`bad status ${upstream.status}`);
+        }
+
+        console.log('[PushWatcher] connected');
+
+        const decoder = new TextDecoder();
+        reader = upstream.body.getReader();
+        let buffer = '';
+
+        while (!signal.aborted) {
+          const { value, done } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+
+          let separatorIndex = buffer.indexOf('\n\n');
+          while (separatorIndex !== -1) {
+            const block = buffer.slice(0, separatorIndex);
+            buffer = buffer.slice(separatorIndex + 2);
+            separatorIndex = buffer.indexOf('\n\n');
+            const payload = parseSseDataPayload(block);
+            // Cache session titles from session.updated/session.created events
+            maybeCacheSessionInfoFromEvent(payload);
+            void maybeSendPushForTrigger(payload);
+            // Track session activity independently of UI (mirrors Tauri desktop behavior)
+            const transitions = deriveSessionActivityTransitions(payload);
+            if (transitions && transitions.length > 0) {
+              for (const activity of transitions) {
+                setSessionActivityPhase(activity.sessionId, activity.phase);
+              }
+            }
+
+            // Update authoritative session state from OpenCode events
+            if (payload && payload.type === 'session.status') {
+              const update = extractSessionStatusUpdate(payload);
+              if (update) {
+                updateSessionState(update.sessionId, update.type, update.eventId || `sse-${Date.now()}`, {
+                  attempt: update.attempt,
+                  message: update.message,
+                  next: update.next,
+                });
+              }
+            }
+
+            // Forward to agent loop service for session completion detection
+            if (agentLoopService) {
+              try { agentLoopService.handleSseEvent(payload); } catch { /* ignore */ }
+            }
+          }
+        }
+      } catch (error) {
+        if (signal.aborted) {
+          return;
+        }
+        console.warn('[PushWatcher] disconnected', error?.message ?? error);
+      } finally {
+        try {
+          if (reader) {
+            await reader.cancel();
+            reader.releaseLock();
+          } else if (upstream?.body && !upstream.body.locked) {
+            await upstream.body.cancel();
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const backoffMs = Math.min(1000 * Math.pow(2, Math.min(attempt, 5)), 30000);
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+  };
+
+  void run();
+};
+
+const stopGlobalEventWatcher = () => {
+  if (!globalEventWatcherAbortController) {
+    return;
+  }
+  try {
+    globalEventWatcherAbortController.abort();
+  } catch {
+    // ignore
+  }
+  globalEventWatcherAbortController = null;
+};
+
+
+function setOpenCodePort(port) {
+  if (!Number.isFinite(port) || port <= 0) {
+    return;
+  }
+
+  const numericPort = Math.trunc(port);
+  const portChanged = openCodePort !== numericPort;
+
+  if (portChanged || openCodePort === null) {
+    openCodePort = numericPort;
+    syncToHmrState();
+    console.log(`Detected OpenCode port: ${openCodePort}`);
+
+    if (portChanged) {
+      isOpenCodeReady = false;
+    }
+    openCodeNotReadySince = Date.now();
+  }
+
+  lastOpenCodeError = null;
+}
+
+async function waitForOpenCodePort(timeoutMs = 15000) {
+  if (openCodePort !== null) {
+    return openCodePort;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (openCodePort !== null) {
+      return openCodePort;
+    }
+  }
+
+  throw new Error('Timed out waiting for OpenCode port');
+}
+
+function getLoginShellPath() {
+  const snapshot = getLoginShellEnvSnapshot();
+  if (!snapshot || typeof snapshot.PATH !== 'string' || snapshot.PATH.length === 0) {
+    return null;
+  }
+  return snapshot.PATH;
+}
+
+function buildAugmentedPath() {
+  const augmented = new Set();
+
+  const loginShellPath = getLoginShellPath();
+  if (loginShellPath) {
+    for (const segment of loginShellPath.split(path.delimiter)) {
+      if (segment) {
+        augmented.add(segment);
+      }
+    }
+  }
+
+  const current = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const segment of current) {
+    augmented.add(segment);
+  }
+
+  return Array.from(augmented).join(path.delimiter);
+}
+
+const API_PREFIX_CANDIDATES = [''];
+
+async function waitForReady(url, timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(`${url.replace(/\/+$/, '')}/global/health`, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          ...getOpenCodeAuthHeaders(),
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+
+      if (res.ok) {
+        const body = await res.json().catch(() => null);
+        if (body?.healthy === true) {
+          return true;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return false;
+}
+
+function normalizeApiPrefix(prefix) {
+  if (!prefix) {
+    return '';
+  }
+
+  if (prefix.includes('://')) {
+    try {
+      const parsed = new URL(prefix);
+      return normalizeApiPrefix(parsed.pathname);
+    } catch (error) {
+      return '';
+    }
+  }
+
+  const trimmed = prefix.trim();
+  if (!trimmed || trimmed === '/') {
+    return '';
+  }
+  const withLeading = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return withLeading.endsWith('/') ? withLeading.slice(0, -1) : withLeading;
+}
+
+function setDetectedOpenCodeApiPrefix() {
+  openCodeApiPrefix = '';
+  openCodeApiPrefixDetected = true;
+  if (openCodeApiDetectionTimer) {
+    clearTimeout(openCodeApiDetectionTimer);
+    openCodeApiDetectionTimer = null;
+  }
+}
+
+function getCandidateApiPrefixes() {
+  return API_PREFIX_CANDIDATES;
+}
+
+function buildOpenCodeUrl(path, prefixOverride) {
+  if (!openCodePort) {
+    throw new Error('OpenCode port is not available');
+  }
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const prefix = normalizeApiPrefix(prefixOverride !== undefined ? prefixOverride : '');
+  const fullPath = `${prefix}${normalizedPath}`;
+  const base = openCodeBaseUrl ?? `http://localhost:${openCodePort}`;
+  return `${base}${fullPath}`;
+}
+
+function parseSseDataPayload(block) {
+  if (!block || typeof block !== 'string') {
+    return null;
+  }
+  const dataLines = block
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).replace(/^\s/, ''));
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  const payloadText = dataLines.join('\n').trim();
+  if (!payloadText) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(payloadText);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof parsed.payload === 'object' &&
+      parsed.payload !== null
+    ) {
+      return parsed.payload;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function extractSessionStatusUpdate(payload) {
+  if (!payload || typeof payload !== 'object' || payload.type !== 'session.status') {
+    return null;
+  }
+
+  const props = payload.properties ?? {};
+  const status =
+    props.status ??
+    props.session?.status ??
+    props.sessionInfo?.status;
+  const metadata =
+    props.metadata ??
+    (typeof status === 'object' && status !== null ? status.metadata : null);
+
+  const sessionId = props.sessionID ?? props.sessionId;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    return null;
+  }
+
+  const statusType =
+    typeof status === 'string'
+      ? status
+      : typeof status?.type === 'string'
+        ? status.type
+        : typeof status?.status === 'string'
+          ? status.status
+          : typeof props.type === 'string'
+            ? props.type
+            : typeof props.phase === 'string'
+              ? props.phase
+              : typeof props.state === 'string'
+                ? props.state
+                : null;
+
+  const normalizedType =
+    statusType === 'idle' || statusType === 'busy' || statusType === 'retry'
+      ? statusType
+      : null;
+
+  if (!normalizedType) {
+    return null;
+  }
+
+  const attempt =
+    typeof status?.attempt === 'number'
+      ? status.attempt
+      : typeof props.attempt === 'number'
+        ? props.attempt
+        : typeof metadata?.attempt === 'number'
+          ? metadata.attempt
+          : undefined;
+  const message =
+    typeof status?.message === 'string'
+      ? status.message
+      : typeof props.message === 'string'
+        ? props.message
+        : typeof metadata?.message === 'string'
+          ? metadata.message
+          : undefined;
+  const next =
+    typeof status?.next === 'number'
+      ? status.next
+      : typeof props.next === 'number'
+        ? props.next
+        : typeof metadata?.next === 'number'
+          ? metadata.next
+          : undefined;
+
+  return {
+    sessionId,
+    type: normalizedType,
+    attempt,
+    message,
+    next,
+    eventId: typeof props.eventId === 'string' ? props.eventId : null,
+  };
+}
+
+function emitDesktopNotification(payload) {
+  if (!ENV_DESKTOP_NOTIFY) {
+    return;
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+
+  try {
+    // One-line protocol consumed by the Tauri shell.
+    process.stdout.write(`${DESKTOP_NOTIFY_PREFIX}${JSON.stringify(payload)}\n`);
+  } catch {
+    // ignore
+  }
+}
+
+function broadcastUiNotification(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+
+  if (uiNotificationClients.size === 0) {
+    return;
+  }
+
+  for (const res of uiNotificationClients) {
+    try {
+      writeSseEvent(res, {
+        type: 'openchamber:notification',
+        properties: {
+          ...payload,
+          // Tell the UI whether the sidecar stdout notification channel is active.
+          // When true, the desktop UI should skip this SSE notification to avoid duplicates.
+          // When false (e.g. tauri dev), the UI must handle this SSE notification itself.
+          desktopStdoutActive: ENV_DESKTOP_NOTIFY,
+        },
+      });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function isStreamingAssistantPart(properties) {
+  if (!properties || typeof properties !== 'object') {
+    return false;
+  }
+
+  const info = properties?.info;
+  const role = info?.role;
+  if (role !== 'assistant') {
+    return false;
+  }
+
+  const part = properties?.part;
+  const partType = part?.type;
+  return (
+    partType === 'step-start' ||
+    partType === 'text' ||
+    partType === 'tool' ||
+    partType === 'reasoning' ||
+    partType === 'file' ||
+    partType === 'patch'
+  );
+}
+
+function deriveSessionActivityTransitions(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+
+  if (payload.type === 'session.status') {
+    const update = extractSessionStatusUpdate(payload);
+    if (update) {
+      const phase = update.type === 'busy' || update.type === 'retry' ? 'busy' : 'idle';
+      return [{ sessionId: update.sessionId, phase }];
+    }
+  }
+
+  if (payload.type === 'message.updated') {
+    const info = payload.properties?.info;
+    const sessionId = info?.sessionID ?? info?.sessionId ?? payload.properties?.sessionID ?? payload.properties?.sessionId;
+    const role = info?.role;
+    const finish = info?.finish;
+    if (typeof sessionId === 'string' && sessionId.length > 0 && role === 'assistant' && finish === 'stop') {
+      return [{ sessionId, phase: 'cooldown' }];
+    }
+  }
+
+  if (payload.type === 'message.part.updated' || payload.type === 'message.part.delta') {
+    const info = payload.properties?.info;
+    const part = payload.properties?.part;
+    const sessionId = info?.sessionID ?? info?.sessionId ?? part?.sessionID ?? part?.sessionId ?? payload.properties?.sessionID ?? payload.properties?.sessionId;
+    const role = info?.role;
+    const finish = info?.finish;
+
+    if (typeof sessionId === 'string' && sessionId.length > 0 && role === 'assistant') {
+      const transitions = [];
+
+      // Desktop parity: mark busy when we see assistant parts streaming.
+      if (isStreamingAssistantPart(payload.properties)) {
+        transitions.push({ sessionId, phase: 'busy' });
+      }
+
+      // Desktop parity: enter cooldown when finish==stop.
+      if (finish === 'stop') {
+        transitions.push({ sessionId, phase: 'cooldown' });
+      }
+
+      return transitions;
+    }
+  }
+
+  if (payload.type === 'session.idle') {
+    const sessionId = payload.properties?.sessionID ?? payload.properties?.sessionId;
+    if (typeof sessionId === 'string' && sessionId.length > 0) {
+      return [{ sessionId, phase: 'idle' }];
+    }
+  }
+
+  return [];
+}
+
+const PUSH_READY_COOLDOWN_MS = 5000;
+const PUSH_QUESTION_DEBOUNCE_MS = 500;
+const PUSH_PERMISSION_DEBOUNCE_MS = 500;
+const pushQuestionDebounceTimers = new Map();
+const pushPermissionDebounceTimers = new Map();
+const notifiedPermissionRequests = new Set();
+const lastReadyNotificationAt = new Map();
+
+// Cache: sessionId -> parentID (string) or null (no parent). Undefined = unknown.
+const sessionParentIdCache = new Map();
+const SESSION_PARENT_CACHE_TTL_MS = 60 * 1000;
+
+const getCachedSessionParentId = (sessionId) => {
+  const entry = sessionParentIdCache.get(sessionId);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > SESSION_PARENT_CACHE_TTL_MS) {
+    sessionParentIdCache.delete(sessionId);
+    return undefined;
+  }
+  return entry.parentID;
+};
+
+const setCachedSessionParentId = (sessionId, parentID) => {
+  sessionParentIdCache.set(sessionId, { parentID: parentID ?? null, at: Date.now() });
+};
+
+const fetchSessionParentId = async (sessionId) => {
+  if (!sessionId) return undefined;
+
+  const cached = getCachedSessionParentId(sessionId);
+  if (cached !== undefined) return cached;
+
+  try {
+    const response = await fetch(buildOpenCodeUrl('/session', ''), {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        ...getOpenCodeAuthHeaders(),
+       },
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!response.ok) {
+      return undefined;
+    }
+    const data = await response.json().catch(() => null);
+    if (!Array.isArray(data)) {
+      return undefined;
+    }
+
+    const match = data.find((s) => s && typeof s === 'object' && s.id === sessionId);
+    const parentID = match?.parentID ? match.parentID : null;
+    setCachedSessionParentId(sessionId, parentID);
+    return parentID;
+  } catch {
+    return undefined;
+  }
+};
+
+const extractSessionIdFromPayload = (payload) => {
+  if (!payload || typeof payload !== 'object') return null;
+  const props = payload.properties;
+  const info = props?.info;
+  const sessionId =
+    info?.sessionID ??
+    info?.sessionId ??
+    props?.sessionID ??
+    props?.sessionId ??
+    props?.session ??
+    null;
+  return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : null;
+};
+
+const maybeSendPushForTrigger = async (payload) => {
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+
+  const sessionId = extractSessionIdFromPayload(payload);
+
+  const formatMode = (raw) => {
+    const value = typeof raw === 'string' ? raw.trim() : '';
+    const normalized = value.length > 0 ? value : 'agent';
+    return normalized
+      .split(/[-_\s]+/)
+      .filter(Boolean)
+      .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+      .join(' ');
+  };
+
+  const formatModelId = (raw) => {
+    const value = typeof raw === 'string' ? raw.trim() : '';
+    if (!value) {
+      return 'Assistant';
+    }
+
+    const tokens = value.split(/[-_]+/).filter(Boolean);
+    const result = [];
+    for (let i = 0; i < tokens.length; i += 1) {
+      const current = tokens[i];
+      const next = tokens[i + 1];
+      if (/^\d+$/.test(current) && next && /^\d+$/.test(next)) {
+        result.push(`${current}.${next}`);
+        i += 1;
+        continue;
+      }
+      result.push(current);
+    }
+
+    return result
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+  };
+
+  if (payload.type === 'message.updated') {
+    const info = payload.properties?.info;
+    if (info?.role === 'assistant' && info?.finish === 'stop' && sessionId) {
+      // Check if this is a subtask and if we should notify for subtasks
+      const settings = await readSettingsFromDisk();
+
+      if (settings.notifyOnSubtasks === false) {
+        // Prefer parentID on payload (if present), else fetch from sessions list.
+        const sessionInfo = payload.properties?.session;
+        const parentIDFromPayload = sessionInfo?.parentID ?? payload.properties?.parentID;
+        const parentID = parentIDFromPayload
+          ? parentIDFromPayload
+          : await fetchSessionParentId(sessionId);
+
+        // Fail open: if parentID cannot be resolved, send notification.
+        if (parentID) {
+          return;
+        }
+      }
+
+      // Check if completion notifications are enabled
+      if (settings.notifyOnCompletion === false) {
+        return;
+      }
+
+      const now = Date.now();
+      const lastAt = lastReadyNotificationAt.get(sessionId) ?? 0;
+      if (now - lastAt < PUSH_READY_COOLDOWN_MS) {
+        return;
+      }
+      lastReadyNotificationAt.set(sessionId, now);
+
+      // Resolve templates with fallback to legacy hardcoded values
+      let title = `${formatMode(info?.mode)} agent is ready`;
+      let body = `${formatModelId(info?.modelID)} completed the task`;
+
+      try {
+        const templates = settings.notificationTemplates || {};
+        const isSubtask = await fetchSessionParentId(sessionId);
+        const completionTemplate = isSubtask && settings.notifyOnSubtasks !== false
+          ? (templates.subtask || templates.completion || { title: '{agent_name} is ready', message: '{model_name} completed the task' })
+          : (templates.completion || { title: '{agent_name} is ready', message: '{model_name} completed the task' });
+
+        const variables = await buildTemplateVariables(payload, sessionId);
+
+        // Try fast-path (inline parts) first, then fetch from API
+        const messageId = info?.id;
+        let lastMessage = extractLastMessageText(payload);
+        if (!lastMessage) {
+          lastMessage = await fetchLastAssistantMessageText(sessionId, messageId);
+        }
+
+        const notifZenModel = await resolveZenModel(settings?.zenModel);
+        variables.last_message = await prepareNotificationLastMessage({
+          message: lastMessage,
+          settings,
+          summarize: (text, len) => summarizeText(text, len, notifZenModel),
+        });
+
+        const resolvedTitle = resolveNotificationTemplate(completionTemplate.title, variables);
+        const resolvedBody = resolveNotificationTemplate(completionTemplate.message, variables);
+        if (resolvedTitle) title = resolvedTitle;
+        if (shouldApplyResolvedTemplateMessage(completionTemplate.message, resolvedBody, variables)) body = resolvedBody;
+      } catch (err) {
+        console.warn('[Notification] Template resolution failed, using defaults:', err?.message || err);
+      }
+
+      if (settings.nativeNotificationsEnabled) {
+        const notificationPayload = {
+          title,
+          body,
+          tag: `ready-${sessionId}`,
+          kind: 'ready',
+          sessionId,
+          requireHidden: settings.notificationMode !== 'always',
+        };
+        emitDesktopNotification(notificationPayload);
+        broadcastUiNotification(notificationPayload);
+      }
+
+      await sendPushToAllUiSessions(
+        {
+          title,
+          body,
+          tag: `ready-${sessionId}`,
+          data: {
+            url: buildSessionDeepLinkUrl(sessionId),
+            sessionId,
+            type: 'ready',
+          }
+        },
+        { requireNoSse: true }
+      );
+    }
+
+    // Check for error finish
+    if (info?.role === 'assistant' && info?.finish === 'error' && sessionId) {
+      const settings = await readSettingsFromDisk();
+      if (settings.notifyOnError === false) return;
+
+      let title = 'Tool error';
+      let body = 'An error occurred';
+
+      try {
+        const variables = await buildTemplateVariables(payload, sessionId);
+
+        // Try fast-path (inline parts) first, then fetch from API
+        const errorMessageId = info?.id;
+        let lastMessage = extractLastMessageText(payload);
+        if (!lastMessage) {
+          lastMessage = await fetchLastAssistantMessageText(sessionId, errorMessageId);
+        }
+
+        const errZenModel = await resolveZenModel(settings?.zenModel);
+        variables.last_message = await prepareNotificationLastMessage({
+          message: lastMessage,
+          settings,
+          summarize: (text, len) => summarizeText(text, len, errZenModel),
+        });
+
+        const errorTemplate = (settings.notificationTemplates || {}).error || { title: 'Tool error', message: '{last_message}' };
+        const resolvedTitle = resolveNotificationTemplate(errorTemplate.title, variables);
+        const resolvedBody = resolveNotificationTemplate(errorTemplate.message, variables);
+        if (resolvedTitle) title = resolvedTitle;
+        if (shouldApplyResolvedTemplateMessage(errorTemplate.message, resolvedBody, variables)) body = resolvedBody;
+      } catch (err) {
+        console.warn('[Notification] Error template resolution failed, using defaults:', err?.message || err);
+      }
+
+      if (settings.nativeNotificationsEnabled) {
+        const notificationPayload = {
+          title,
+          body,
+          tag: `error-${sessionId}`,
+          kind: 'error',
+          sessionId,
+          requireHidden: settings.notificationMode !== 'always',
+        };
+        emitDesktopNotification(notificationPayload);
+        broadcastUiNotification(notificationPayload);
+      }
+
+      await sendPushToAllUiSessions(
+        {
+          title,
+          body,
+          tag: `error-${sessionId}`,
+          data: {
+            url: buildSessionDeepLinkUrl(sessionId),
+            sessionId,
+            type: 'error',
+          }
+        },
+        { requireNoSse: true }
+      );
+    }
+
+    return;
+  }
+
+
+  if (payload.type === 'question.asked' && sessionId) {
+    const existingTimer = pushQuestionDebounceTimers.get(sessionId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    const timer = setTimeout(async () => {
+      pushQuestionDebounceTimers.delete(sessionId);
+
+      const settings = await readSettingsFromDisk();
+
+      // Check if question notifications are enabled
+      if (settings.notifyOnQuestion === false) {
+        return;
+      }
+
+      if (!settings.nativeNotificationsEnabled) {
+        // Still send push even if native notifications are disabled
+      }
+
+      const firstQuestion = payload.properties?.questions?.[0];
+      const header = typeof firstQuestion?.header === 'string' ? firstQuestion.header.trim() : '';
+      const questionText = typeof firstQuestion?.question === 'string' ? firstQuestion.question.trim() : '';
+
+      // Legacy fallback title
+      let title = /plan\s*mode/i.test(header)
+        ? 'Switch to plan mode'
+        : /build\s*agent/i.test(header)
+          ? 'Switch to build mode'
+          : header || 'Input needed';
+      let body = questionText || 'Agent is waiting for your response';
+
+      try {
+        // Build template variables
+        const variables = await buildTemplateVariables(payload, sessionId);
+        variables.last_message = questionText || header || '';
+
+        // Get question template
+        const templates = settings.notificationTemplates || {};
+        const questionTemplate = templates.question || { title: 'Input needed', message: '{last_message}' };
+
+        // Resolve templates with fallback to legacy behavior
+        const resolvedTitle = resolveNotificationTemplate(questionTemplate.title, variables);
+        const resolvedBody = resolveNotificationTemplate(questionTemplate.message, variables);
+        if (resolvedTitle) title = resolvedTitle;
+        if (shouldApplyResolvedTemplateMessage(questionTemplate.message, resolvedBody, variables)) body = resolvedBody;
+      } catch (err) {
+        console.warn('[Notification] Question template resolution failed, using defaults:', err?.message || err);
+      }
+
+      if (settings.nativeNotificationsEnabled) {
+        emitDesktopNotification({
+          kind: 'question',
+          title,
+          body,
+          tag: `question-${sessionId}`,
+          sessionId,
+          requireHidden: settings.notificationMode !== 'always',
+        });
+
+        broadcastUiNotification({
+          kind: 'question',
+          title,
+          body,
+          tag: `question-${sessionId}`,
+          sessionId,
+          requireHidden: settings.notificationMode !== 'always',
+        });
+      }
+
+      void sendPushToAllUiSessions(
+        {
+          title,
+          body,
+          tag: `question-${sessionId}`,
+          data: {
+            url: buildSessionDeepLinkUrl(sessionId),
+            sessionId,
+            type: 'question',
+          }
+        },
+        { requireNoSse: true }
+      );
+    }, PUSH_QUESTION_DEBOUNCE_MS);
+
+    pushQuestionDebounceTimers.set(sessionId, timer);
+    return;
+  }
+
+  if (payload.type === 'permission.asked' && sessionId) {
+    const requestId = payload.properties?.id;
+    const permission = payload.properties?.permission;
+    const requestKey = typeof requestId === 'string' ? `${sessionId}:${requestId}` : null;
+    if (requestKey && notifiedPermissionRequests.has(requestKey)) {
+      return;
+    }
+
+    const existingTimer = pushPermissionDebounceTimers.get(sessionId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    const timer = setTimeout(async () => {
+      pushPermissionDebounceTimers.delete(sessionId);
+      const settings = await readSettingsFromDisk();
+
+      // Permission requests use the question event toggle (since permission requests are a type of "agent needs input")
+      if (settings.notifyOnQuestion === false) {
+        return;
+      }
+
+      if (!settings.nativeNotificationsEnabled) {
+        // Still send push even if native notifications are disabled
+      }
+
+      const sessionTitle = payload.properties?.sessionTitle;
+      const permissionText = typeof permission === 'string' && permission.length > 0 ? permission : '';
+      const fallbackMessage = typeof sessionTitle === 'string' && sessionTitle.trim().length > 0
+        ? sessionTitle.trim()
+        : permissionText || 'Agent is waiting for your approval';
+
+      let title = 'Permission required';
+      let body = fallbackMessage;
+
+      try {
+        // Build template variables
+        const variables = await buildTemplateVariables(payload, sessionId);
+        variables.last_message = fallbackMessage;
+
+        // Get question template (permission uses question template since it's an input request)
+        const templates = settings.notificationTemplates || {};
+        const questionTemplate = templates.question || { title: 'Permission required', message: '{last_message}' };
+
+        // Resolve templates with fallback to legacy behavior
+        const resolvedTitle = resolveNotificationTemplate(questionTemplate.title, variables);
+        const resolvedBody = resolveNotificationTemplate(questionTemplate.message, variables);
+        if (resolvedTitle) title = resolvedTitle;
+        if (shouldApplyResolvedTemplateMessage(questionTemplate.message, resolvedBody, variables)) body = resolvedBody;
+      } catch (err) {
+        console.warn('[Notification] Permission template resolution failed, using defaults:', err?.message || err);
+      }
+
+      if (settings.nativeNotificationsEnabled) {
+        emitDesktopNotification({
+          kind: 'permission',
+          title,
+          body,
+          tag: requestKey ? `permission-${requestKey}` : `permission-${sessionId}`,
+          sessionId,
+          requireHidden: settings.notificationMode !== 'always',
+        });
+
+        broadcastUiNotification({
+          kind: 'permission',
+          title,
+          body,
+          tag: requestKey ? `permission-${requestKey}` : `permission-${sessionId}`,
+          sessionId,
+          requireHidden: settings.notificationMode !== 'always',
+        });
+      }
+
+      if (requestKey) {
+        notifiedPermissionRequests.add(requestKey);
+      }
+
+      void sendPushToAllUiSessions(
+        {
+          title,
+          body,
+          tag: `permission-${sessionId}`,
+          data: {
+            url: buildSessionDeepLinkUrl(sessionId),
+            sessionId,
+            type: 'permission',
+          }
+        },
+        { requireNoSse: true }
+      );
+    }, PUSH_PERMISSION_DEBOUNCE_MS);
+
+    pushPermissionDebounceTimers.set(sessionId, timer);
+  }
+};
+
+function writeSseEvent(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function extractApiPrefixFromUrl() {
+  return '';
+}
+
+function detectOpenCodeApiPrefix() {
+  openCodeApiPrefixDetected = true;
+  openCodeApiPrefix = '';
+  return true;
+}
+
+function ensureOpenCodeApiPrefix() {
+  return detectOpenCodeApiPrefix();
+}
+
+function scheduleOpenCodeApiDetection() {
+  return;
+}
+
+function parseArgs(argv = process.argv.slice(2)) {
+  const args = Array.isArray(argv) ? [...argv] : [];
+  const envPassword =
+    process.env.OPENCHAMBER_UI_PASSWORD ||
+    process.env.OPENCODE_UI_PASSWORD ||
+    null;
+  const envCfTunnel = process.env.OPENCHAMBER_TRY_CF_TUNNEL === 'true';
+  const options = { port: DEFAULT_PORT, uiPassword: envPassword, tryCfTunnel: envCfTunnel };
+
+  const consumeValue = (currentIndex, inlineValue) => {
+    if (typeof inlineValue === 'string') {
+      return { value: inlineValue, nextIndex: currentIndex };
+    }
+    const nextArg = args[currentIndex + 1];
+    if (typeof nextArg === 'string' && !nextArg.startsWith('--')) {
+      return { value: nextArg, nextIndex: currentIndex + 1 };
+    }
+    return { value: undefined, nextIndex: currentIndex };
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith('--')) {
+      continue;
+    }
+
+    const eqIndex = arg.indexOf('=');
+    const optionName = eqIndex >= 0 ? arg.slice(2, eqIndex) : arg.slice(2);
+    const inlineValue = eqIndex >= 0 ? arg.slice(eqIndex + 1) : undefined;
+
+    if (optionName === 'port' || optionName === 'p') {
+      const { value, nextIndex } = consumeValue(i, inlineValue);
+      i = nextIndex;
+      const parsedPort = parseInt(value ?? '', 10);
+      options.port = Number.isFinite(parsedPort) ? parsedPort : DEFAULT_PORT;
+      continue;
+    }
+
+    if (optionName === 'ui-password') {
+      const { value, nextIndex } = consumeValue(i, inlineValue);
+      i = nextIndex;
+      options.uiPassword = typeof value === 'string' ? value : '';
+      continue;
+    }
+
+    if (optionName === 'try-cf-tunnel') {
+      options.tryCfTunnel = true;
+      continue;
+    }
+  }
+
+  return options;
+}
+
+function killProcessOnPort(port) {
+  if (!port) return;
+  try {
+    // Kill any process listening on our port to clean up orphaned children.
+    const result = spawnSync('lsof', ['-ti', `:${port}`], { encoding: 'utf8', timeout: 5000 });
+    const output = result.stdout || '';
+    const myPid = process.pid;
+    for (const pidStr of output.split(/\s+/)) {
+      const pid = parseInt(pidStr.trim(), 10);
+      if (pid && pid !== myPid) {
+        try {
+          spawnSync('kill', ['-9', String(pid)], { stdio: 'ignore', timeout: 2000 });
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  } catch {
+    // Ignore - process may already be dead
+  }
+}
+
+async function createManagedOpenCodeServerProcess({
+  hostname,
+  port,
+  timeout,
+  cwd,
+  env,
+}) {
+  let binary = (process.env.OPENCODE_BINARY || 'opencode').trim() || 'opencode';
+  let args = ['serve', '--hostname', hostname, '--port', String(port)];
+
+  if (process.platform === 'win32' && useWslForOpencode) {
+    const wslBinary = resolvedWslBinary || resolveWslExecutablePath();
+    if (!wslBinary) {
+      throw new Error('WSL executable not found while attempting to launch OpenCode from WSL');
+    }
+
+    const wslOpencode = resolvedWslOpencodePath && resolvedWslOpencodePath.trim().length > 0
+      ? resolvedWslOpencodePath.trim()
+      : 'opencode';
+    const serveHost = hostname === '127.0.0.1' ? '0.0.0.0' : hostname;
+
+    binary = wslBinary;
+    args = buildWslExecArgs([
+      wslOpencode,
+      'serve',
+      '--hostname',
+      serveHost,
+      '--port',
+      String(port),
+    ], resolvedWslDistro);
+  }
+
+  // On Windows, Bun/Node cannot directly spawn shell wrapper scripts (#!/bin/sh).
+  // Detect if the resolved binary is a shim that wraps a Node/Bun script and
+  // resolve the actual target so we can spawn it with the correct interpreter.
+  if (process.platform === 'win32' && !useWslForOpencode) {
+    const interpreter = opencodeShimInterpreter(binary);
+    if (interpreter) {
+      // Binary itself has a node/bun shebang – spawn via that interpreter.
+      args.unshift(binary);
+      binary = interpreter;
+    } else {
+      // The wrapper might be a shell shim generated by npm.  Try to find the
+      // real JS entry point next to it (e.g. node_modules/opencode-ai/bin/opencode).
+      try {
+        const shimContent = fs.readFileSync(binary, 'utf8');
+        const jsMatch = shimContent.match(/node_modules[\\/]opencode[^\s"']*/);
+        if (jsMatch) {
+          const candidate = path.resolve(path.dirname(binary), jsMatch[0]);
+          if (fs.existsSync(candidate)) {
+            const realInterp = opencodeShimInterpreter(candidate);
+            if (realInterp) {
+              args.unshift(candidate);
+              binary = realInterp;
+            }
+          }
+        }
+      } catch {
+        // ignore – fall through to default spawn
+      }
+    }
+  }
+
+  const child = spawn(binary, args, {
+    cwd,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const url = await new Promise((resolve, reject) => {
+    let output = '';
+    let done = false;
+    const finish = (handler, value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      child.stdout?.off('data', onStdout);
+      child.stderr?.off('data', onStderr);
+      child.off('exit', onExit);
+      child.off('error', onError);
+      handler(value);
+    };
+
+    const onStdout = (chunk) => {
+      output += chunk.toString();
+      const lines = output.split('\n');
+      for (const line of lines) {
+        if (!line.startsWith('opencode server listening')) continue;
+        const match = line.match(/on\s+(https?:\/\/[^\s]+)/);
+        if (!match) {
+          finish(reject, new Error(`Failed to parse server url from output: ${line}`));
+          return;
+        }
+        finish(resolve, match[1]);
+        return;
+      }
+    };
+
+    const onStderr = (chunk) => {
+      output += chunk.toString();
+    };
+
+    const onExit = (code) => {
+      finish(reject, new Error(`OpenCode exited with code ${code}. Output: ${output}`));
+    };
+
+    const onError = (error) => {
+      finish(reject, error);
+    };
+
+    const timer = setTimeout(() => {
+      finish(reject, new Error(`Timeout waiting for OpenCode to start after ${timeout}ms`));
+    }, timeout);
+
+    child.stdout?.on('data', onStdout);
+    child.stderr?.on('data', onStderr);
+    child.on('exit', onExit);
+    child.on('error', onError);
+  });
+
+  return {
+    url,
+    close() {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // ignore
+      }
     },
   });
 
@@ -3712,7 +5430,109 @@ const gracefulShutdownRuntime = createGracefulShutdownRuntime({
   scheduledTasksRuntime,
 });
 
-const gracefulShutdown = (...args) => gracefulShutdownRuntime.gracefulShutdown(...args);
+    try {
+      const healthy = await isOpenCodeProcessHealthy();
+      if (!healthy) {
+        console.log('OpenCode process not running, restarting...');
+        await restartOpenCode();
+      }
+    } catch (error) {
+      console.error(`Health check error: ${error.message}`);
+    }
+  }, HEALTH_CHECK_INTERVAL);
+}
+
+async function gracefulShutdown(options = {}) {
+  if (isShuttingDown) return;
+
+  isShuttingDown = true;
+  syncToHmrState();
+  console.log('Starting graceful shutdown...');
+  const exitProcess = typeof options.exitProcess === 'boolean' ? options.exitProcess : exitOnShutdown;
+
+  // Shut down agent loop service
+  if (agentLoopService) {
+    agentLoopService.shutdown();
+    agentLoopService = null;
+  }
+
+  stopGlobalEventWatcher();
+
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval);
+  }
+
+  if (terminalInputWsServer) {
+    try {
+      for (const client of terminalInputWsServer.clients) {
+        try {
+          client.terminate();
+        } catch {
+        }
+      }
+
+      await new Promise((resolve) => {
+        terminalInputWsServer.close(() => resolve());
+      });
+    } catch {
+    } finally {
+      terminalInputWsServer = null;
+    }
+  }
+
+  // Only stop OpenCode if we started it ourselves (not when using external server)
+  if (!ENV_SKIP_OPENCODE_START && !isExternalOpenCode) {
+    const portToKill = openCodePort;
+
+    if (openCodeProcess) {
+      console.log('Stopping OpenCode process...');
+      try {
+        openCodeProcess.close();
+      } catch (error) {
+        console.warn('Error closing OpenCode process:', error);
+      }
+      openCodeProcess = null;
+    }
+
+    killProcessOnPort(portToKill);
+  } else {
+    console.log('Skipping OpenCode shutdown (external server)');
+  }
+
+  if (server) {
+    await Promise.race([
+      new Promise((resolve) => {
+        server.close(() => {
+          console.log('HTTP server closed');
+          resolve();
+        });
+      }),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          console.warn('Server close timeout reached, forcing shutdown');
+          resolve();
+        }, SHUTDOWN_TIMEOUT);
+      })
+    ]);
+  }
+
+  if (uiAuthController) {
+    uiAuthController.dispose();
+    uiAuthController = null;
+  }
+
+  if (cloudflareTunnelController) {
+    console.log('Stopping Cloudflare tunnel...');
+    cloudflareTunnelController.stop();
+    cloudflareTunnelController = null;
+    tunnelAuthController.clearActiveTunnel();
+  }
+
+  console.log('Graceful shutdown complete');
+  if (exitProcess) {
+    process.exit(0);
+  }
+}
 
 async function main(options = {}) {
   const port = Number.isFinite(options.port) && options.port >= 0 ? Math.trunc(options.port) : DEFAULT_PORT;
@@ -5107,6 +6927,11 @@ async function main(options = {}) {
             next: update.next,
           });
         }
+      }
+
+      // Forward to agent loop service for session completion detection
+      if (agentLoopService) {
+        try { agentLoopService.handleSseEvent(payload); } catch { /* ignore */ }
       }
 
       const transitions = deriveSessionActivityTransitions(payload);
@@ -8453,6 +10278,2054 @@ async function main(options = {}) {
         desktopNotifyEnabled: ENV_DESKTOP_NOTIFY,
         planModeExperimentalEnabled: PLAN_MODE_EXPERIMENT_ENABLED,
       };
+
+      const issueCommentsResp = await octokit.rest.issues.listComments({
+        owner: repo.owner,
+        repo: repo.repo,
+        issue_number: number,
+        per_page: 100,
+      });
+      const issueComments = (Array.isArray(issueCommentsResp?.data) ? issueCommentsResp.data : []).map((comment) => ({
+        id: comment.id,
+        url: comment.html_url,
+        body: comment.body || '',
+        createdAt: comment.created_at,
+        updatedAt: comment.updated_at,
+        author: comment.user ? { login: comment.user.login, id: comment.user.id, avatarUrl: comment.user.avatar_url } : null,
+      }));
+
+      const reviewCommentsResp = await octokit.rest.pulls.listReviewComments({
+        owner: repo.owner,
+        repo: repo.repo,
+        pull_number: number,
+        per_page: 100,
+      });
+      const reviewComments = (Array.isArray(reviewCommentsResp?.data) ? reviewCommentsResp.data : []).map((comment) => ({
+        id: comment.id,
+        url: comment.html_url,
+        body: comment.body || '',
+        createdAt: comment.created_at,
+        updatedAt: comment.updated_at,
+        path: comment.path,
+        line: typeof comment.line === 'number' ? comment.line : null,
+        position: typeof comment.position === 'number' ? comment.position : null,
+        author: comment.user ? { login: comment.user.login, id: comment.user.id, avatarUrl: comment.user.avatar_url } : null,
+      }));
+
+      const filesResp = await octokit.rest.pulls.listFiles({
+        owner: repo.owner,
+        repo: repo.repo,
+        pull_number: number,
+        per_page: 100,
+      });
+      const files = (Array.isArray(filesResp?.data) ? filesResp.data : []).map((f) => ({
+        filename: f.filename,
+        status: f.status,
+        additions: f.additions,
+        deletions: f.deletions,
+        changes: f.changes,
+        patch: f.patch,
+      }));
+
+      // checks summary (same logic as status endpoint)
+      let checks = null;
+      let checkRunsOut = undefined;
+      const sha = prData.head?.sha;
+      if (sha) {
+        try {
+          const runs = await octokit.rest.checks.listForRef({ owner: repo.owner, repo: repo.repo, ref: sha, per_page: 100 });
+          const checkRuns = Array.isArray(runs?.data?.check_runs) ? runs.data.check_runs : [];
+          if (checkRuns.length > 0) {
+            const parsedJobs = new Map();
+            const parsedAnnotations = new Map();
+            if (includeCheckDetails) {
+              // Prefetch actions jobs per runId.
+              const runIds = new Set();
+              const jobIds = new Map();
+              for (const run of checkRuns) {
+                const details = typeof run.details_url === 'string' ? run.details_url : '';
+                const match = details.match(/\/actions\/runs\/(\d+)(?:\/job\/(\d+))?/);
+                if (match) {
+                  const runId = Number(match[1]);
+                  const jobId = match[2] ? Number(match[2]) : null;
+                  if (Number.isFinite(runId) && runId > 0) {
+                    runIds.add(runId);
+                    if (jobId && Number.isFinite(jobId) && jobId > 0) {
+                      jobIds.set(details, { runId, jobId });
+                    } else {
+                      jobIds.set(details, { runId, jobId: null });
+                    }
+                  }
+                }
+              }
+
+              for (const runId of runIds) {
+                try {
+                  const jobsResp = await octokit.rest.actions.listJobsForWorkflowRun({
+                    owner: repo.owner,
+                    repo: repo.repo,
+                    run_id: runId,
+                    per_page: 100,
+                  });
+                  const jobs = Array.isArray(jobsResp?.data?.jobs) ? jobsResp.data.jobs : [];
+                  parsedJobs.set(runId, jobs);
+                } catch {
+                  parsedJobs.set(runId, []);
+                }
+              }
+
+              for (const run of checkRuns) {
+                const runConclusion = typeof run?.conclusion === 'string' ? run.conclusion.toLowerCase() : '';
+                const shouldLoadAnnotations = Boolean(
+                  run?.id
+                  && runConclusion
+                  && !['success', 'neutral', 'skipped'].includes(runConclusion)
+                );
+                if (!shouldLoadAnnotations) {
+                  continue;
+                }
+
+                const checkRunId = Number(run.id);
+                if (!Number.isFinite(checkRunId) || checkRunId <= 0) {
+                  continue;
+                }
+
+                const annotations = [];
+                for (let page = 1; page <= 3; page += 1) {
+                  try {
+                    const annotationsResp = await octokit.rest.checks.listAnnotations({
+                      owner: repo.owner,
+                      repo: repo.repo,
+                      check_run_id: checkRunId,
+                      per_page: 50,
+                      page,
+                    });
+                    const chunk = Array.isArray(annotationsResp?.data) ? annotationsResp.data : [];
+                    annotations.push(...chunk);
+                    if (chunk.length < 50) {
+                      break;
+                    }
+                  } catch {
+                    break;
+                  }
+                }
+
+                if (annotations.length > 0) {
+                  parsedAnnotations.set(checkRunId, annotations);
+                }
+              }
+            }
+
+            checkRunsOut = checkRuns.map((run) => {
+              const detailsUrl = typeof run.details_url === 'string' ? run.details_url : undefined;
+              let job = undefined;
+              if (includeCheckDetails && detailsUrl) {
+                const match = detailsUrl.match(/\/actions\/runs\/(\d+)(?:\/job\/(\d+))?/);
+                const runId = match ? Number(match[1]) : null;
+                const jobId = match && match[2] ? Number(match[2]) : null;
+                if (runId && Number.isFinite(runId)) {
+                  const jobs = parsedJobs.get(runId) || [];
+                  const matched = jobId
+                    ? jobs.find((j) => j.id === jobId)
+                    : null;
+                  const picked = matched || jobs.find((j) => j.name === run.name) || null;
+                  if (picked) {
+                    job = {
+                      runId,
+                      jobId: picked.id,
+                      url: picked.html_url,
+                      name: picked.name,
+                      conclusion: picked.conclusion,
+                          steps: Array.isArray(picked.steps)
+                            ? picked.steps.map((s) => ({
+                                name: s.name,
+                                status: s.status,
+                                conclusion: s.conclusion,
+                                number: s.number,
+                                startedAt: s.started_at || undefined,
+                                completedAt: s.completed_at || undefined,
+                              }))
+                            : undefined,
+                    };
+                  } else {
+                    job = { runId, ...(jobId ? { jobId } : {}), url: detailsUrl };
+                  }
+                }
+              }
+
+              return {
+                id: run.id,
+                name: run.name,
+                app: run.app
+                  ? {
+                      name: run.app.name || undefined,
+                      slug: run.app.slug || undefined,
+                    }
+                  : undefined,
+                status: run.status,
+                conclusion: run.conclusion,
+                detailsUrl,
+                output: run.output
+                  ? {
+                      title: run.output.title || undefined,
+                      summary: run.output.summary || undefined,
+                      text: run.output.text || undefined,
+                    }
+                  : undefined,
+                ...(job ? { job } : {}),
+                ...(run.id && parsedAnnotations.has(run.id)
+                  ? {
+                      annotations: parsedAnnotations.get(run.id).map((a) => ({
+                        path: a.path || undefined,
+                        startLine: typeof a.start_line === 'number' ? a.start_line : undefined,
+                        endLine: typeof a.end_line === 'number' ? a.end_line : undefined,
+                        level: a.annotation_level || undefined,
+                        message: a.message || '',
+                        title: a.title || undefined,
+                        rawDetails: a.raw_details || undefined,
+                      })).filter((a) => a.message),
+                    }
+                  : {}),
+              };
+            });
+            const counts = { success: 0, failure: 0, pending: 0 };
+            for (const run of checkRuns) {
+              const status = run?.status;
+              const conclusion = run?.conclusion;
+              if (status === 'queued' || status === 'in_progress') {
+                counts.pending += 1;
+                continue;
+              }
+              if (!conclusion) {
+                counts.pending += 1;
+                continue;
+              }
+              if (conclusion === 'success' || conclusion === 'neutral' || conclusion === 'skipped') {
+                counts.success += 1;
+              } else {
+                counts.failure += 1;
+              }
+            }
+            const total = counts.success + counts.failure + counts.pending;
+            const state = counts.failure > 0 ? 'failure' : (counts.pending > 0 ? 'pending' : (total > 0 ? 'success' : 'unknown'));
+            checks = { state, total, ...counts };
+          }
+        } catch {
+          // ignore and fall back
+        }
+        if (!checks) {
+          try {
+            const combined = await octokit.rest.repos.getCombinedStatusForRef({ owner: repo.owner, repo: repo.repo, ref: sha });
+            const statuses = Array.isArray(combined?.data?.statuses) ? combined.data.statuses : [];
+            const counts = { success: 0, failure: 0, pending: 0 };
+            statuses.forEach((s) => {
+              if (s.state === 'success') counts.success += 1;
+              else if (s.state === 'failure' || s.state === 'error') counts.failure += 1;
+              else if (s.state === 'pending') counts.pending += 1;
+            });
+            const total = counts.success + counts.failure + counts.pending;
+            const state = counts.failure > 0 ? 'failure' : (counts.pending > 0 ? 'pending' : (total > 0 ? 'success' : 'unknown'));
+            checks = { state, total, ...counts };
+          } catch {
+            checks = null;
+          }
+        }
+      }
+
+      let diff = undefined;
+      if (includeDiff) {
+        const diffResp = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+          owner: repo.owner,
+          repo: repo.repo,
+          pull_number: number,
+          headers: { accept: 'application/vnd.github.v3.diff' },
+        });
+        diff = typeof diffResp?.data === 'string' ? diffResp.data : undefined;
+      }
+
+      return res.json({
+        connected: true,
+        repo,
+        pr,
+        issueComments,
+        reviewComments,
+        files,
+        ...(diff ? { diff } : {}),
+        checks,
+        ...(Array.isArray(checkRunsOut) ? { checkRuns: checkRunsOut } : {}),
+      });
+    } catch (error) {
+      if (error?.status === 401) {
+        const { clearGitHubAuth } = await getGitHubLibraries();
+        clearGitHubAuth();
+        return res.json({ connected: false });
+      }
+      console.error('Failed to load GitHub PR context:', error);
+      return res.status(500).json({ error: error.message || 'Failed to load GitHub PR context' });
+    }
+  });
+
+  app.get('/api/provider/:providerId/source', async (req, res) => {
+    try {
+      const { providerId } = req.params;
+      if (!providerId) {
+        return res.status(400).json({ error: 'Provider ID is required' });
+      }
+
+      const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
+      const queryDirectory = Array.isArray(req.query?.directory)
+        ? req.query.directory[0]
+        : req.query?.directory;
+      const requestedDirectory = headerDirectory || queryDirectory || null;
+
+      let directory = null;
+      const resolved = await resolveProjectDirectory(req);
+      if (resolved.directory) {
+        directory = resolved.directory;
+      } else if (requestedDirectory) {
+        return res.status(400).json({ error: resolved.error });
+      }
+
+      const sources = getProviderSources(providerId, directory);
+      const { getProviderAuth } = await getAuthLibrary();
+      const auth = getProviderAuth(providerId);
+      sources.sources.auth.exists = Boolean(auth);
+
+      res.json({
+        providerId,
+        sources: sources.sources,
+      });
+    } catch (error) {
+      console.error('Failed to get provider sources:', error);
+      res.status(500).json({ error: error.message || 'Failed to get provider sources' });
+    }
+  });
+
+  app.get('/api/quota/providers', async (_req, res) => {
+    try {
+      const { listConfiguredQuotaProviders } = await getQuotaProviders();
+      const providers = listConfiguredQuotaProviders();
+      res.json({ providers });
+    } catch (error) {
+      console.error('Failed to list quota providers:', error);
+      res.status(500).json({ error: error.message || 'Failed to list quota providers' });
+    }
+  });
+
+  app.get('/api/quota/:providerId', async (req, res) => {
+    try {
+      const { providerId } = req.params;
+      if (!providerId) {
+        return res.status(400).json({ error: 'Provider ID is required' });
+      }
+      const { fetchQuotaForProvider } = await getQuotaProviders();
+      const result = await fetchQuotaForProvider(providerId);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to fetch quota:', error);
+      res.status(500).json({ error: error.message || 'Failed to fetch quota' });
+    }
+  });
+
+  app.delete('/api/provider/:providerId/auth', async (req, res) => {
+    try {
+      const { providerId } = req.params;
+      if (!providerId) {
+        return res.status(400).json({ error: 'Provider ID is required' });
+      }
+
+      const scope = typeof req.query?.scope === 'string' ? req.query.scope : 'auth';
+      const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
+      const queryDirectory = Array.isArray(req.query?.directory)
+        ? req.query.directory[0]
+        : req.query?.directory;
+      const requestedDirectory = headerDirectory || queryDirectory || null;
+      let directory = null;
+
+      if (scope === 'project' || requestedDirectory) {
+        const resolved = await resolveProjectDirectory(req);
+        if (!resolved.directory) {
+          return res.status(400).json({ error: resolved.error });
+        }
+        directory = resolved.directory;
+      } else {
+        const resolved = await resolveProjectDirectory(req);
+        if (resolved.directory) {
+          directory = resolved.directory;
+        }
+      }
+
+      let removed = false;
+      if (scope === 'auth') {
+        const { removeProviderAuth } = await getAuthLibrary();
+        removed = removeProviderAuth(providerId);
+      } else if (scope === 'user' || scope === 'project' || scope === 'custom') {
+        removed = removeProviderConfig(providerId, directory, scope);
+      } else if (scope === 'all') {
+        const { removeProviderAuth } = await getAuthLibrary();
+        const authRemoved = removeProviderAuth(providerId);
+        const userRemoved = removeProviderConfig(providerId, directory, 'user');
+        const projectRemoved = directory ? removeProviderConfig(providerId, directory, 'project') : false;
+        const customRemoved = removeProviderConfig(providerId, directory, 'custom');
+        removed = authRemoved || userRemoved || projectRemoved || customRemoved;
+      } else {
+        return res.status(400).json({ error: 'Invalid scope' });
+      }
+
+      if (removed) {
+        await refreshOpenCodeAfterConfigChange(`provider ${providerId} disconnected (${scope})`);
+      }
+
+      res.json({
+        success: true,
+        removed,
+        requiresReload: removed,
+        message: removed ? 'Provider disconnected successfully' : 'Provider was not connected',
+        reloadDelayMs: removed ? CLIENT_RELOAD_DELAY_MS : undefined,
+      });
+    } catch (error) {
+      console.error('Failed to disconnect provider:', error);
+      res.status(500).json({ error: error.message || 'Failed to disconnect provider' });
+    }
+  });
+
+  let gitLibraries = null;
+  const getGitLibraries = async () => {
+    if (!gitLibraries) {
+      gitLibraries = await import('./lib/git/index.js');
+    }
+    return gitLibraries;
+  };
+
+  app.get('/api/git/identities', async (req, res) => {
+    const { getProfiles } = await getGitLibraries();
+    try {
+      const profiles = getProfiles();
+      res.json(profiles);
+    } catch (error) {
+      console.error('Failed to list git identity profiles:', error);
+      res.status(500).json({ error: 'Failed to list git identity profiles' });
+    }
+  });
+
+  app.post('/api/git/identities', async (req, res) => {
+    const { createProfile } = await getGitLibraries();
+    try {
+      const profile = createProfile(req.body);
+      console.log(`Created git identity profile: ${profile.name} (${profile.id})`);
+      res.json(profile);
+    } catch (error) {
+      console.error('Failed to create git identity profile:', error);
+      res.status(400).json({ error: error.message || 'Failed to create git identity profile' });
+    }
+  });
+
+  app.put('/api/git/identities/:id', async (req, res) => {
+    const { updateProfile } = await getGitLibraries();
+    try {
+      const profile = updateProfile(req.params.id, req.body);
+      console.log(`Updated git identity profile: ${profile.name} (${profile.id})`);
+      res.json(profile);
+    } catch (error) {
+      console.error('Failed to update git identity profile:', error);
+      res.status(400).json({ error: error.message || 'Failed to update git identity profile' });
+    }
+  });
+
+  app.delete('/api/git/identities/:id', async (req, res) => {
+    const { deleteProfile } = await getGitLibraries();
+    try {
+      deleteProfile(req.params.id);
+      console.log(`Deleted git identity profile: ${req.params.id}`);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Failed to delete git identity profile:', error);
+      res.status(400).json({ error: error.message || 'Failed to delete git identity profile' });
+    }
+  });
+
+  app.get('/api/git/global-identity', async (req, res) => {
+    const { getGlobalIdentity } = await getGitLibraries();
+    try {
+      const identity = await getGlobalIdentity();
+      res.json(identity);
+    } catch (error) {
+      console.error('Failed to get global git identity:', error);
+      res.status(500).json({ error: 'Failed to get global git identity' });
+    }
+  });
+
+  app.get('/api/git/discover-credentials', async (req, res) => {
+    try {
+      const { discoverGitCredentials } = await import('./lib/git/index.js');
+      const credentials = discoverGitCredentials();
+      res.json(credentials);
+    } catch (error) {
+      console.error('Failed to discover git credentials:', error);
+      res.status(500).json({ error: 'Failed to discover git credentials' });
+    }
+  });
+
+  app.get('/api/git/check', async (req, res) => {
+    const { isGitRepository } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const isRepo = await isGitRepository(directory);
+      res.json({ isGitRepository: isRepo });
+    } catch (error) {
+      console.error('Failed to check git repository:', error);
+      res.status(500).json({ error: 'Failed to check git repository' });
+    }
+  });
+
+  app.get('/api/git/remote-url', async (req, res) => {
+    const { getRemoteUrl } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+      const remote = req.query.remote || 'origin';
+
+      const url = await getRemoteUrl(directory, remote);
+      res.json({ url });
+    } catch (error) {
+      console.error('Failed to get remote url:', error);
+      res.status(500).json({ error: 'Failed to get remote url' });
+    }
+  });
+
+  app.get('/api/git/current-identity', async (req, res) => {
+    const { getCurrentIdentity } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const identity = await getCurrentIdentity(directory);
+      res.json(identity);
+    } catch (error) {
+      console.error('Failed to get current git identity:', error);
+      res.status(500).json({ error: 'Failed to get current git identity' });
+    }
+  });
+
+  app.get('/api/git/has-local-identity', async (req, res) => {
+    const { hasLocalIdentity } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const hasLocal = await hasLocalIdentity(directory);
+      res.json({ hasLocalIdentity: hasLocal });
+    } catch (error) {
+      console.error('Failed to check local git identity:', error);
+      res.status(500).json({ error: 'Failed to check local git identity' });
+    }
+  });
+
+  app.post('/api/git/set-identity', async (req, res) => {
+    const { getProfile, setLocalIdentity, getGlobalIdentity } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { profileId } = req.body;
+      if (!profileId) {
+        return res.status(400).json({ error: 'profileId is required' });
+      }
+
+      let profile = null;
+
+      if (profileId === 'global') {
+        const globalIdentity = await getGlobalIdentity();
+        if (!globalIdentity?.userName || !globalIdentity?.userEmail) {
+          return res.status(404).json({ error: 'Global identity is not configured' });
+        }
+        profile = {
+          id: 'global',
+          name: 'Global Identity',
+          userName: globalIdentity.userName,
+          userEmail: globalIdentity.userEmail,
+          sshKey: globalIdentity.sshCommand
+            ? globalIdentity.sshCommand.replace('ssh -i ', '')
+            : null,
+        };
+      } else {
+        profile = getProfile(profileId);
+        if (!profile) {
+          return res.status(404).json({ error: 'Profile not found' });
+        }
+      }
+
+      await setLocalIdentity(directory, profile);
+      res.json({ success: true, profile });
+    } catch (error) {
+      console.error('Failed to set git identity:', error);
+      res.status(500).json({ error: error.message || 'Failed to set git identity' });
+    }
+  });
+
+  app.get('/api/git/status', async (req, res) => {
+    const { getStatus, isGitRepository } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const isRepo = await isGitRepository(directory);
+      if (!isRepo) {
+        return res.json({ isGitRepository: false, files: [], branch: null, ahead: 0, behind: 0 });
+      }
+
+      const status = await getStatus(directory);
+      res.json(status);
+    } catch (error) {
+      console.error('Failed to get git status:', error);
+      res.status(500).json({ error: error.message || 'Failed to get git status' });
+    }
+  });
+
+  app.get('/api/git/diff', async (req, res) => {
+    const { getDiff } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const path = req.query.path;
+      if (!path || typeof path !== 'string') {
+        return res.status(400).json({ error: 'path parameter is required' });
+      }
+
+      const staged = req.query.staged === 'true';
+      const context = req.query.context ? parseInt(String(req.query.context), 10) : undefined;
+
+      const diff = await getDiff(directory, {
+        path,
+        staged,
+        contextLines: Number.isFinite(context) ? context : 3,
+      });
+
+      res.json({ diff });
+    } catch (error) {
+      console.error('Failed to get git diff:', error);
+      res.status(500).json({ error: error.message || 'Failed to get git diff' });
+    }
+  });
+
+  app.get('/api/git/file-diff', async (req, res) => {
+    const { getFileDiff } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory || typeof directory !== 'string') {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const pathParam = req.query.path;
+      if (!pathParam || typeof pathParam !== 'string') {
+        return res.status(400).json({ error: 'path parameter is required' });
+      }
+
+      const staged = req.query.staged === 'true';
+
+      const result = await getFileDiff(directory, {
+        path: pathParam,
+        staged,
+      });
+
+      res.json({
+        original: result.original,
+        modified: result.modified,
+        path: result.path,
+        isBinary: Boolean(result.isBinary),
+      });
+    } catch (error) {
+      console.error('Failed to get git file diff:', error);
+      res.status(500).json({ error: error.message || 'Failed to get git file diff' });
+    }
+  });
+
+  app.post('/api/git/revert', async (req, res) => {
+    const { revertFile } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { path } = req.body || {};
+      if (!path || typeof path !== 'string') {
+        return res.status(400).json({ error: 'path parameter is required' });
+      }
+
+      await revertFile(directory, path);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Failed to revert git file:', error);
+      res.status(500).json({ error: error.message || 'Failed to revert git file' });
+    }
+  });
+
+  app.post('/api/git/pull', async (req, res) => {
+    const { pull } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await pull(directory, req.body);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to pull:', error);
+      res.status(500).json({ error: error.message || 'Failed to pull from remote' });
+    }
+  });
+
+  app.post('/api/git/push', async (req, res) => {
+    const { push } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await push(directory, req.body);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to push:', error);
+      res.status(500).json({ error: error.message || 'Failed to push to remote' });
+    }
+  });
+
+  app.post('/api/git/fetch', async (req, res) => {
+    const { fetch: gitFetch } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await gitFetch(directory, req.body);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to fetch:', error);
+      res.status(500).json({ error: error.message || 'Failed to fetch from remote' });
+    }
+  });
+
+  app.get('/api/git/remotes', async (req, res) => {
+    const { getRemotes } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const remotes = await getRemotes(directory);
+      res.json(remotes);
+    } catch (error) {
+      console.error('Failed to get remotes:', error);
+      res.status(500).json({ error: error.message || 'Failed to get remotes' });
+    }
+  });
+
+  app.post('/api/git/rebase', async (req, res) => {
+    const { rebase } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await rebase(directory, req.body);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to rebase:', error);
+      res.status(500).json({ error: error.message || 'Failed to rebase' });
+    }
+  });
+
+  app.post('/api/git/rebase/abort', async (req, res) => {
+    const { abortRebase } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await abortRebase(directory);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to abort rebase:', error);
+      res.status(500).json({ error: error.message || 'Failed to abort rebase' });
+    }
+  });
+
+  app.post('/api/git/merge', async (req, res) => {
+    const { merge } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await merge(directory, req.body);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to merge:', error);
+      res.status(500).json({ error: error.message || 'Failed to merge' });
+    }
+  });
+
+  app.post('/api/git/merge/abort', async (req, res) => {
+    const { abortMerge } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await abortMerge(directory);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to abort merge:', error);
+      res.status(500).json({ error: error.message || 'Failed to abort merge' });
+    }
+  });
+
+  app.post('/api/git/rebase/continue', async (req, res) => {
+    const { continueRebase } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await continueRebase(directory);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to continue rebase:', error);
+      res.status(500).json({ error: error.message || 'Failed to continue rebase' });
+    }
+  });
+
+  app.post('/api/git/merge/continue', async (req, res) => {
+    const { continueMerge } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await continueMerge(directory);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to continue merge:', error);
+      res.status(500).json({ error: error.message || 'Failed to continue merge' });
+    }
+  });
+
+  app.get('/api/git/conflict-details', async (req, res) => {
+    const { getConflictDetails } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await getConflictDetails(directory);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to get conflict details:', error);
+      res.status(500).json({ error: error.message || 'Failed to get conflict details' });
+    }
+  });
+
+  app.post('/api/git/stash', async (req, res) => {
+    const { stash } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await stash(directory, req.body);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to stash:', error);
+      res.status(500).json({ error: error.message || 'Failed to stash' });
+    }
+  });
+
+  app.post('/api/git/stash/pop', async (req, res) => {
+    const { stashPop } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await stashPop(directory);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to pop stash:', error);
+      res.status(500).json({ error: error.message || 'Failed to pop stash' });
+    }
+  });
+
+  app.post('/api/git/commit', async (req, res) => {
+    const { commit } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { message, addAll, files } = req.body;
+      if (!message) {
+        return res.status(400).json({ error: 'message is required' });
+      }
+
+      const result = await commit(directory, message, {
+        addAll,
+        files,
+      });
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to commit:', error);
+      res.status(500).json({ error: error.message || 'Failed to create commit' });
+    }
+  });
+
+  app.get('/api/git/branches', async (req, res) => {
+    const { getBranches } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const branches = await getBranches(directory);
+      res.json(branches);
+    } catch (error) {
+      console.error('Failed to get branches:', error);
+      res.status(500).json({ error: error.message || 'Failed to get branches' });
+    }
+  });
+
+  app.post('/api/git/branches', async (req, res) => {
+    const { createBranch } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { name, startPoint } = req.body;
+      if (!name) {
+        return res.status(400).json({ error: 'name is required' });
+      }
+
+      const result = await createBranch(directory, name, { startPoint });
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to create branch:', error);
+      res.status(500).json({ error: error.message || 'Failed to create branch' });
+    }
+  });
+
+  app.delete('/api/git/branches', async (req, res) => {
+    const { deleteBranch } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { branch, force } = req.body;
+      if (!branch) {
+        return res.status(400).json({ error: 'branch is required' });
+      }
+
+      const result = await deleteBranch(directory, branch, { force });
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to delete branch:', error);
+      res.status(500).json({ error: error.message || 'Failed to delete branch' });
+    }
+  });
+
+
+  app.put('/api/git/branches/rename', async (req, res) => {
+    const { renameBranch } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { oldName, newName } = req.body;
+      if (!oldName) {
+        return res.status(400).json({ error: 'oldName is required' });
+      }
+      if (!newName) {
+        return res.status(400).json({ error: 'newName is required' });
+      }
+
+      const result = await renameBranch(directory, oldName, newName);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to rename branch:', error);
+      res.status(500).json({ error: error.message || 'Failed to rename branch' });
+    }
+  });
+  app.delete('/api/git/remote-branches', async (req, res) => {
+    const { deleteRemoteBranch } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { branch, remote } = req.body;
+      if (!branch) {
+        return res.status(400).json({ error: 'branch is required' });
+      }
+
+      const result = await deleteRemoteBranch(directory, { branch, remote });
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to delete remote branch:', error);
+      res.status(500).json({ error: error.message || 'Failed to delete remote branch' });
+    }
+  });
+
+  app.post('/api/git/checkout', async (req, res) => {
+    const { checkoutBranch } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { branch } = req.body;
+      if (!branch) {
+        return res.status(400).json({ error: 'branch is required' });
+      }
+
+      const result = await checkoutBranch(directory, branch);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to checkout branch:', error);
+      res.status(500).json({ error: error.message || 'Failed to checkout branch' });
+    }
+  });
+
+  app.get('/api/git/worktrees', async (req, res) => {
+    const { getWorktrees } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const worktrees = await getWorktrees(directory);
+      res.json(worktrees);
+    } catch (error) {
+      // Worktrees are an optional feature. Avoid repeated 500s (and repeated client retries)
+      // when the directory isn't a git repo or uses shell shorthand like "~/".
+      console.warn('Failed to get worktrees, returning empty list:', error?.message || error);
+      res.setHeader('X-OpenChamber-Warning', 'git worktrees unavailable');
+      res.json([]);
+    }
+  });
+
+  app.post('/api/git/worktrees/validate', async (req, res) => {
+    const { validateWorktreeCreate } = await getGitLibraries();
+    if (typeof validateWorktreeCreate !== 'function') {
+      return res.status(501).json({ error: 'Worktree validation is not available' });
+    }
+
+    try {
+      const directory = req.query.directory;
+      if (!directory || typeof directory !== 'string') {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const result = await validateWorktreeCreate(directory, req.body || {});
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to validate worktree creation:', error);
+      res.status(500).json({ error: error.message || 'Failed to validate worktree creation' });
+    }
+  });
+
+  app.post('/api/git/worktrees', async (req, res) => {
+    const { createWorktree } = await getGitLibraries();
+    if (typeof createWorktree !== 'function') {
+      return res.status(501).json({ error: 'Worktree creation is not available' });
+    }
+
+    try {
+      const directory = req.query.directory;
+      if (!directory || typeof directory !== 'string') {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const created = await createWorktree(directory, req.body || {});
+      res.json(created);
+    } catch (error) {
+      console.error('Failed to create worktree:', error);
+      res.status(500).json({ error: error.message || 'Failed to create worktree' });
+    }
+  });
+
+  app.delete('/api/git/worktrees', async (req, res) => {
+    const { removeWorktree } = await getGitLibraries();
+    if (typeof removeWorktree !== 'function') {
+      return res.status(501).json({ error: 'Worktree removal is not available' });
+    }
+
+    try {
+      const directory = req.query.directory;
+      if (!directory || typeof directory !== 'string') {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const worktreeDirectory = typeof req.body?.directory === 'string' ? req.body.directory : '';
+      if (!worktreeDirectory) {
+        return res.status(400).json({ error: 'worktree directory is required' });
+      }
+
+      const result = await removeWorktree(directory, {
+        directory: worktreeDirectory,
+        deleteLocalBranch: req.body?.deleteLocalBranch === true,
+      });
+      res.json({ success: Boolean(result) });
+    } catch (error) {
+      console.error('Failed to remove worktree:', error);
+      res.status(500).json({ error: error.message || 'Failed to remove worktree' });
+    }
+  });
+
+  app.get('/api/git/worktree-type', async (req, res) => {
+    const { isLinkedWorktree } = await getGitLibraries();
+    try {
+      const { directory } = req.query;
+      if (!directory || typeof directory !== 'string') {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+      const linked = await isLinkedWorktree(directory);
+      res.json({ linked });
+    } catch (error) {
+      console.error('Failed to determine worktree type:', error);
+      res.status(500).json({ error: error.message || 'Failed to determine worktree type' });
+    }
+  });
+
+  app.get('/api/git/log', async (req, res) => {
+    const { getLog } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const { maxCount, from, to, file } = req.query;
+      const log = await getLog(directory, {
+        maxCount: maxCount ? parseInt(maxCount) : undefined,
+        from,
+        to,
+        file
+      });
+      res.json(log);
+    } catch (error) {
+      console.error('Failed to get log:', error);
+      res.status(500).json({ error: error.message || 'Failed to get commit log' });
+    }
+  });
+
+  app.get('/api/git/commit-files', async (req, res) => {
+    const { getCommitFiles } = await getGitLibraries();
+    try {
+      const { directory, hash } = req.query;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+      if (!hash) {
+        return res.status(400).json({ error: 'hash parameter is required' });
+      }
+
+      const result = await getCommitFiles(directory, hash);
+      res.json(result);
+    } catch (error) {
+      console.error('Failed to get commit files:', error);
+      res.status(500).json({ error: error.message || 'Failed to get commit files' });
+    }
+  });
+
+  app.get('/api/fs/home', (req, res) => {
+    try {
+      const home = os.homedir();
+      if (!home || typeof home !== 'string' || home.length === 0) {
+        return res.status(500).json({ error: 'Failed to resolve home directory' });
+      }
+      res.json({ home });
+    } catch (error) {
+      console.error('Failed to resolve home directory:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to resolve home directory' });
+    }
+  });
+
+  app.post('/api/fs/mkdir', async (req, res) => {
+    try {
+      const { path: dirPath, allowOutsideWorkspace } = req.body ?? {};
+
+      if (typeof dirPath !== 'string' || !dirPath.trim()) {
+        return res.status(400).json({ error: 'Path is required' });
+      }
+
+      let resolvedPath = '';
+
+      if (allowOutsideWorkspace) {
+        resolvedPath = path.resolve(normalizeDirectoryPath(dirPath));
+      } else {
+        const resolved = await resolveWorkspacePathFromContext(req, dirPath);
+        if (!resolved.ok) {
+          return res.status(400).json({ error: resolved.error });
+        }
+        resolvedPath = resolved.resolved;
+      }
+
+      await fsPromises.mkdir(resolvedPath, { recursive: true });
+
+      res.json({ success: true, path: resolvedPath });
+    } catch (error) {
+      console.error('Failed to create directory:', error);
+      res.status(500).json({ error: error.message || 'Failed to create directory' });
+    }
+  });
+
+  // ── Agent Loop: routes ───────────────────────────────────────────────
+
+  // Always create the service — it doesn't connect at construction time;
+  // actual OpenCode API calls happen lazily when methods are invoked.
+  agentLoopService = new AgentLoopService({
+    buildOpenCodeUrl,
+    getOpenCodeAuthHeaders,
+    extractSessionStatusUpdate,
+    fsPromises,
+    resolveWorkspacePath,
+    isPathWithinRoot,
+    path,
+  });
+
+  // Register agent loop REST API routes.
+  // Pass a getter so routes always see the current service instance
+  // (survives HMR reloads and late initialization).
+  registerAgentLoopRoutes(app, () => agentLoopService, {
+    fsPromises,
+    resolveWorkspacePathFromContext,
+    isPathWithinRoot,
+    path,
+    validateWorkpackageFile: (data) => {
+      if (!data || typeof data !== 'object') return false;
+      if (typeof data.name !== 'string' || data.name.trim().length === 0) return false;
+      if (!Array.isArray(data.workpackages)) return false;
+      if (data.workpackages.length === 0) return false;
+      for (const wp of data.workpackages) {
+        if (!wp || typeof wp !== 'object') return false;
+        if (typeof wp.id !== 'string' || wp.id.trim().length === 0) return false;
+        if (typeof wp.title !== 'string' || wp.title.trim().length === 0) return false;
+        if (typeof wp.description !== 'string' || wp.description.trim().length === 0) return false;
+      }
+      return true;
+    },
+  });
+
+  // Read file contents
+  app.get('/api/fs/read', async (req, res) => {
+    const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+    if (!filePath) {
+      return res.status(400).json({ error: 'Path is required' });
+    }
+
+    try {
+      const resolved = await resolveWorkspacePathFromContext(req, filePath);
+      if (!resolved.ok) {
+        return res.status(400).json({ error: resolved.error });
+      }
+
+      const [canonicalPath, canonicalBase] = await Promise.all([
+        fsPromises.realpath(resolved.resolved),
+        fsPromises.realpath(resolved.base).catch(() => path.resolve(resolved.base)),
+      ]);
+
+      if (!isPathWithinRoot(canonicalPath, canonicalBase)) {
+        return res.status(403).json({ error: 'Access to file denied' });
+      }
+
+      const stats = await fsPromises.stat(canonicalPath);
+      if (!stats.isFile()) {
+        return res.status(400).json({ error: 'Specified path is not a file' });
+      }
+
+      const content = await fsPromises.readFile(canonicalPath, 'utf8');
+      res.type('text/plain').send(content);
+    } catch (error) {
+      const err = error;
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'File not found' });
+      }
+      if (err && typeof err === 'object' && err.code === 'EACCES') {
+        return res.status(403).json({ error: 'Access to file denied' });
+      }
+      console.error('Failed to read file:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to read file' });
+    }
+  });
+
+  // Read file as raw bytes (images, etc.)
+  app.get('/api/fs/raw', async (req, res) => {
+    const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+    if (!filePath) {
+      return res.status(400).json({ error: 'Path is required' });
+    }
+
+    try {
+      const resolved = await resolveWorkspacePathFromContext(req, filePath);
+      if (!resolved.ok) {
+        return res.status(400).json({ error: resolved.error });
+      }
+
+      const [canonicalPath, canonicalBase] = await Promise.all([
+        fsPromises.realpath(resolved.resolved),
+        fsPromises.realpath(resolved.base).catch(() => path.resolve(resolved.base)),
+      ]);
+
+      if (!isPathWithinRoot(canonicalPath, canonicalBase)) {
+        return res.status(403).json({ error: 'Access to file denied' });
+      }
+
+      const stats = await fsPromises.stat(canonicalPath);
+      if (!stats.isFile()) {
+        return res.status(400).json({ error: 'Specified path is not a file' });
+      }
+
+      const ext = path.extname(canonicalPath).toLowerCase();
+      const mimeMap = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.webp': 'image/webp',
+        '.ico': 'image/x-icon',
+        '.bmp': 'image/bmp',
+        '.avif': 'image/avif',
+      };
+      const mimeType = mimeMap[ext] || 'application/octet-stream';
+
+      const content = await fsPromises.readFile(canonicalPath);
+      res.setHeader('Cache-Control', 'no-store');
+      res.type(mimeType).send(content);
+    } catch (error) {
+      const err = error;
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'File not found' });
+      }
+      if (err && typeof err === 'object' && err.code === 'EACCES') {
+        return res.status(403).json({ error: 'Access to file denied' });
+      }
+      console.error('Failed to read raw file:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to read file' });
+    }
+  });
+
+  // Write file contents
+  app.post('/api/fs/write', async (req, res) => {
+    const { path: filePath, content } = req.body || {};
+    if (!filePath || typeof filePath !== 'string') {
+      return res.status(400).json({ error: 'Path is required' });
+    }
+    if (typeof content !== 'string') {
+      return res.status(400).json({ error: 'Content is required' });
+    }
+
+    try {
+      const resolved = await resolveWorkspacePathFromContext(req, filePath);
+      if (!resolved.ok) {
+        return res.status(400).json({ error: resolved.error });
+      }
+
+      // Ensure parent directory exists
+      await fsPromises.mkdir(path.dirname(resolved.resolved), { recursive: true });
+      await fsPromises.writeFile(resolved.resolved, content, 'utf8');
+      res.json({ success: true, path: resolved.resolved });
+    } catch (error) {
+      const err = error;
+      if (err && typeof err === 'object' && err.code === 'EACCES') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      console.error('Failed to write file:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to write file' });
+    }
+  });
+
+  // Delete file or directory
+  app.post('/api/fs/delete', async (req, res) => {
+    const { path: targetPath } = req.body || {};
+    if (!targetPath || typeof targetPath !== 'string') {
+      return res.status(400).json({ error: 'Path is required' });
+    }
+
+    try {
+      const resolved = await resolveWorkspacePathFromContext(req, targetPath);
+      if (!resolved.ok) {
+        return res.status(400).json({ error: resolved.error });
+      }
+
+      await fsPromises.rm(resolved.resolved, { recursive: true, force: true });
+
+      res.json({ success: true, path: resolved.resolved });
+    } catch (error) {
+      const err = error;
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'File or directory not found' });
+      }
+      if (err && typeof err === 'object' && err.code === 'EACCES') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      console.error('Failed to delete path:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to delete path' });
+    }
+  });
+
+  // Rename/Move file or directory
+  app.post('/api/fs/rename', async (req, res) => {
+    const { oldPath, newPath } = req.body || {};
+    if (!oldPath || typeof oldPath !== 'string') {
+      return res.status(400).json({ error: 'oldPath is required' });
+    }
+    if (!newPath || typeof newPath !== 'string') {
+      return res.status(400).json({ error: 'newPath is required' });
+    }
+
+    try {
+      const resolvedOld = await resolveWorkspacePathFromContext(req, oldPath);
+      if (!resolvedOld.ok) {
+        return res.status(400).json({ error: resolvedOld.error });
+      }
+      const resolvedNew = await resolveWorkspacePathFromContext(req, newPath);
+      if (!resolvedNew.ok) {
+        return res.status(400).json({ error: resolvedNew.error });
+      }
+
+      if (resolvedOld.base !== resolvedNew.base) {
+        return res.status(400).json({ error: 'Source and destination must share the same workspace root' });
+      }
+
+      await fsPromises.rename(resolvedOld.resolved, resolvedNew.resolved);
+
+      res.json({ success: true, path: resolvedNew.resolved });
+    } catch (error) {
+      const err = error;
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'Source path not found' });
+      }
+      if (err && typeof err === 'object' && err.code === 'EACCES') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      console.error('Failed to rename path:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to rename path' });
+    }
+  });
+
+  // Reveal a file or folder in the system file manager (Finder on macOS, Explorer on Windows, etc.)
+  app.post('/api/fs/reveal', async (req, res) => {
+    const { path: targetPath } = req.body || {};
+    if (!targetPath || typeof targetPath !== 'string') {
+      return res.status(400).json({ error: 'Path is required' });
+    }
+
+    try {
+      const resolved = path.resolve(targetPath.trim());
+
+      // Verify path exists
+      await fsPromises.access(resolved);
+
+      const platform = process.platform;
+      if (platform === 'darwin') {
+        // macOS: open -R selects the file in Finder; open opens a folder
+        const stat = await fsPromises.stat(resolved);
+        if (stat.isDirectory()) {
+          spawn('open', [resolved], { stdio: 'ignore', detached: true }).unref();
+        } else {
+          spawn('open', ['-R', resolved], { stdio: 'ignore', detached: true }).unref();
+        }
+      } else if (platform === 'win32') {
+        // Windows: explorer /select, highlights the file
+        spawn('explorer', ['/select,', resolved], { stdio: 'ignore', detached: true }).unref();
+      } else {
+        // Linux: xdg-open opens the parent directory
+        const stat = await fsPromises.stat(resolved);
+        const dir = stat.isDirectory() ? resolved : path.dirname(resolved);
+        spawn('xdg-open', [dir], { stdio: 'ignore', detached: true }).unref();
+      }
+
+      res.json({ success: true, path: resolved });
+    } catch (error) {
+      const err = error;
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'Path not found' });
+      }
+      console.error('Failed to reveal path:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to reveal path' });
+    }
+  });
+
+  // Execute shell commands in a directory (for worktree setup)
+  // NOTE: This route supports background execution to avoid tying up browser connections.
+  const execJobs = new Map();
+  const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
+  const COMMAND_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.OPENCHAMBER_FS_EXEC_TIMEOUT_MS);
+    if (Number.isFinite(raw) && raw > 0) return raw;
+    // `bun install` (common worktree setup cmd) often takes >60s.
+    return 5 * 60 * 1000;
+  })();
+
+  const pruneExecJobs = () => {
+    const now = Date.now();
+    for (const [jobId, job] of execJobs.entries()) {
+      if (!job || typeof job !== 'object') {
+        execJobs.delete(jobId);
+        continue;
+      }
+      const updatedAt = typeof job.updatedAt === 'number' ? job.updatedAt : 0;
+      if (updatedAt && now - updatedAt > EXEC_JOB_TTL_MS) {
+        execJobs.delete(jobId);
+      }
+    }
+  };
+
+  const runCommandInDirectory = (shell, shellFlag, command, resolvedCwd) => {
+    return new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+
+      const envPath = buildAugmentedPath();
+      const execEnv = { ...process.env, PATH: envPath };
+
+      const child = spawn(shell, [shellFlag, command], {
+        cwd: resolvedCwd,
+        env: execEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+      }, COMMAND_TIMEOUT_MS);
+
+      child.stdout?.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+
+      child.stderr?.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      child.on('error', (error) => {
+        clearTimeout(timeout);
+        resolve({
+          command,
+          success: false,
+          exitCode: undefined,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          error: (error && error.message) || 'Command execution failed',
+        });
+      });
+
+      child.on('close', (code, signal) => {
+        clearTimeout(timeout);
+        const exitCode = typeof code === 'number' ? code : undefined;
+        const base = {
+          command,
+          success: exitCode === 0 && !timedOut,
+          exitCode,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+        };
+
+        if (timedOut) {
+          resolve({
+            ...base,
+            success: false,
+            error: `Command timed out after ${COMMAND_TIMEOUT_MS}ms` + (signal ? ` (${signal})` : ''),
+          });
+          return;
+        }
+
+        resolve(base);
+      });
+    });
+  };
+
+  const runExecJob = async (job) => {
+    job.status = 'running';
+    job.updatedAt = Date.now();
+
+    const results = [];
+
+    for (const command of job.commands) {
+      if (typeof command !== 'string' || !command.trim()) {
+        results.push({ command, success: false, error: 'Invalid command' });
+        continue;
+      }
+
+      try {
+        const result = await runCommandInDirectory(job.shell, job.shellFlag, command, job.resolvedCwd);
+        results.push(result);
+      } catch (error) {
+        results.push({
+          command,
+          success: false,
+          error: (error && error.message) || 'Command execution failed',
+        });
+      }
+
+      job.results = results;
+      job.updatedAt = Date.now();
+    }
+
+    job.results = results;
+    job.success = results.every((r) => r.success);
+    job.status = 'done';
+    job.finishedAt = Date.now();
+    job.updatedAt = Date.now();
+  };
+
+  app.post('/api/fs/exec', async (req, res) => {
+    const { commands, cwd, background } = req.body || {};
+    if (!Array.isArray(commands) || commands.length === 0) {
+      return res.status(400).json({ error: 'Commands array is required' });
+    }
+    if (!cwd || typeof cwd !== 'string') {
+      return res.status(400).json({ error: 'Working directory (cwd) is required' });
+    }
+
+    pruneExecJobs();
+
+    try {
+      const resolvedCwd = path.resolve(normalizeDirectoryPath(cwd));
+      const stats = await fsPromises.stat(resolvedCwd);
+      if (!stats.isDirectory()) {
+        return res.status(400).json({ error: 'Specified cwd is not a directory' });
+      }
+
+      const shell = process.env.SHELL || (process.platform === 'win32' ? 'cmd.exe' : '/bin/sh');
+      const shellFlag = process.platform === 'win32' ? '/c' : '-c';
+
+      const jobId = crypto.randomUUID();
+      const job = {
+        jobId,
+        status: 'queued',
+        success: null,
+        commands,
+        resolvedCwd,
+        shell,
+        shellFlag,
+        results: [],
+        startedAt: Date.now(),
+        finishedAt: null,
+        updatedAt: Date.now(),
+      };
+
+      execJobs.set(jobId, job);
+
+      const isBackground = background === true;
+      if (isBackground) {
+        void runExecJob(job).catch((error) => {
+          job.status = 'done';
+          job.success = false;
+          job.results = Array.isArray(job.results) ? job.results : [];
+          job.results.push({
+            command: '',
+            success: false,
+            error: (error && error.message) || 'Command execution failed',
+          });
+          job.finishedAt = Date.now();
+          job.updatedAt = Date.now();
+        });
+
+        return res.status(202).json({
+          jobId,
+          status: 'running',
+        });
+      }
+
+      await runExecJob(job);
+      res.json({
+        jobId,
+        status: job.status,
+        success: job.success === true,
+        results: job.results,
+      });
+    } catch (error) {
+      console.error('Failed to execute commands:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to execute commands' });
+    }
+  });
+
+  app.get('/api/fs/exec/:jobId', (req, res) => {
+    const jobId = typeof req.params?.jobId === 'string' ? req.params.jobId : '';
+    if (!jobId) {
+      return res.status(400).json({ error: 'Job id is required' });
+    }
+
+    pruneExecJobs();
+
+    const job = execJobs.get(jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    job.updatedAt = Date.now();
+
+    return res.json({
+      jobId: job.jobId,
+      status: job.status,
+      success: job.success === true,
+      results: Array.isArray(job.results) ? job.results : [],
+    });
+  });
+
+  app.post('/api/opencode/directory', async (req, res) => {
+    try {
+      const requestedPath = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
+      if (!requestedPath) {
+        return res.status(400).json({ error: 'Path is required' });
+      }
+
+      const validated = await validateDirectoryPath(requestedPath);
+      if (!validated.ok) {
+        return res.status(400).json({ error: validated.error });
+      }
+
+      const resolvedPath = validated.directory;
+      const currentSettings = await readSettingsFromDisk();
+      const existingProjects = sanitizeProjects(currentSettings.projects) || [];
+      const existing = existingProjects.find((project) => project.path === resolvedPath) || null;
+
+      const nextProjects = existing
+        ? existingProjects
+        : [
+            ...existingProjects,
+            {
+              id: crypto.randomUUID(),
+              path: resolvedPath,
+              addedAt: Date.now(),
+              lastOpenedAt: Date.now(),
+            },
+          ];
+
+      const activeProjectId = existing ? existing.id : nextProjects[nextProjects.length - 1].id;
+
+      const updated = await persistSettings({
+        projects: nextProjects,
+        activeProjectId,
+        lastDirectory: resolvedPath,
+      });
+
+      res.json({
+        success: true,
+        restarted: false,
+        path: resolvedPath,
+        settings: updated,
+      });
+    } catch (error) {
+      console.error('Failed to update OpenCode working directory:', error);
+      res.status(500).json({ error: error.message || 'Failed to update working directory' });
+    }
+  });
+
+  app.get('/api/fs/list', async (req, res) => {
+    const rawPath = typeof req.query.path === 'string' && req.query.path.trim().length > 0
+      ? req.query.path.trim()
+      : os.homedir();
+    const respectGitignore = req.query.respectGitignore === 'true';
+    let resolvedPath = '';
+
+    const isPlansDirectory = (value) => {
+      if (!value || typeof value !== 'string') return false;
+      const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+      return normalized.endsWith('/.opencode/plans') || normalized.endsWith('.opencode/plans');
+    };
+
+    try {
+      resolvedPath = path.resolve(normalizeDirectoryPath(rawPath));
+
+      const stats = await fsPromises.stat(resolvedPath);
+      if (!stats.isDirectory()) {
+        return res.status(400).json({ error: 'Specified path is not a directory' });
+      }
+
+      const dirents = await fsPromises.readdir(resolvedPath, { withFileTypes: true });
+
+      // Get gitignored paths if requested
+      let ignoredPaths = new Set();
+      if (respectGitignore) {
+        try {
+          // Get all entry paths to check (relative to resolvedPath for git check-ignore)
+          const pathsToCheck = dirents.map((d) => d.name);
+
+          if (pathsToCheck.length > 0) {
+            try {
+              // Use git check-ignore with paths as arguments
+              // Pass paths directly as arguments (works for reasonable directory sizes)
+              const result = await new Promise((resolve) => {
+                const child = spawn('git', ['check-ignore', '--', ...pathsToCheck], {
+                  cwd: resolvedPath,
+                  stdio: ['ignore', 'pipe', 'pipe'],
+                });
+
+                let stdout = '';
+                child.stdout.on('data', (data) => { stdout += data.toString(); });
+                child.on('close', () => resolve(stdout));
+                child.on('error', () => resolve(''));
+              });
+
+              result.split('\n').filter(Boolean).forEach((name) => {
+                const fullPath = path.join(resolvedPath, name.trim());
+                ignoredPaths.add(fullPath);
+              });
+            } catch {
+              // git check-ignore fails if not a git repo, continue without filtering
+            }
+          }
+        } catch {
+          // If git is not available, continue without gitignore filtering
+        }
+      }
+
+      const entries = await Promise.all(
+        dirents.map(async (dirent) => {
+          const entryPath = path.join(resolvedPath, dirent.name);
+
+          // Skip gitignored entries
+          if (respectGitignore && ignoredPaths.has(entryPath)) {
+            return null;
+          }
+
+          let isDirectory = dirent.isDirectory();
+          const isSymbolicLink = dirent.isSymbolicLink();
+
+          if (!isDirectory && isSymbolicLink) {
+            try {
+              const linkStats = await fsPromises.stat(entryPath);
+              isDirectory = linkStats.isDirectory();
+            } catch {
+              isDirectory = false;
+            }
+          }
+
+          return {
+            name: dirent.name,
+            path: entryPath,
+            isDirectory,
+            isFile: dirent.isFile(),
+            isSymbolicLink
+          };
+        })
+      );
+
+      res.json({
+        path: resolvedPath,
+        entries: entries.filter(Boolean)
+      });
+    } catch (error) {
+      const err = error;
+      const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
+      const isPlansPath = code === 'ENOENT' && (isPlansDirectory(resolvedPath) || isPlansDirectory(rawPath));
+      if (!isPlansPath) {
+        console.error('Failed to list directory:', error);
+      }
+      if (code === 'ENOENT') {
+        // Return empty result for plans directory (expected to not exist until first use)
+        if (isPlansPath) {
+          return res.json({ path: resolvedPath || rawPath, entries: [] });
+        }
+        return res.status(404).json({ error: 'Directory not found' });
+      }
+      if (code === 'EACCES') {
+        return res.status(403).json({ error: 'Access to directory denied' });
+      }
+      res.status(500).json({ error: (error && error.message) || 'Failed to list directory' });
+    }
+  });
+
+  let ptyProviderPromise = null;
+  const getPtyProvider = async () => {
+    if (ptyProviderPromise) {
+      return ptyProviderPromise;
+    }
+
+    ptyProviderPromise = (async () => {
+      const isBunRuntime = typeof globalThis.Bun !== 'undefined';
+
+      if (isBunRuntime) {
+        try {
+          const bunPty = await import('bun-pty');
+          console.log('Using bun-pty for terminal sessions');
+          return { spawn: bunPty.spawn, backend: 'bun-pty' };
+        } catch (error) {
+          console.warn('bun-pty unavailable, falling back to node-pty');
+        }
+      }
+
+      try {
+        const nodePty = await import('node-pty');
+        console.log('Using node-pty for terminal sessions');
+        return { spawn: nodePty.spawn, backend: 'node-pty' };
+      } catch (error) {
+        console.error('Failed to load node-pty:', error && error.message ? error.message : error);
+        if (isBunRuntime) {
+          throw new Error('No PTY backend available. Install bun-pty or node-pty.');
+        }
+        throw new Error('node-pty is not available. Run: npm rebuild node-pty (or install Bun for bun-pty)');
+      }
+    })();
+
+    return ptyProviderPromise;
+  };
+
+  const getTerminalShellCandidates = () => {
+    if (process.platform === 'win32') {
+      const windowsCandidates = [
+        process.env.OPENCHAMBER_TERMINAL_SHELL,
+        process.env.SHELL,
+        process.env.ComSpec,
+        path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        'pwsh.exe',
+        'powershell.exe',
+        'cmd.exe',
+      ].filter(Boolean);
+
+      const resolved = [];
+      const seen = new Set();
+      for (const candidateRaw of windowsCandidates) {
+        const candidate = String(candidateRaw).trim();
+        if (!candidate) continue;
+
+        const lookedUp = candidate.includes('\\') || candidate.includes('/')
+          ? candidate
+          : searchPathFor(candidate);
+        const executable = lookedUp && isExecutable(lookedUp) ? lookedUp : (isExecutable(candidate) ? candidate : null);
+        if (!executable || seen.has(executable)) continue;
+        seen.add(executable);
+        resolved.push(executable);
+      }
+      return resolved;
+    }
+
+    const unixCandidates = [
+      process.env.OPENCHAMBER_TERMINAL_SHELL,
+      process.env.SHELL,
+      '/bin/zsh',
+      '/bin/bash',
+      '/bin/sh',
+      'zsh',
+      'bash',
+      'sh',
+    ].filter(Boolean);
+
+    const resolved = [];
+    const seen = new Set();
+    for (const candidateRaw of unixCandidates) {
+      const candidate = String(candidateRaw).trim();
+      if (!candidate) continue;
+
+      const lookedUp = candidate.includes('/') ? candidate : searchPathFor(candidate);
+      const executable = lookedUp && isExecutable(lookedUp) ? lookedUp : (isExecutable(candidate) ? candidate : null);
+      if (!executable || seen.has(executable)) continue;
+      seen.add(executable);
+      resolved.push(executable);
+    }
+
+    return resolved;
+  };
+
+  const spawnTerminalPtyWithFallback = (pty, { cols, rows, cwd, env }) => {
+    const shellCandidates = getTerminalShellCandidates();
+    if (shellCandidates.length === 0) {
+      throw new Error('No executable shell found for terminal session');
+    }
+
+    let lastError = null;
+    for (const shell of shellCandidates) {
+      try {
+        const ptyProcess = pty.spawn(shell, [], {
+          name: 'xterm-256color',
+          cols: cols || 80,
+          rows: rows || 24,
+          cwd,
+          env: {
+            ...env,
+            TERM: 'xterm-256color',
+            COLORTERM: 'truecolor',
+          },
+        });
+
+        return { ptyProcess, shell };
+      } catch (error) {
+        lastError = error;
+        console.warn(`Failed to spawn PTY using shell ${shell}:`, error && error.message ? error.message : error);
+      }
+    }
+
+    const baseMessage = lastError && lastError.message ? lastError.message : 'PTY spawn failed';
+    throw new Error(`Failed to spawn terminal PTY with available shells (${shellCandidates.join(', ')}): ${baseMessage}`);
+  };
+
+  const terminalSessions = new Map();
+  const MAX_TERMINAL_SESSIONS = 20;
+  const TERMINAL_IDLE_TIMEOUT = 30 * 60 * 1000;
+  const sanitizeTerminalEnv = (env) => {
+    const next = { ...env };
+    delete next.BASH_XTRACEFD;
+    delete next.BASH_ENV;
+    delete next.ENV;
+    return next;
+  };
+  const terminalInputCapabilities = {
+    input: {
+      preferred: 'ws',
+      transports: ['http', 'ws'],
+      ws: {
+        path: TERMINAL_INPUT_WS_PATH,
+        v: 1,
+        enc: 'text+json-bin-control',
+      },
     },
     verboseRequestLogs: OPENCHAMBER_VERBOSE_REQUEST_LOGS,
     uiPassword,
@@ -8924,6 +12797,369 @@ async function main(options = {}) {
   } catch (error) {
     console.warn('[ScheduledTasks] Failed to start runtime:', error?.message || error);
   }
+
+  const distPath = (() => {
+    const env = typeof process.env.OPENCHAMBER_DIST_DIR === 'string' ? process.env.OPENCHAMBER_DIST_DIR.trim() : '';
+    if (env) {
+      return path.resolve(env);
+    }
+    return path.join(__dirname, '..', 'dist');
+  })();
+
+    // Always register static middleware — express.static gracefully handles a
+    // missing directory (returns 404 per-file), so this works even when the
+    // build hasn't completed yet.  Once `dist/` appears the files are served
+    // immediately without a server restart.
+    if (fs.existsSync(distPath)) {
+      console.log(`Serving static files from ${distPath}`);
+    } else {
+      console.warn(`Warning: ${distPath} not found yet — static files will be served once the build completes`);
+    }
+
+    app.use(express.static(distPath, {
+      setHeaders(res, filePath) {
+        // Service workers should never be long-cached; iOS is especially sensitive.
+        if (typeof filePath === 'string' && filePath.endsWith(`${path.sep}sw.js`)) {
+          res.setHeader('Cache-Control', 'no-store');
+        }
+      },
+    }));
+      const recentPwaSessionsCache = new Map();
+
+      const getRecentPwaSessionShortcuts = async (req) => {
+        const now = Date.now();
+
+        const resolvedDirectoryResult = await resolveProjectDirectory(req).catch(() => ({ directory: null }));
+        const preferredDirectory = typeof resolvedDirectoryResult?.directory === 'string'
+          ? resolvedDirectoryResult.directory
+          : null;
+
+        const cacheKey = preferredDirectory ? `dir:${preferredDirectory}` : 'global';
+        const cached = recentPwaSessionsCache.get(cacheKey);
+        if (cached && now - cached.at < 5000) {
+          return cached.data;
+        }
+
+        const normalizeShortcutTitle = (value, fallback) => {
+          const normalized = normalizePwaAppName(value, fallback);
+          return normalized.length > 48 ? normalized.slice(0, 48) : normalized;
+        };
+
+        const toFiniteNumber = (value) => {
+          if (typeof value === 'number' && Number.isFinite(value)) {
+            return value;
+          }
+          if (typeof value === 'string' && value.trim().length > 0) {
+            const parsed = Number(value);
+            if (Number.isFinite(parsed)) {
+              return parsed;
+            }
+          }
+          return null;
+        };
+
+        const normalizeDirectory = (value) => {
+          if (typeof value !== 'string') {
+            return '';
+          }
+          const trimmed = value.trim();
+          if (!trimmed) {
+            return '';
+          }
+          const normalized = trimmed.replace(/\\/g, '/');
+          if (normalized === '/') {
+            return '/';
+          }
+          return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+        };
+
+        const sessionUpdatedAt = (session) => {
+          const time = session && typeof session.time === 'object' ? session.time : null;
+          return toFiniteNumber(time?.updated) ?? toFiniteNumber(time?.created) ?? 0;
+        };
+
+        const filterSessionsByDirectory = (sessions, directory) => {
+          const normalizedDirectory = normalizeDirectory(directory);
+          if (!normalizedDirectory) {
+            return sessions;
+          }
+
+          const prefix = normalizedDirectory === '/' ? '/' : `${normalizedDirectory}/`;
+          return sessions.filter((session) => {
+            const sessionDirectory = normalizeDirectory(session?.directory);
+            if (!sessionDirectory) {
+              return false;
+            }
+            return sessionDirectory === normalizedDirectory || (prefix !== '/' && sessionDirectory.startsWith(prefix));
+          });
+        };
+
+        const listSessions = async (directory) => {
+          const query = (() => {
+            if (typeof directory !== 'string' || directory.length === 0) {
+              return '';
+            }
+            const preparedDirectory = process.platform === 'win32'
+              ? directory.replace(/\//g, '\\')
+              : directory;
+            return `?directory=${encodeURIComponent(preparedDirectory)}`;
+          })();
+
+          const response = await fetch(buildOpenCodeUrl(`/session${query}`, ''), {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              ...getOpenCodeAuthHeaders(),
+            },
+            signal: AbortSignal.timeout(2500),
+          });
+
+          if (!response.ok) {
+            return [];
+          }
+
+          const payload = await response.json().catch(() => null);
+          return Array.isArray(payload) ? payload : [];
+        };
+
+        try {
+          let payload = [];
+
+          if (preferredDirectory) {
+            const scopedPayload = await listSessions(preferredDirectory);
+            const filteredScopedPayload = filterSessionsByDirectory(scopedPayload, preferredDirectory);
+
+            if (filteredScopedPayload.length > 0) {
+              payload = filteredScopedPayload;
+            } else {
+              const globalPayload = await listSessions(null);
+              const filteredGlobalPayload = filterSessionsByDirectory(globalPayload, preferredDirectory);
+              payload = filteredGlobalPayload.length > 0 ? filteredGlobalPayload : globalPayload;
+            }
+          } else {
+            payload = await listSessions(null);
+          }
+
+          const seen = new Set();
+          const rows = [];
+
+          for (const item of payload) {
+            if (!item || typeof item !== 'object') {
+              continue;
+            }
+
+            const id = typeof item.id === 'string' ? item.id.trim().slice(0, 160) : '';
+            if (!id || seen.has(id)) {
+              continue;
+            }
+
+            seen.add(id);
+            const title = normalizeShortcutTitle(item.title, `Session ${rows.length + 1}`);
+            const updatedAt = sessionUpdatedAt(item);
+
+            rows.push({ id, title, updatedAt });
+          }
+
+          rows.sort((a, b) => b.updatedAt - a.updatedAt);
+
+          const shortcuts = rows.slice(0, 3).map((session) => ({
+            name: session.title,
+            short_name: session.title.length > 32 ? session.title.slice(0, 32) : session.title,
+            description: 'Open recent session',
+            url: `/?session=${encodeURIComponent(session.id)}`,
+            icons: [{ src: '/pwa-192.png', sizes: '192x192', type: 'image/png' }],
+          }));
+
+          recentPwaSessionsCache.set(cacheKey, { at: now, data: shortcuts });
+          return shortcuts;
+        } catch {
+          recentPwaSessionsCache.set(cacheKey, { at: now, data: [] });
+          return [];
+        }
+      };
+
+      app.get('/manifest.webmanifest', async (req, res) => {
+        const hasQueryOverride =
+          typeof req.query?.pwa_name === 'string'
+          || typeof req.query?.app_name === 'string'
+          || typeof req.query?.appName === 'string';
+
+        let queryValueRaw = '';
+        if (typeof req.query?.pwa_name === 'string') {
+          queryValueRaw = req.query.pwa_name;
+        } else if (typeof req.query?.app_name === 'string') {
+          queryValueRaw = req.query.app_name;
+        } else if (typeof req.query?.appName === 'string') {
+          queryValueRaw = req.query.appName;
+        }
+
+        const queryOverrideName = normalizePwaAppName(queryValueRaw, '');
+
+        let storedName = '';
+        try {
+          const settings = await readSettingsFromDiskMigrated();
+          storedName = normalizePwaAppName(settings?.pwaAppName, '');
+        } catch {
+          storedName = '';
+        }
+
+        const appName = hasQueryOverride
+          ? (queryOverrideName || DEFAULT_PWA_APP_NAME)
+          : (storedName || DEFAULT_PWA_APP_NAME);
+
+        const shortName = appName.length > 30 ? appName.slice(0, 30) : appName;
+        const recentSessionShortcuts = await getRecentPwaSessionShortcuts(req);
+
+        const manifest = {
+          name: appName,
+          short_name: shortName,
+          description: 'Web interface companion for OpenCode AI coding agent',
+          id: '/',
+          start_url: '/',
+          scope: '/',
+          display: 'standalone',
+          background_color: '#151313',
+          theme_color: '#edb449',
+          orientation: 'any',
+          icons: [
+            { src: '/pwa-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+            { src: '/pwa-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+            { src: '/pwa-maskable-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+            { src: '/pwa-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+            { src: '/apple-touch-icon-180x180.png', sizes: '180x180', type: 'image/png', purpose: 'any' },
+            { src: '/apple-touch-icon-152x152.png', sizes: '152x152', type: 'image/png', purpose: 'any' },
+            { src: '/favicon-32.png', sizes: '32x32', type: 'image/png' },
+            { src: '/favicon-16.png', sizes: '16x16', type: 'image/png' },
+          ],
+          shortcuts: [
+            {
+              name: 'Appearance Settings',
+              short_name: 'Settings',
+              description: 'Open appearance settings',
+              url: '/?settings=appearance',
+              icons: [{ src: '/pwa-192.png', sizes: '192x192', type: 'image/png' }],
+            },
+            ...recentSessionShortcuts,
+          ],
+          categories: ['developer', 'tools', 'productivity'],
+          lang: 'en',
+        };
+
+        res.setHeader('Cache-Control', 'no-store, must-revalidate');
+        res.type('application/manifest+json');
+        res.send(JSON.stringify(manifest));
+      });
+
+    // Alias for PWA manifest (.webmanifest redirect → /site.webmanifest)
+    app.get('/manifest.webmanifest', (req, res) => {
+      res.redirect(301, '/site.webmanifest');
+    });
+
+    // SPA fallback — serve index.html for non-API/non-asset routes, but only
+    // once the build output actually exists.  Before that, return a helpful
+    // message so the developer knows the build is still in progress.
+    app.get(/^(?!\/api|.*\.(js|css|svg|png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|map)).*$/, (req, res) => {
+      const indexPath = path.join(distPath, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(503).send('Build in progress. Please wait for the build to complete and then refresh.');
+      }
+    });
+
+  let activePort = port;
+
+  const bindHost = typeof process.env.OPENCHAMBER_HOST === 'string' && process.env.OPENCHAMBER_HOST.trim().length > 0
+    ? process.env.OPENCHAMBER_HOST.trim()
+    : null;
+
+  await new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off('error', onError);
+      reject(error);
+    };
+    server.once('error', onError);
+    const onListening = async () => {
+      server.off('error', onError);
+      const addressInfo = server.address();
+      activePort = typeof addressInfo === 'object' && addressInfo ? addressInfo.port : port;
+
+      try {
+        process.send?.({ type: 'openchamber:ready', port: activePort });
+      } catch {
+        // ignore
+      }
+
+      console.log(`OpenChamber server running on port ${activePort}`);
+      console.log(`Health check: http://localhost:${activePort}/health`);
+      console.log(`Web interface: http://localhost:${activePort}`);
+
+      if (tryCfTunnel) {
+        console.log('\nInitializing Cloudflare Quick Tunnel...');
+        const cfCheck = await checkCloudflaredAvailable();
+        if (cfCheck.available) {
+          try {
+            const originUrl = `http://localhost:${activePort}`;
+            cloudflareTunnelController = await startCloudflareQuickTunnel({ originUrl, port: activePort });
+            printTunnelWarning();
+            const tunnelUrl = cloudflareTunnelController.getPublicUrl();
+            if (tunnelUrl) {
+              tunnelAuthController.setActiveTunnel({
+                tunnelId: crypto.randomUUID(),
+                publicUrl: tunnelUrl,
+                mode: TUNNEL_MODE_QUICK,
+              });
+              const settings = await readSettingsFromDiskMigrated();
+              const bootstrapTtlMs = settings?.tunnelBootstrapTtlMs === null
+                ? null
+                : normalizeTunnelBootstrapTtlMs(settings?.tunnelBootstrapTtlMs);
+              const bootstrapToken = tunnelAuthController.issueBootstrapToken({ ttlMs: bootstrapTtlMs });
+              const connectUrl = `${tunnelUrl.replace(/\/$/, '')}/connect?t=${encodeURIComponent(bootstrapToken.token)}`;
+              if (onTunnelReady) {
+                onTunnelReady(tunnelUrl, connectUrl);
+              } else {
+                console.log(`\n🌐 Tunnel URL: ${connectUrl}`);
+                console.log('🔑 One-time connect link (expires after first use)\n');
+              }
+            } else if (onTunnelReady) {
+              onTunnelReady(tunnelUrl, null);
+            }
+          } catch (error) {
+            console.error(`Failed to start Cloudflare tunnel: ${error.message}`);
+            console.log('Continuing without tunnel...');
+          }
+        }
+      }
+
+      resolve();
+    };
+
+    if (bindHost) {
+      server.listen(port, bindHost, onListening);
+    } else {
+      server.listen(port, onListening);
+    }
+  });
+
+  if (attachSignals && !signalsAttached) {
+    const handleSignal = async () => {
+      await gracefulShutdown();
+    };
+    process.on('SIGTERM', handleSignal);
+    process.on('SIGINT', handleSignal);
+    process.on('SIGQUIT', handleSignal);
+    signalsAttached = true;
+    syncToHmrState();
+  }
+
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  });
+
+  process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    gracefulShutdown();
+  });
 
   return {
     expressApp: app,

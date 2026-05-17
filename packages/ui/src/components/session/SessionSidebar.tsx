@@ -2,7 +2,7 @@ import React from 'react';
 import type { Session } from '@opencode-ai/sdk/v2';
 import { toast } from '@/components/ui';
 import { copyTextToClipboard } from '@/lib/clipboard';
-import { isDesktopLocalOriginActive, isDesktopShell, isMobileRuntime as detectMobileRuntime, isTauriShell, isVSCodeRuntime } from '@/lib/desktop';
+import { isDesktopLocalOriginActive, isDesktopShell, isTauriShell, requestDirectoryAccess } from '@/lib/desktop';
 import {
   DndContext,
   DragOverlay,
@@ -60,8 +60,7 @@ import {
   RiFolderAddLine,
   RiFolderLine,
   RiGitBranchLine,
-  RiGitPullRequestLine,
-  RiGitRepositoryLine,
+  RiLoopLeftLine,
   RiNodeTree,
   RiStickyNoteLine,
   RiLinkUnlinkM,
@@ -84,6 +83,7 @@ import { useSync } from '@/sync/use-sync';
 import { useSessionPrefetch } from './sidebar/hooks/useSessionPrefetch';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
+import { useAgentLoopStore } from '@/stores/useAgentLoopStore';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useInstancesStore } from '@/stores/useInstancesStore';
 import type { WorktreeMetadata } from '@/types/worktree';
@@ -215,7 +215,570 @@ const isKnownActiveSessionDirectory = (session: Session, knownDirectories: Set<s
   return knownDirectories.has(directory);
 };
 
-const SIDEBAR_PR_NO_PR_RETRY_MS = 5 * 60_000;
+const getSessionUpdatedAt = (session: Session): number => {
+  return toFiniteNumber(session.time?.updated) ?? toFiniteNumber(session.time?.created) ?? 0;
+};
+
+const compareSessionsByPinnedAndTime = (
+  a: Session,
+  b: Session,
+  pinnedSessionIds: Set<string>
+): number => {
+  const aPinned = pinnedSessionIds.has(a.id);
+  const bPinned = pinnedSessionIds.has(b.id);
+  if (aPinned !== bPinned) {
+    return aPinned ? -1 : 1;
+  }
+
+  if (aPinned && bPinned) {
+    return getSessionCreatedAt(b) - getSessionCreatedAt(a);
+  }
+
+  return getSessionUpdatedAt(b) - getSessionUpdatedAt(a);
+};
+
+// Format project label: kebab-case/snake_case → Title Case
+const formatProjectLabel = (label: string): string => {
+  return label
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const renderHighlightedText = (text: string, query: string): React.ReactNode => {
+  if (!query) {
+    return text;
+  }
+
+  const loweredText = text.toLowerCase();
+  const loweredQuery = query.toLowerCase();
+  const queryLength = loweredQuery.length;
+  if (queryLength === 0) {
+    return text;
+  }
+
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let matchIndex = loweredText.indexOf(loweredQuery, cursor);
+
+  while (matchIndex !== -1) {
+    if (matchIndex > cursor) {
+      parts.push(text.slice(cursor, matchIndex));
+    }
+    const matchText = text.slice(matchIndex, matchIndex + queryLength);
+    parts.push(
+      <mark
+        key={`${matchIndex}-${matchText}`}
+        className="bg-primary text-primary-foreground ring-1 ring-primary/90"
+      >
+        {matchText}
+      </mark>,
+    );
+    cursor = matchIndex + queryLength;
+    matchIndex = loweredText.indexOf(loweredQuery, cursor);
+  }
+
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+
+  return parts.length > 0 ? parts : text;
+};
+
+type SessionNode = {
+  session: Session;
+  children: SessionNode[];
+  worktree: WorktreeMetadata | null;
+};
+
+type SessionGroup = {
+  id: string;
+  label: string;
+  branch: string | null;
+  description: string | null;
+  isMain: boolean;
+  worktree: WorktreeMetadata | null;
+  directory: string | null;
+  sessions: SessionNode[];
+};
+
+type GroupSearchData = {
+  filteredNodes: SessionNode[];
+  matchedSessionCount: number;
+  folderNameMatchCount: number;
+  groupMatches: boolean;
+  hasMatch: boolean;
+};
+
+// --- Session Folder DnD helpers ---
+
+/**
+ * Wraps a session row so the entire row is draggable onto folder drop zones.
+ * Stops pointer propagation so the outer group-reorder DndContext does not
+ * capture the drag (otherwise dragging a session moves the whole workspace group).
+ */
+const DraggableSessionRow: React.FC<{
+  sessionId: string;
+  sessionDirectory: string | null;
+  sessionTitle: string;
+  children: React.ReactNode;
+}> = ({ sessionId, sessionDirectory, sessionTitle, children }) => {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `session-drag:${sessionId}`,
+    data: { type: 'session', sessionId, sessionDirectory, sessionTitle },
+  });
+
+  const handlePointerDown = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      // Stop event from bubbling to the outer group-reorder DndContext
+      e.stopPropagation();
+      if (listeners?.onPointerDown) {
+        (listeners.onPointerDown as (event: React.PointerEvent) => void)(e);
+      }
+    },
+    [listeners],
+  );
+
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      onPointerDown={handlePointerDown}
+      className={isDragging ? 'opacity-30' : undefined}
+    >
+      {children}
+    </div>
+  );
+};
+
+/**
+ * Wraps a <SessionFolderItem> and makes it a droppable target.
+ * Uses a render-prop pattern so the ref/isOver state can be passed
+ * down as props (avoids hooks-in-callbacks restrictions).
+ */
+const DroppableFolderWrapper: React.FC<{
+  folderId: string;
+  children: (
+    droppableRef: (node: HTMLElement | null) => void,
+    isOver: boolean,
+  ) => React.ReactNode;
+}> = ({ folderId, children }) => {
+  const { setNodeRef, isOver } = useDroppable({
+    id: `folder-drop:${folderId}`,
+    data: { type: 'folder', folderId },
+  });
+  return <>{children(setNodeRef, isOver)}</>;
+};
+
+/**
+ * Provides an inner DndContext scoped to one group, allowing sessions to be
+ * dragged onto folder headers within that group.
+ */
+const SessionFolderDndScope: React.FC<{
+  scopeKey: string | null;
+  hasFolders: boolean;
+  onSessionDroppedOnFolder: (sessionId: string, folderId: string) => void;
+  children: React.ReactNode;
+}> = ({ scopeKey, hasFolders, onSessionDroppedOnFolder, children }) => {
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+  );
+  const [activeDragId, setActiveDragId] = React.useState<string | null>(null);
+  const [activeDragTitle, setActiveDragTitle] = React.useState<string>('Session');
+  const [activeDragWidth, setActiveDragWidth] = React.useState<number | null>(null);
+  const [activeDragHeight, setActiveDragHeight] = React.useState<number | null>(null);
+
+  // Always need DndContext when scopeKey exists (DraggableSessionRow requires it).
+  // When there are no folders the drag just has nowhere to land – that's fine.
+  if (!scopeKey) {
+    return <>{children}</>;
+  }
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    setActiveDragId(null);
+    setActiveDragWidth(null);
+    setActiveDragHeight(null);
+    const { active, over } = event;
+    if (!over) return;
+    const activeData = active.data.current as { type?: string; sessionId?: string } | undefined;
+    const overData = over.data.current as { type?: string; folderId?: string } | undefined;
+    if (activeData?.type === 'session' && activeData.sessionId && overData?.type === 'folder' && overData.folderId) {
+      onSessionDroppedOnFolder(activeData.sessionId, overData.folderId);
+    }
+  };
+
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragStart={(event) => {
+        const data = event.active.data.current as { type?: string; sessionId?: string; sessionTitle?: string } | undefined;
+        if (data?.type === 'session' && data.sessionId) {
+          setActiveDragId(data.sessionId);
+          setActiveDragTitle(data.sessionTitle ?? 'Session');
+          const width = event.active.rect.current.initial?.width;
+          const height = event.active.rect.current.initial?.height;
+          setActiveDragWidth(typeof width === 'number' ? width : null);
+          setActiveDragHeight(typeof height === 'number' ? height : null);
+        }
+      }}
+      onDragCancel={() => {
+        setActiveDragId(null);
+        setActiveDragWidth(null);
+        setActiveDragHeight(null);
+      }}
+      onDragEnd={handleDragEnd}
+    >
+      {children}
+      <DragOverlay>
+        {activeDragId && hasFolders ? (
+          <div
+            style={{
+              width: activeDragWidth ? `${activeDragWidth}px` : 'auto',
+              height: activeDragHeight ? `${activeDragHeight}px` : 'auto'
+            }}
+            className="flex items-center rounded-lg border border-[var(--interactive-border)] bg-[var(--surface-elevated)] px-2.5 py-1 shadow-none pointer-events-none"
+          >
+            <RiStickyNoteLine className="h-4 w-4 text-muted-foreground mr-2 flex-shrink-0" />
+            <div className="min-w-0 flex-1 truncate typography-ui-label font-normal text-foreground">
+              {activeDragTitle}
+            </div>
+          </div>
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  );
+};
+
+// --- End Session Folder DnD helpers ---
+
+interface SortableProjectItemProps {
+  id: string;
+  projectLabel: string;
+  projectDescription: string;
+  isCollapsed: boolean;
+  isActiveProject: boolean;
+  isRepo: boolean;
+  isHovered: boolean;
+  isDesktopShell: boolean;
+  isStuck: boolean;
+  hideDirectoryControls: boolean;
+  mobileVariant: boolean;
+  onToggle: () => void;
+  onHoverChange: (hovered: boolean) => void;
+  onNewSession: () => void;
+  onNewWorktreeSession?: () => void;
+  onOpenMultiRunLauncher: () => void;
+  onOpenAgentLoopLauncher: () => void;
+  onRenameStart: () => void;
+  onRenameSave: () => void;
+  onRenameCancel: () => void;
+  onRenameValueChange: (value: string) => void;
+  renameValue: string;
+  isRenaming: boolean;
+  onClose: () => void;
+  sentinelRef: (el: HTMLDivElement | null) => void;
+  children?: React.ReactNode;
+  settingsAutoCreateWorktree: boolean;
+  showCreateButtons?: boolean;
+  hideHeader?: boolean;
+}
+
+const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
+  id,
+  projectLabel,
+  projectDescription,
+  isCollapsed,
+  isActiveProject,
+  isRepo,
+  isHovered,
+  isDesktopShell,
+  isStuck,
+  hideDirectoryControls,
+  mobileVariant,
+  onToggle,
+  onHoverChange,
+  onNewSession,
+  onNewWorktreeSession,
+  onOpenMultiRunLauncher,
+  onOpenAgentLoopLauncher,
+  onRenameStart,
+  onRenameSave,
+  onRenameCancel,
+  onRenameValueChange,
+  renameValue,
+  isRenaming,
+  onClose,
+  sentinelRef,
+  children,
+  settingsAutoCreateWorktree,
+  showCreateButtons = true,
+  hideHeader = false,
+}) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  const [isMenuOpen, setIsMenuOpen] = React.useState(false);
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={cn('relative', isDragging && 'opacity-30')}
+    >
+      {!hideHeader ? (
+        <>
+          {/* Sentinel for sticky detection */}
+          {isDesktopShell && (
+            <div
+              ref={sentinelRef}
+              data-project-id={id}
+              className="absolute top-0 h-px w-full pointer-events-none"
+              aria-hidden="true"
+            />
+          )}
+
+          {/* Project header - sticky like workspace groups */}
+          <div
+            className={cn(
+              'sticky top-0 z-10 pt-2 pb-1.5 w-full text-left cursor-pointer group/project border-b select-none',
+              !isDesktopShell && 'bg-transparent',
+            )}
+            style={{
+              backgroundColor: isDesktopShell
+                ? (isStuck ? 'transparent' : 'transparent')
+                : undefined,
+              borderColor: isHovered
+                ? 'var(--color-border-hover)'
+                : isCollapsed
+                  ? 'color-mix(in srgb, var(--color-border) 35%, transparent)'
+                  : 'var(--color-border)'
+            }}
+            onMouseEnter={() => onHoverChange(true)}
+            onMouseLeave={() => onHoverChange(false)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              if (!isRenaming) {
+                setIsMenuOpen(true);
+              }
+            }}
+          >
+        <div className="relative flex items-center gap-1 px-1" {...attributes}>
+          {isRenaming ? (
+            <form
+              className="flex min-w-0 flex-1 items-center gap-2"
+              data-keyboard-avoid="true"
+              onSubmit={(event) => {
+                event.preventDefault();
+                onRenameSave();
+              }}
+            >
+              <input
+                value={renameValue}
+                onChange={(event) => onRenameValueChange(event.target.value)}
+                className="flex-1 min-w-0 bg-transparent typography-ui-label outline-none placeholder:text-muted-foreground"
+                autoFocus
+                placeholder="Rename project"
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.stopPropagation();
+                    onRenameCancel();
+                    return;
+                  }
+                  if (event.key === ' ' || event.key === 'Enter') {
+                    event.stopPropagation();
+                  }
+                }}
+              />
+              <button
+                type="submit"
+                className="shrink-0 text-muted-foreground hover:text-foreground"
+              >
+                <RiCheckLine className="size-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onRenameCancel}
+                className="shrink-0 text-muted-foreground hover:text-foreground"
+              >
+                <RiCloseLine className="size-4" />
+              </button>
+            </form>
+          ) : (
+            <Tooltip delayDuration={1500}>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={onToggle}
+                  {...listeners}
+                  className="flex-1 min-w-0 flex items-center gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded-sm cursor-grab active:cursor-grabbing"
+                >
+                  <span className={cn(
+                    "typography-ui font-semibold truncate",
+                    isActiveProject ? "text-primary" : "text-foreground group-hover/project:text-foreground"
+                  )}>
+                    {projectLabel}
+                  </span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right" sideOffset={8}>
+                {projectDescription}
+              </TooltipContent>
+            </Tooltip>
+          )}
+
+          {!isRenaming ? (
+            <DropdownMenu
+              open={isMenuOpen}
+              onOpenChange={setIsMenuOpen}
+            >
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className={cn(
+                    'inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 hover:text-foreground',
+                    mobileVariant ? 'opacity-70' : 'opacity-0 group-hover/project:opacity-100',
+                  )}
+                  aria-label="Project menu"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <RiMore2Line className="h-3.5 w-3.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-[180px]">
+                {showCreateButtons && isRepo && !hideDirectoryControls && settingsAutoCreateWorktree && onNewSession && (
+                  <DropdownMenuItem onClick={onNewSession}>
+                    <RiAddLine className="mr-1.5 h-4 w-4" />
+                    New Session
+                  </DropdownMenuItem>
+                )}
+                {showCreateButtons && isRepo && !hideDirectoryControls && !settingsAutoCreateWorktree && onNewWorktreeSession && (
+                  <DropdownMenuItem onClick={onNewWorktreeSession}>
+                    <RiGitBranchLine className="mr-1.5 h-4 w-4" />
+                    New Session in Worktree
+                  </DropdownMenuItem>
+                )}
+                {showCreateButtons && isRepo && !hideDirectoryControls && (
+                  <DropdownMenuItem onClick={onOpenMultiRunLauncher}>
+                    <ArrowsMerge className="mr-1.5 h-4 w-4" />
+                    New Multi-Run
+                  </DropdownMenuItem>
+                )}
+                {showCreateButtons && !hideDirectoryControls && (
+                  <DropdownMenuItem onClick={onOpenAgentLoopLauncher}>
+                    <RiLoopLeftLine className="mr-1.5 h-4 w-4" />
+                    New Agent Loop
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={onRenameStart}>
+                  <RiPencilAiLine className="mr-1.5 h-4 w-4" />
+                  Rename
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={onClose}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <RiCloseLine className="mr-1.5 h-4 w-4" />
+                  Close Project
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+
+          {showCreateButtons && isRepo && !hideDirectoryControls && onNewWorktreeSession && settingsAutoCreateWorktree && !isRenaming && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onNewWorktreeSession();
+                  }}
+                  className={cn(
+                    'inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 hover:text-foreground hover:bg-interactive-hover/50 flex-shrink-0',
+                    mobileVariant ? 'opacity-70' : 'opacity-100',
+                  )}
+                  aria-label="New session in worktree"
+                >
+                  <RiGitBranchLine className="h-4 w-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" sideOffset={4}>
+                <p>New session in worktree</p>
+              </TooltipContent>
+            </Tooltip>
+          )}
+          {showCreateButtons && (!settingsAutoCreateWorktree || !isRepo) && !isRenaming && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onNewSession();
+                  }}
+                  className="inline-flex h-6 w-6 items-center justify-center text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 flex-shrink-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                  aria-label="New session"
+                >
+                  <RiAddLine className="h-4 w-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" sideOffset={4}>
+                <p>New session</p>
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </div>
+          </div>
+        </>
+      ) : null}
+
+      {/* Children (workspace groups and sessions) */}
+      {children}
+    </div>
+  );
+};
+
+const SortableGroupItemBase: React.FC<{
+  id: string;
+  children: React.ReactNode;
+}> = ({ id, children }) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+      className={cn(
+        'space-y-0.5 rounded-md',
+        isDragging && 'opacity-50',
+      )}
+      {...attributes}
+      {...listeners}
+    >
+      {children}
+    </div>
+  );
+};
+
+const SortableGroupItem = React.memo(SortableGroupItemBase);
+
+
 
 interface SessionSidebarProps {
   mobileVariant?: boolean;
@@ -336,6 +899,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const setSessionSwitcherOpen = useUIStore((state) => state.setSessionSwitcherOpen);
   const setDeviceLoginOpen = useUIStore((state) => state.setDeviceLoginOpen);
   const openMultiRunLauncher = useUIStore((state) => state.openMultiRunLauncher);
+  const openAgentLoopLauncher = useUIStore((state) => state.openAgentLoopLauncher);
   const notifyOnSubtasks = useUIStore((state) => state.notifyOnSubtasks);
   const showDeletionDialog = useUIStore((state) => state.showDeletionDialog);
   const setShowDeletionDialog = useUIStore((state) => state.setShowDeletionDialog);
@@ -376,6 +940,20 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   });
 
   const gitBranches = useGitAllBranches();
+
+  // Agent loop: build a set of all session IDs owned by any loop for sidebar badge rendering
+  const agentLoopInstances = useAgentLoopStore((state) => state.loops);
+  const loopTrackedSessionIds = React.useMemo(() => {
+    const ids = new Set<string>();
+    for (const loop of agentLoopInstances.values()) {
+      if (loop.trackedSessionIds) {
+        for (const sid of loop.trackedSessionIds) {
+          ids.add(sid);
+        }
+      }
+    }
+    return ids;
+  }, [agentLoopInstances]);
 
   const tauriIpcAvailable = React.useMemo(() => isTauriShell(), []);
   const isDesktopShellRuntime = isDesktopShell();
@@ -734,22 +1312,26 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     sessionEvents.requestDirectoryDialog();
   }, []);
 
-  // Auto-expand parent session when navigating to a subagent (child) session
-  React.useEffect(() => {
-    if (!currentSessionId) return;
-    const current = sessions.find((s) => s.id === currentSessionId);
-    const parentID = (current as Session & { parentID?: string | null })?.parentID;
-    if (!parentID) return;
-    setExpandedParents((prev) => {
-      if (prev.has(parentID)) return prev;
-      const next = new Set(prev);
-      next.add(parentID);
-      try {
-        safeStorage.setItem(SESSION_EXPANDED_STORAGE_KEY, JSON.stringify(Array.from(next)));
-      } catch { /* ignored */ }
-      return next;
-    });
-  }, [currentSessionId, sessions, safeStorage]);
+    requestDirectoryAccess('')
+      .then((result) => {
+        if (result.success && result.path) {
+          const added = addProject(result.path, { id: result.projectId });
+          if (!added) {
+            toast.error('Failed to add project', {
+              description: 'Please select a valid directory.',
+            });
+          }
+        } else if (result.error && result.error !== 'Directory selection cancelled') {
+          toast.error('Failed to select directory', {
+            description: result.error,
+          });
+        }
+      })
+      .catch((error) => {
+        console.error('Desktop: Error selecting directory:', error);
+        toast.error('Failed to select directory');
+      });
+  }, [addProject, tauriIpcAvailable]);
 
   const toggleParent = React.useCallback((sessionId: string) => {
     setExpandedParents((prev) => {
@@ -1141,17 +1723,478 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     }>();
     const projectPathLengthBySessionId = new Map<string, number>();
 
-    projectSections.forEach((section) => {
-      const projectLabel = formatProjectLabel(
-        section.project.label?.trim()
-        || formatDirectoryName(section.project.normalizedPath, homeDirectory)
-        || section.project.normalizedPath,
+    return () => observer.disconnect();
+  }, [isDesktopShellRuntime, projectSections]);
+
+  const renderSessionNode = React.useCallback(
+    (node: SessionNode, depth = 0, groupDirectory?: string | null, projectId?: string | null): React.ReactNode => {
+      const session = node.session;
+      const sessionDirectory =
+        normalizePath((session as Session & { directory?: string | null }).directory ?? null) ??
+        normalizePath(groupDirectory ?? null);
+      const directoryState = sessionDirectory ? directoryStatus.get(sessionDirectory) : null;
+      const isMissingDirectory = directoryState === 'missing';
+      const memoryState = sessionMemoryState.get(session.id);
+      const isActive = currentSessionId === session.id;
+      const sessionTitle = session.title || 'Untitled Session';
+      const hasChildren = node.children.length > 0;
+      const isPinnedSession = pinnedSessionIds.has(session.id);
+      const isExpanded = hasSessionSearchQuery ? true : expandedParents.has(session.id);
+      const isSubtaskSession = Boolean((session as Session & { parentID?: string | null }).parentID);
+      const rawNeedsAttention = sessionAttentionStates.get(session.id)?.needsAttention === true;
+      // When notifyOnSubtasks is disabled, suppress attention dots for child sessions.
+      const needsAttention = rawNeedsAttention && (!isSubtaskSession || notifyOnSubtasks);
+      const sessionSummary = session.summary as
+        | {
+          additions?: number | string | null;
+          deletions?: number | string | null;
+          files?: number | null;
+          diffs?: Array<{ additions?: number | string | null; deletions?: number | string | null }>;
+        }
+        | undefined;
+
+      if (editingId === session.id) {
+        return (
+          <div
+            key={session.id}
+            className={cn(
+              'group relative flex items-center rounded-md px-1.5 py-1',
+              'bg-interactive-selection',
+              depth > 0 && 'pl-[20px]',
+            )}
+          >
+            <div className="flex min-w-0 flex-1 flex-col gap-0">
+              <form
+                className="flex w-full items-center gap-2"
+                data-keyboard-avoid="true"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  handleSaveEdit();
+                }}
+              >
+                <input
+                  value={editTitle}
+                  onChange={(event) => setEditTitle(event.target.value)}
+                  className="flex-1 min-w-0 bg-transparent typography-ui-label outline-none placeholder:text-muted-foreground"
+                  autoFocus
+                  placeholder="Rename session"
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.stopPropagation();
+                      handleCancelEdit();
+                      return;
+                    }
+                    if (event.key === ' ' || event.key === 'Enter') {
+                      event.stopPropagation();
+                    }
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                >
+                  <RiCheckLine className="size-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelEdit}
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                >
+                  <RiCloseLine className="size-4" />
+                </button>
+              </form>
+              <div className="flex items-center gap-2 typography-micro text-muted-foreground/60 min-w-0 overflow-hidden leading-tight">
+                {hasChildren ? (
+                  <span className="inline-flex items-center justify-center flex-shrink-0">
+                    {isExpanded ? (
+                      <RiArrowDownSLine className="h-3 w-3" />
+                    ) : (
+                      <RiArrowRightSLine className="h-3 w-3" />
+                    )}
+                  </span>
+                ) : null}
+                <span className="flex-shrink-0">{formatSessionDateLabel(session.time?.updated || session.time?.created || Date.now())}</span>
+                {session.share ? (
+                  <RiShare2Line className="h-3 w-3 text-[color:var(--status-info)] flex-shrink-0" />
+                ) : null}
+                {(sessionSummary?.files ?? 0) > 0 ? (
+                  <span className="flex-shrink-0">
+                    · {sessionSummary!.files} {sessionSummary!.files === 1 ? 'file' : 'files'} changed
+                  </span>
+                ) : null}
+                {hasChildren ? (
+                  <span className="truncate">
+                    {node.children.length} {node.children.length === 1 ? 'task' : 'tasks'}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      const statusType = sessionStatus?.get(session.id)?.type ?? 'idle';
+      const isStreaming = statusType === 'busy' || statusType === 'retry';
+      const pendingPermissionCount = permissions.get(session.id)?.length ?? 0;
+      const showUnreadStatus = !isStreaming && needsAttention && !isActive;
+      const showStatusMarker = isStreaming || showUnreadStatus;
+
+      const streamingIndicator = (() => {
+        if (!memoryState) return null;
+        if (memoryState.isZombie) {
+          return <RiErrorWarningLine className="h-4 w-4 text-status-warning" />;
+        }
+        return null;
+      })();
+
+      return (
+        <React.Fragment key={session.id}>
+          <DraggableSessionRow sessionId={session.id} sessionDirectory={sessionDirectory ?? null} sessionTitle={sessionTitle}>
+          <div
+            className={cn(
+              'group relative flex items-center rounded-md px-1.5 py-1',
+              isActive ? 'bg-interactive-selection' : 'hover:bg-interactive-hover',
+              isMissingDirectory ? 'opacity-75' : '',
+              depth > 0 && 'pl-[20px]',
+            )}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setOpenMenuSessionId(session.id);
+            }}
+          >
+            <div className="flex min-w-0 flex-1 items-center">
+              <button
+                type="button"
+                disabled={isMissingDirectory}
+                onClick={() => handleSessionSelect(session.id, sessionDirectory, isMissingDirectory, projectId)}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  handleSessionDoubleClick();
+                }}
+                  className={cn(
+                    'flex min-w-0 flex-1 cursor-pointer flex-col gap-0 overflow-hidden rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 text-foreground select-none disabled:cursor-not-allowed',
+                  )}
+              >
+                {}
+                  <div className="flex w-full items-center gap-2 min-w-0 flex-1 overflow-hidden">
+                    {showStatusMarker ? (
+                    <span className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center">
+                      {isStreaming ? (
+                        <GridLoader size="xs" className="text-primary" />
+                      ) : (
+                        <span className="grid grid-cols-3 gap-[1px] text-[var(--status-info)]" aria-label="Unread updates" title="Unread updates">
+                          {Array.from({ length: 9 }, (_, i) => (
+                            ATTENTION_DIAMOND_INDICES.has(i) ? (
+                              <span
+                                key={i}
+                                className="h-[3px] w-[3px] rounded-full bg-current animate-attention-diamond-pulse"
+                                style={{ animationDelay: getAttentionDiamondDelay(i) }}
+                              />
+                            ) : (
+                              <span key={i} className="h-[3px] w-[3px]" />
+                            )
+                          ))}
+                        </span>
+                      )}
+                    </span>
+                  ) : null}
+                  {isPinnedSession ? (
+                    <RiPushpinLine className="h-3 w-3 flex-shrink-0 text-primary" aria-label="Pinned session" />
+                  ) : null}
+                  {loopTrackedSessionIds.has(session.id) ? (
+                    <RiLoopLeftLine className="h-3 w-3 flex-shrink-0 text-muted-foreground" aria-label="Agent loop session" />
+                  ) : null}
+                  <div className="block min-w-0 flex-1 truncate typography-ui-label font-normal text-foreground">
+                    {renderHighlightedText(sessionTitle, normalizedSessionSearchQuery)}
+                  </div>
+
+                  {pendingPermissionCount > 0 ? (
+                    <span
+                      className="inline-flex items-center gap-1 rounded bg-destructive/10 px-1 py-0.5 text-[0.7rem] text-destructive flex-shrink-0"
+                      title="Permission required"
+                      aria-label="Permission required"
+                    >
+                      <RiShieldLine className="h-3 w-3" />
+                      <span className="leading-none">{pendingPermissionCount}</span>
+                    </span>
+                  ) : null}
+                </div>
+
+                {}
+                <div className="flex items-center gap-2 typography-micro text-muted-foreground/60 min-w-0 overflow-hidden leading-tight">
+                  {hasChildren ? (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleParent(session.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          toggleParent(session.id);
+                        }
+                      }}
+                      className="inline-flex items-center justify-center text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 flex-shrink-0 rounded-sm"
+                      aria-label={isExpanded ? 'Collapse subsessions' : 'Expand subsessions'}
+                    >
+                      {isExpanded ? (
+                        <RiArrowDownSLine className="h-3 w-3" />
+                      ) : (
+                        <RiArrowRightSLine className="h-3 w-3" />
+                      )}
+                    </span>
+                  ) : null}
+                  <span className="flex-shrink-0">{formatSessionDateLabel(session.time?.updated || session.time?.created || Date.now())}</span>
+                  {session.share ? (
+                    <RiShare2Line className="h-3 w-3 text-[color:var(--status-info)] flex-shrink-0" />
+                  ) : null}
+                  {(sessionSummary?.files ?? 0) > 0 ? (
+                    <span className="flex-shrink-0">
+                      · {sessionSummary!.files} {sessionSummary!.files === 1 ? 'file' : 'files'} changed
+                    </span>
+                  ) : null}
+                  {hasChildren ? (
+                    <span className="truncate">
+                      {node.children.length} {node.children.length === 1 ? 'task' : 'tasks'}
+                    </span>
+                  ) : null}
+                  {isMissingDirectory ? (
+                    <span className="inline-flex items-center gap-0.5 text-status-warning flex-shrink-0">
+                      <RiErrorWarningLine className="h-3 w-3" />
+                      Missing
+                    </span>
+                  ) : null}
+                </div>
+              </button>
+
+              <div className="flex items-center gap-1.5 self-stretch">
+                {streamingIndicator}
+                <DropdownMenu
+                  open={openMenuSessionId === session.id}
+                  onOpenChange={(open) => setOpenMenuSessionId(open ? session.id : null)}
+                >
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className={cn(
+                        'inline-flex h-3.5 w-[18px] items-center justify-center rounded-md text-muted-foreground transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
+                        mobileVariant ? 'opacity-70' : 'opacity-0 group-hover:opacity-100',
+                      )}
+                      aria-label="Session menu"
+                      onClick={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => event.stopPropagation()}
+                    >
+                      <RiMore2Line className={mobileVariant ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align="end"
+                    className="min-w-[180px]"
+                    onCloseAutoFocus={(event) => {
+                      if (renamingFolderId) {
+                        event.preventDefault();
+                      }
+                    }}
+                  >
+                    <DropdownMenuItem
+                      onClick={() => {
+                        setEditingId(session.id);
+                        setEditTitle(sessionTitle);
+                      }}
+                      className="[&>svg]:mr-1"
+                    >
+                      <RiPencilAiLine className="mr-1 h-4 w-4" />
+                      Rename
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => togglePinnedSession(session.id)} className="[&>svg]:mr-1">
+                      {isPinnedSession ? (
+                        <RiUnpinLine className="mr-1 h-4 w-4" />
+                      ) : (
+                        <RiPushpinLine className="mr-1 h-4 w-4" />
+                      )}
+                      {isPinnedSession ? 'Unpin session' : 'Pin session'}
+                    </DropdownMenuItem>
+                    {!session.share ? (
+                      <DropdownMenuItem onClick={() => handleShareSession(session)} className="[&>svg]:mr-1">
+                        <RiShare2Line className="mr-1 h-4 w-4" />
+                        Share
+                      </DropdownMenuItem>
+                    ) : (
+                      <>
+                        <DropdownMenuItem
+                          onClick={() => {
+                            if (session.share?.url) {
+                              handleCopyShareUrl(session.share.url, session.id);
+                            }
+                          }}
+                          className="[&>svg]:mr-1"
+                        >
+                          {copiedSessionId === session.id ? (
+                            <>
+                              <RiCheckLine className="mr-1 h-4 w-4" style={{ color: 'var(--status-success)' }} />
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <RiFileCopyLine className="mr-1 h-4 w-4" />
+                              Copy link
+                            </>
+                          )}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleUnshareSession(session.id)} className="[&>svg]:mr-1">
+                          <RiLinkUnlinkM className="mr-1 h-4 w-4" />
+                          Unshare
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                    {/* Move to folder submenu */}
+                    {sessionDirectory ? (() => {
+                      const scopeFolders = getFoldersForScope(sessionDirectory);
+                      const currentFolderId = getSessionFolderId(sessionDirectory, session.id);
+                      return (
+                        <>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuSub>
+                            <DropdownMenuSubTrigger className="[&>svg]:mr-1">
+                              <RiFolderLine className="h-4 w-4" />
+                              Move to folder
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent className="min-w-[180px]">
+                              {scopeFolders.length === 0 ? (
+                                <DropdownMenuItem disabled className="text-muted-foreground">
+                                  No folders yet
+                                </DropdownMenuItem>
+                              ) : (
+                                scopeFolders.map((folder) => (
+                                  <DropdownMenuItem
+                                    key={folder.id}
+                                    onClick={() => {
+                                      if (currentFolderId === folder.id) {
+                                        removeSessionFromFolder(sessionDirectory, session.id);
+                                      } else {
+                                        addSessionToFolder(sessionDirectory, folder.id, session.id);
+                                      }
+                                    }}
+                                  >
+                                    <span className="flex-1 truncate">{folder.name}</span>
+                                    {currentFolderId === folder.id ? (
+                                      <RiCheckLine className="ml-2 h-3.5 w-3.5 text-primary flex-shrink-0" />
+                                    ) : null}
+                                  </DropdownMenuItem>
+                                ))
+                              )}
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                 onClick={() => {
+                                    const newFolder = createFolderAndStartRename(sessionDirectory);
+                                    if (!newFolder) {
+                                      return;
+                                    }
+                                    addSessionToFolder(sessionDirectory, newFolder.id, session.id);
+                                  }}
+                              >
+                                <RiAddLine className="mr-1 h-4 w-4" />
+                                New folder...
+                              </DropdownMenuItem>
+                              {currentFolderId ? (
+                                <DropdownMenuItem
+                                  onClick={() => {
+                                    removeSessionFromFolder(sessionDirectory, session.id);
+                                  }}
+                                  className="text-destructive focus:text-destructive"
+                                >
+                                  <RiCloseLine className="mr-1 h-4 w-4" />
+                                  Remove from folder
+                                </DropdownMenuItem>
+                              ) : null}
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+                        </>
+                      );
+                    })() : null}
+                    <DropdownMenuItem
+                      disabled={!sessionDirectory}
+                      onClick={() => {
+                        if (!sessionDirectory) {
+                          return;
+                        }
+
+                        openContextPanelTab(sessionDirectory, {
+                          mode: 'chat',
+                          dedupeKey: `session:${session.id}`,
+                          label: sessionTitle,
+                        });
+                      }}
+                      className="[&>svg]:mr-1"
+                    >
+                      <RiChat4Line className="mr-1 h-4 w-4" />
+                      <span className="truncate">Open in Side Panel</span>
+                      <span className="shrink-0 typography-micro px-1 rounded leading-none pb-px text-[var(--status-warning)] bg-[var(--status-warning)]/10">
+                        beta
+                      </span>
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive [&>svg]:mr-1"
+                      onClick={() => handleDeleteSession(session)}
+                    >
+                      <RiDeleteBinLine className="mr-1 h-4 w-4" />
+                      Remove
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </div>
+          </div>
+          </DraggableSessionRow>
+          {hasChildren && isExpanded
+            ? node.children.map((child) =>
+                renderSessionNode(child, depth + 1, sessionDirectory ?? groupDirectory, projectId),
+              )
+            : null}
+        </React.Fragment>
       );
-      section.groups.forEach((group) => {
-        const branchCandidate = group.branch && group.branch !== 'HEAD' && group.branch !== projectLabel
-          ? group.branch
-          : null;
-        const secondaryMeta = { projectLabel, branchLabel: branchCandidate };
+    },
+    [
+      directoryStatus,
+      sessionMemoryState,
+      sessionStatus,
+      sessionAttentionStates,
+      permissions,
+      currentSessionId,
+      hasSessionSearchQuery,
+      normalizedSessionSearchQuery,
+      expandedParents,
+      editingId,
+      editTitle,
+      handleSaveEdit,
+      handleCancelEdit,
+      toggleParent,
+      handleSessionSelect,
+      handleSessionDoubleClick,
+      pinnedSessionIds,
+      togglePinnedSession,
+      handleShareSession,
+      handleCopyShareUrl,
+      handleUnshareSession,
+      handleDeleteSession,
+      copiedSessionId,
+      mobileVariant,
+      openMenuSessionId,
+      renamingFolderId,
+      getFoldersForScope,
+      getSessionFolderId,
+      addSessionToFolder,
+      removeSessionFromFolder,
+      createFolderAndStartRename,
+      openContextPanelTab,
+      notifyOnSubtasks,
+      loopTrackedSessionIds,
+    ],
+  );
 
         const visit = (nodes: SessionNode[]) => {
           nodes.forEach((node) => {
@@ -1965,22 +3008,160 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             </button>
           </div>
           )}
-        >
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={toggleSidebar}
-                className={desktopSidebarToggleButtonClass}
-                aria-label={t('sessions.sidebar.header.actions.closeSessions')}
-              >
-                <Icon name="layout-left" className="h-[18px] w-[18px]" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{t('sessions.sidebar.header.actions.closeSessions')}</p>
-            </TooltipContent>
-          </Tooltip>
+          {reserveHeaderActionsSpace ? (
+            <div className="-ml-1 flex h-auto min-h-8 flex-col gap-1">
+              {activeProjectForHeader ? (
+              <>
+              <div className="flex h-8 -translate-y-px items-center gap-1.5 rounded-md pl-0 pr-1">
+              {stableActiveProjectIsRepo ? (
+                <>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!activeProjectForHeader) {
+                        return;
+                      }
+                      if (activeProjectForHeader.id !== activeProjectId) {
+                        setActiveProjectIdOnly(activeProjectForHeader.id);
+                      }
+                      setNewWorktreeDialogOpen(true);
+                    }}
+                    className={headerActionButtonClass}
+                    aria-label="New worktree"
+                  >
+                    <RiNodeTree className={headerActionIconClass} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" sideOffset={4}><p>New worktree</p></TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={openMultiRunLauncher}
+                    className={headerActionButtonClass}
+                    aria-label="New multi-run"
+                  >
+                    <ArrowsMerge className={headerActionIconClass} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" sideOffset={4}><p>New multi-run</p></TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={openAgentLoopLauncher}
+                    className={headerActionButtonClass}
+                    aria-label="New agent loop"
+                  >
+                    <RiLoopLeftLine className={headerActionIconClass} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" sideOffset={4}><p>New agent loop</p></TooltipContent>
+              </Tooltip>
+                </>
+              ) : null}
+              {useMobileNotesPanel ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => setProjectNotesPanelOpen(true)}
+                      className={headerActionButtonClass}
+                      aria-label="Project notes and todos"
+                    >
+                      <RiStickyNoteLine className={headerActionIconClass} />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" sideOffset={4}><p>Project notes</p></TooltipContent>
+                </Tooltip>
+              ) : (
+                <DropdownMenu open={projectNotesPanelOpen} onOpenChange={setProjectNotesPanelOpen} modal={false}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          className={headerActionButtonClass}
+                          aria-label="Project notes and todos"
+                        >
+                          <RiStickyNoteLine className={headerActionIconClass} />
+                        </button>
+                      </DropdownMenuTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" sideOffset={4}><p>Project notes</p></TooltipContent>
+                  </Tooltip>
+                  <DropdownMenuContent align="start" className="w-[340px] p-0">
+                    <ProjectNotesTodoPanel
+                      projectRef={activeProjectRefForHeader}
+                      canCreateWorktree={stableActiveProjectIsRepo}
+                      onActionComplete={() => setProjectNotesPanelOpen(false)}
+                    />
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => setIsSessionSearchOpen((prev) => !prev)}
+                    className={headerActionButtonClass}
+                    aria-label="Search sessions"
+                    aria-expanded={isSessionSearchOpen}
+                  >
+                    <RiSearchLine className={headerActionIconClass} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" sideOffset={4}><p>Search sessions</p></TooltipContent>
+              </Tooltip>
+              </div>
+              {isSessionSearchOpen ? (
+                <div className="px-1 pb-1">
+                  <div className="mb-1 flex items-center justify-between px-0.5 typography-micro text-muted-foreground/80">
+                    {hasSessionSearchQuery ? (
+                      <span>{searchMatchCount} {searchMatchCount === 1 ? 'match' : 'matches'}</span>
+                    ) : <span />}
+                    <span>Esc to clear</span>
+                  </div>
+                  <div className="relative">
+                    <RiSearchLine className="pointer-events-none absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                      ref={sessionSearchInputRef}
+                      value={sessionSearchQuery}
+                      onChange={(event) => setSessionSearchQuery(event.target.value)}
+                      placeholder="Search sessions..."
+                      className="h-8 w-full rounded-md border border-border bg-transparent pl-8 pr-8 typography-ui-label text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.stopPropagation();
+                          if (hasSessionSearchQuery) {
+                            setSessionSearchQuery('');
+                          } else {
+                            setIsSessionSearchOpen(false);
+                          }
+                        }
+                      }}
+                    />
+                    {sessionSearchQuery.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setSessionSearchQuery('')}
+                        className="absolute right-1 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-interactive-hover/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                        aria-label="Clear search"
+                      >
+                        <RiCloseLine className="h-3.5 w-3.5" />
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+              </>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -2010,95 +3191,121 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         avoidWindowControlsOverlay={isTabletStandalonePwa}
       />
 
-      <SidebarProjectsList
-        topContent={topContent}
-        sectionsForRender={sectionsForSidebarRender}
-        projectSections={projectSections}
-        activeProjectId={activeProjectId}
-        showOnlyMainWorkspace={showOnlyMainWorkspace}
-        hasSessionSearchQuery={hasSessionSearchQuery}
-        emptyState={emptyState}
-        searchEmptyState={searchEmptyState}
-        renderGroupSessions={renderGroupSessions}
-        homeDirectory={homeDirectory}
-        collapsedProjects={collapsedProjects}
-        hideDirectoryControls={hideDirectoryControls}
-        projectRepoStatus={projectRepoStatus}
-        isDesktopShellRuntime={isDesktopShellRuntime}
-        stuckProjectHeaders={stuckProjectHeaders}
-        mobileVariant={mobileVariant}
-        alwaysShowActions={alwaysShowSidebarActions}
-        toggleProject={toggleProject}
-        setActiveProjectIdOnly={setActiveProjectIdOnly}
-        setActiveMainTab={setActiveMainTab}
-        setSessionSwitcherOpen={setSessionSwitcherOpen}
-        openNewSessionDraft={openNewSessionDraft}
-        openNewWorktreeDialog={openNewWorktreeDialog}
-        openProjectEditDialog={setEditingProjectDialogId}
-        removeProject={removeProject}
-        projectHeaderSentinelRefs={projectHeaderSentinelRefs}
-        reorderProjects={reorderProjects}
-        getOrderedGroups={getOrderedGroups}
-        setGroupOrderByProject={setGroupOrderByProject}
-        openSidebarMenuKey={openSidebarMenuKey}
-        setOpenSidebarMenuKey={setOpenSidebarMenuKey}
-        isInlineEditing={isInlineEditing}
-      />
-
-      {selectionModeEnabled && selectedIds.size > 0 ? (
-        <BulkActionBar
-          selectedCount={selectedIds.size}
-          scopeKey={derivedSelectionScope}
-          scopeFolders={bulkScopeFolders}
-          archivedBucket={bulkScopeIsArchived}
-          onMoveToFolder={handleBulkMoveToFolder}
-          onCreateFolderAndMove={handleBulkCreateFolderAndMove}
-          onRemoveFromFolder={handleBulkRemoveFromFolder}
-          canRemoveFromFolder={bulkCanRemoveFromFolder}
-          onDelete={handleBulkDelete}
-          onDone={handleExitSelectionMode}
-        />
-      ) : null}
-
-      <SidebarFooter
-        onOpenSettings={handleOpenSettings}
-        onOpenShortcuts={toggleHelpDialog}
-        onOpenAbout={() => setAboutDialogOpen(true)}
-        onOpenUpdate={handleOpenUpdateDialog}
-        showRuntimeButtons={!isVSCode}
-        showUpdateButton={showSidebarUpdateButton}
-      />
-
-      <UpdateDialog
-        open={updateDialogOpen}
-        onOpenChange={setUpdateDialogOpen}
-        info={updateStore.info}
-        downloading={updateStore.downloading}
-        downloaded={updateStore.downloaded}
-        progress={updateStore.progress}
-        error={updateStore.error}
-        onDownload={updateStore.downloadUpdate}
-        onRestart={updateStore.restartToUpdate}
-        runtimeType={updateStore.runtimeType}
-      />
-
-      {editingProject ? (
-        <ProjectEditDialog
-          open={Boolean(editingProject)}
-          onOpenChange={(open) => {
-            if (!open) {
-              setEditingProjectDialogId(null);
-            }
-          }}
-          projectId={editingProject.id}
-          projectName={editingProject.label || formatDirectoryName(editingProject.path, homeDirectory)}
-          projectPath={editingProject.path}
-          initialIcon={editingProject.icon}
-          initialColor={editingProject.color}
-          initialIconBackground={editingProject.iconBackground}
-          onSave={handleSaveProjectEdit}
-        />
-      ) : null}
+                return (
+                  <SortableProjectItem
+                    key={projectKey}
+                    id={projectKey}
+                    projectLabel={projectLabel}
+                    projectDescription={projectDescription}
+                    isCollapsed={isCollapsed}
+                    isActiveProject={isActiveProject}
+                    isRepo={Boolean(isRepo)}
+                    isHovered={isHovered}
+                    isDesktopShell={isDesktopShellRuntime}
+                    isStuck={stuckProjectHeaders.has(projectKey)}
+                    hideDirectoryControls={hideDirectoryControls}
+                    mobileVariant={mobileVariant}
+                    onToggle={() => toggleProject(projectKey)}
+                    onHoverChange={(hovered) => setHoveredProjectId(hovered ? projectKey : null)}
+                    onNewSession={() => {
+                      if (projectKey !== activeProjectId) {
+                        setActiveProjectIdOnly(projectKey);
+                      }
+                      setActiveMainTab('chat');
+                      if (mobileVariant) {
+                        setSessionSwitcherOpen(false);
+                      }
+                      openNewSessionDraft({ directoryOverride: project.normalizedPath });
+                    }}
+                    onNewWorktreeSession={() => {
+                      if (projectKey !== activeProjectId) {
+                        setActiveProjectIdOnly(projectKey);
+                      }
+                      setActiveMainTab('chat');
+                      if (mobileVariant) {
+                        setSessionSwitcherOpen(false);
+                      }
+                      createWorktreeSession();
+                    }}
+                    onOpenMultiRunLauncher={() => {
+                      if (projectKey !== activeProjectId) {
+                        setActiveProjectIdOnly(projectKey);
+                      }
+                      openMultiRunLauncher();
+                    }}
+                    onOpenAgentLoopLauncher={() => {
+                      if (projectKey !== activeProjectId) {
+                        setActiveProjectIdOnly(projectKey);
+                      }
+                      openAgentLoopLauncher();
+                    }}
+                    onRenameStart={() => {
+                      setEditingProjectId(projectKey);
+                      setEditProjectTitle(project.label?.trim() || formatDirectoryName(project.normalizedPath, homeDirectory) || project.normalizedPath);
+                    }}
+                    onRenameSave={handleSaveProjectEdit}
+                    onRenameCancel={handleCancelProjectEdit}
+                    onRenameValueChange={setEditProjectTitle}
+                    renameValue={editingProjectId === projectKey ? editProjectTitle : ''}
+                    isRenaming={editingProjectId === projectKey}
+                    onClose={() => removeProject(projectKey)}
+                    sentinelRef={(el) => { projectHeaderSentinelRefs.current.set(projectKey, el); }}
+                    settingsAutoCreateWorktree={settingsAutoCreateWorktree}
+                    showCreateButtons={false}
+                    hideHeader
+                  >
+                    {!isCollapsed ? (
+                      <div className="space-y-[0.6rem] py-1">
+                        {section.groups.length > 0 ? (
+                          <DndContext
+                            sensors={sensors}
+                            collisionDetection={closestCenter}
+                            onDragEnd={(event) => {
+                              const { active, over } = event;
+                              if (!over || active.id === over.id) {
+                                return;
+                              }
+                              const oldIndex = orderedGroups.findIndex((item) => item.id === active.id);
+                              const newIndex = orderedGroups.findIndex((item) => item.id === over.id);
+                              if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) {
+                                return;
+                              }
+                              const next = arrayMove(orderedGroups, oldIndex, newIndex).map((item) => item.id);
+                              setGroupOrderByProject((prev) => {
+                                const map = new Map(prev);
+                                map.set(projectKey, next);
+                                return map;
+                              });
+                            }}
+                          >
+                            <SortableContext
+                              items={orderedGroups.map((group) => group.id)}
+                              strategy={verticalListSortingStrategy}
+                            >
+                              {orderedGroups.map((group) => {
+                                const groupKey = `${projectKey}:${group.id}`;
+                                return (
+                                  <SortableGroupItem key={group.id} id={group.id}>
+                                    {renderGroupSessions(group, groupKey, projectKey)}
+                                  </SortableGroupItem>
+                                );
+                              })}
+                            </SortableContext>
+                            <DragOverlay dropAnimation={null} />
+                          </DndContext>
+                        ) : (
+                          <div className="py-1 text-left typography-micro text-muted-foreground">
+                            No sessions yet.
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </SortableProjectItem>
+                );
+              })}
+          </>
+        )}
+      </ScrollableOverlay>
 
       <NewWorktreeDialog
         open={newWorktreeDialogOpen}
