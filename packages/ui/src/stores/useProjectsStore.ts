@@ -286,46 +286,156 @@ const persistProjects = (projects: ProjectEntry[], activeProjectId: string | nul
 };
 
 const initialProjects = readPersistedProjects();
-const getVSCodeWorkspaceProject = (): { projects: ProjectEntry[]; activeProjectId: string | null } | null => {
+
+type VSCodeWorkspaceContext = {
+  projects: ProjectEntry[];
+  activeProjectId: string | null;
+  activeProjectPath: string | null;
+};
+
+const isVSCodeWorkspaceRuntime = (): boolean => {
   if (typeof window === 'undefined') {
-    return null;
+    return false;
   }
 
   const runtimeApis = (window as unknown as { __OPENCHAMBER_RUNTIME_APIS__?: { runtime?: { isVSCode?: boolean } } })
     .__OPENCHAMBER_RUNTIME_APIS__;
-  if (!runtimeApis?.runtime?.isVSCode) {
-    return null;
-  }
-
-  const workspaceFolder = (window as unknown as { __VSCODE_CONFIG__?: { workspaceFolder?: unknown } }).__VSCODE_CONFIG__?.workspaceFolder;
-  if (typeof workspaceFolder !== 'string' || workspaceFolder.trim().length === 0) {
-    return null;
-  }
-
-  const normalizedPath = normalizeProjectPath(workspaceFolder);
-  if (!normalizedPath) {
-    return null;
-  }
-
-  const id = createProjectIdFromPath(normalizedPath);
-  const entry: ProjectEntry = {
-    id,
-    path: normalizedPath,
-    label: deriveProjectLabel(normalizedPath),
-    addedAt: Date.now(),
-    lastOpenedAt: Date.now(),
-  };
-
-  if (streamDebugEnabled()) {
-    console.log('[OpenChamber][VSCode][projects] Using workspace fallback project', entry);
-  }
-
-  return { projects: [entry], activeProjectId: id };
+  return Boolean(runtimeApis?.runtime?.isVSCode);
 };
 
-// VS Code runtime should behave as a single-project environment scoped to the workspace folder.
-// Always prefer the workspace project over any persisted multi-project registry.
-const vscodeWorkspace = getVSCodeWorkspaceProject();
+const readVSCodeWorkspaceContext = (): VSCodeWorkspaceContext | null => {
+  if (!isVSCodeWorkspaceRuntime()) {
+    return null;
+  }
+
+  const persistedByPath = new Map(
+    readPersistedProjects().map((project) => [normalizeProjectPath(project.path), project] as const),
+  );
+
+  const config = (window as unknown as {
+    __VSCODE_CONFIG__?: {
+      workspaceFolder?: unknown;
+      activeWorkspaceFolder?: unknown;
+      workspaceFolders?: unknown;
+    };
+  }).__VSCODE_CONFIG__;
+
+  const workspaceFolders = Array.isArray(config?.workspaceFolders)
+    ? config?.workspaceFolders
+    : [];
+
+  const projects: ProjectEntry[] = workspaceFolders.reduce<ProjectEntry[]>((acc, entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return acc;
+      }
+      const candidate = entry as { name?: unknown; path?: unknown };
+      const normalizedPath = typeof candidate.path === 'string'
+        ? normalizeProjectPath(candidate.path)
+        : '';
+      if (!normalizedPath) {
+        return acc;
+      }
+
+      const label = typeof candidate.name === 'string' && candidate.name.trim().length > 0
+        ? candidate.name.trim()
+        : deriveProjectLabel(normalizedPath);
+      const persisted = persistedByPath.get(normalizedPath);
+
+      const id = `vscode:${normalizedPath}`;
+      acc.push({
+        id,
+        path: normalizedPath,
+        label,
+        addedAt: persisted?.addedAt ?? 0,
+        lastOpenedAt: persisted?.lastOpenedAt ?? 0,
+      });
+      return acc;
+    }, []);
+
+  const fallbackWorkspaceFolder = typeof config?.workspaceFolder === 'string'
+    ? normalizeProjectPath(config.workspaceFolder)
+    : '';
+  const activeWorkspaceFolder = typeof config?.activeWorkspaceFolder === 'string'
+    ? normalizeProjectPath(config.activeWorkspaceFolder)
+    : fallbackWorkspaceFolder;
+
+  const normalizedProjects: ProjectEntry[] = projects.length > 0 ? projects : (() => {
+    if (!fallbackWorkspaceFolder) {
+      return [];
+    }
+    return [{
+      id: `vscode:${fallbackWorkspaceFolder}`,
+      path: fallbackWorkspaceFolder,
+      label: deriveProjectLabel(fallbackWorkspaceFolder),
+      addedAt: persistedByPath.get(fallbackWorkspaceFolder)?.addedAt ?? 0,
+      lastOpenedAt: persistedByPath.get(fallbackWorkspaceFolder)?.lastOpenedAt ?? 0,
+    } satisfies ProjectEntry];
+  })();
+
+  if (normalizedProjects.length === 0) {
+    return null;
+  }
+
+  const persistedActiveId = readPersistedActiveProjectId();
+  const activeProject = normalizedProjects.find((project) => project.path === activeWorkspaceFolder)
+    ?? (persistedActiveId ? normalizedProjects.find((project) => project.id === persistedActiveId) : null)
+    ?? normalizedProjects[0]
+    ?? null;
+
+  if (streamDebugEnabled()) {
+    console.log('[OpenChamber][VSCode][projects] Using workspace roots', normalizedProjects);
+  }
+
+  return {
+    projects: normalizedProjects,
+    activeProjectId: activeProject?.id ?? null,
+    activeProjectPath: activeProject?.path ?? null,
+  };
+};
+
+const syncVSCodeRuntimeSelection = (project: ProjectEntry | null) => {
+  if (!project || typeof window === 'undefined') {
+    return;
+  }
+
+  const windowWithConfig = window as typeof window & {
+    __VSCODE_CONFIG__?: {
+      workspaceFolder: string;
+      activeWorkspaceFolder?: string;
+      workspaceFolders?: Array<{ name: string; path: string; index?: number }>;
+      theme: string;
+      connectionStatus: string;
+      cliAvailable?: boolean;
+      panelType?: string;
+      viewMode?: 'sidebar' | 'editor';
+      initialSessionId?: string | null;
+    };
+    __OPENCHAMBER_HOME__?: string;
+  };
+
+  if (windowWithConfig.__VSCODE_CONFIG__) {
+    windowWithConfig.__VSCODE_CONFIG__ = {
+      ...windowWithConfig.__VSCODE_CONFIG__,
+      workspaceFolder: project.path,
+      activeWorkspaceFolder: project.path,
+    };
+  }
+
+  windowWithConfig.__OPENCHAMBER_HOME__ = project.path;
+  window.dispatchEvent(new CustomEvent('openchamber:vscode-workspace-context', {
+    detail: {
+      workspaceFolder: project.path,
+      activeWorkspaceFolder: project.path,
+      workspaceFolders: windowWithConfig.__VSCODE_CONFIG__?.workspaceFolders ?? [],
+    },
+  }));
+  useDirectoryStore.getState().synchronizeHomeDirectory(project.path);
+  opencodeClient.setDirectory(project.path);
+  useDirectoryStore.getState().setDirectory(project.path, { showOverlay: false });
+};
+
+const vscodeWorkspace = readVSCodeWorkspaceContext();
+const isVSCodeWorkspace = Boolean(vscodeWorkspace);
 const effectiveInitialProjects = vscodeWorkspace?.projects ?? initialProjects;
 const persistedActiveProjectId = readPersistedActiveProjectId();
 const initialActiveProjectId = vscodeWorkspace?.activeProjectId
@@ -337,6 +447,8 @@ const initialActiveProjectId = vscodeWorkspace?.activeProjectId
 
 if (vscodeWorkspace) {
   cacheProjects(effectiveInitialProjects, initialActiveProjectId);
+  const initialActiveProject = effectiveInitialProjects.find((project) => project.id === initialActiveProjectId) ?? null;
+  syncVSCodeRuntimeSelection(initialActiveProject);
 }
 
 export const useProjectsStore = create<ProjectsStore>()(
@@ -358,7 +470,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     addProject: (path: string, options?: { label?: string; id?: string }) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return null;
       }
       const { validateProjectPath } = get();
@@ -399,7 +511,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     removeProject: (id: string) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return;
       }
       const current = get();
@@ -436,9 +548,6 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     setActiveProject: (id: string) => {
-      if (vscodeWorkspace) {
-        return;
-      }
       const { projects, activeProjectId } = get();
       if (activeProjectId === id) {
         return;
@@ -454,16 +563,17 @@ export const useProjectsStore = create<ProjectsStore>()(
       );
 
       set({ projects: nextProjects, activeProjectId: id });
-      persistProjects(nextProjects, id);
-
-      opencodeClient.setDirectory(target.path);
-      useDirectoryStore.getState().setDirectory(target.path, { showOverlay: false });
+      if (isVSCodeWorkspace) {
+        cacheProjects(nextProjects, id);
+        syncVSCodeRuntimeSelection(target);
+      } else {
+        persistProjects(nextProjects, id);
+        opencodeClient.setDirectory(target.path);
+        useDirectoryStore.getState().setDirectory(target.path, { showOverlay: false });
+      }
     },
 
     setActiveProjectIdOnly: (id: string) => {
-      if (vscodeWorkspace) {
-        return;
-      }
       const { projects, activeProjectId } = get();
       if (activeProjectId === id) {
         return;
@@ -479,14 +589,16 @@ export const useProjectsStore = create<ProjectsStore>()(
       );
 
       set({ projects: nextProjects, activeProjectId: id });
-      persistProjects(nextProjects, id);
-
-      opencodeClient.setDirectory(target.path);
-      useDirectoryStore.getState().setDirectory(target.path, { showOverlay: false });
+      if (isVSCodeWorkspace) {
+        cacheProjects(nextProjects, id);
+        syncVSCodeRuntimeSelection(target);
+      } else {
+        persistProjects(nextProjects, id);
+      }
     },
 
     renameProject: (id: string, label: string) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return;
       }
       const trimmed = label.trim();
@@ -503,7 +615,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     updateProjectMeta: (id: string, meta: { label?: string; icon?: string | null; color?: string | null; iconBackground?: string | null }) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return;
       }
       const { projects, activeProjectId } = get();
@@ -526,7 +638,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     uploadProjectIcon: async (id: string, file: File) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return { ok: false, error: 'Custom icons are not supported in this runtime' };
       }
 
@@ -571,7 +683,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     removeProjectIcon: async (id: string) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return { ok: false, error: 'Custom icons are not supported in this runtime' };
       }
 
@@ -600,7 +712,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     discoverProjectIcon: async (id: string, options?: { force?: boolean }) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return { ok: false, error: 'Custom icons are not supported in this runtime' };
       }
 
@@ -641,7 +753,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     reorderProjects: (fromIndex: number, toIndex: number) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return;
       }
       const { projects, activeProjectId } = get();
@@ -664,7 +776,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     synchronizeFromSettings: (settings: DesktopSettings) => {
-      if (vscodeWorkspace) {
+      if (isVSCodeWorkspace) {
         return;
       }
       const incomingProjects = sanitizeProjects(settings.projects ?? []);
@@ -822,5 +934,30 @@ if (typeof window !== 'undefined') {
     if (detail && typeof detail === 'object') {
       useProjectsStore.getState().synchronizeFromSettings(detail);
     }
+  });
+
+  window.addEventListener('openchamber:vscode-workspace-context', () => {
+    const context = readVSCodeWorkspaceContext();
+    if (!context) {
+      return;
+    }
+
+    const current = useProjectsStore.getState();
+    const activeProjectId = context.activeProjectId ?? context.projects[0]?.id ?? null;
+    const projectsChanged = JSON.stringify(current.projects) !== JSON.stringify(context.projects);
+    const activeChanged = current.activeProjectId !== activeProjectId;
+
+    if (!projectsChanged && !activeChanged) {
+      return;
+    }
+
+    useProjectsStore.setState({
+      projects: context.projects,
+      activeProjectId,
+    });
+    cacheProjects(context.projects, activeProjectId);
+
+    const activeProject = context.projects.find((project) => project.id === activeProjectId) ?? null;
+    syncVSCodeRuntimeSelection(activeProject);
   });
 }

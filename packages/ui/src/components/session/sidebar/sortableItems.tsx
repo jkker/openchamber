@@ -8,7 +8,17 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
-import { Icon } from "@/components/icon/Icon";
+import {
+  RiAddLine,
+  RiArrowDownSLine,
+  RiArrowRightSLine,
+  RiCloseLine,
+  RiFolderLine,
+  RiMore2Line,
+  RiNodeTree,
+  RiPencilAiLine,
+} from '@remixicon/react';
+import { isVSCodeRuntime } from '@/lib/desktop';
 import { cn } from '@/lib/utils';
 import { PROJECT_COLOR_MAP, PROJECT_ICON_MAP, getProjectIconImageUrl } from '@/lib/projectMeta';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
@@ -77,6 +87,7 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
 }) => {
   const { t } = useI18n();
   const { currentTheme } = useThemeSystem();
+  const isVSCode = React.useMemo(() => isVSCodeRuntime(), []);
   const {
     attributes,
     listeners,
@@ -90,6 +101,17 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
   const suppressNextToggleRef = React.useRef(false);
   const menuInstanceKey = `project:${id}`;
   const isMenuOpen = openSidebarMenuKey === menuInstanceKey;
+  const showNewSessionMenuItem = showCreateButtons && !isRepo && !hideDirectoryControls;
+  const showRenameAction = !isVSCode;
+  const showCloseAction = !isVSCode;
+  const showProjectMenu = showNewSessionMenuItem || showRenameAction || showCloseAction;
+  const togglePaddingClass = isRepo && !hideDirectoryControls
+    ? (showProjectMenu
+      ? (mobileVariant ? 'pr-20' : 'pr-7 group-hover/project:pr-20 group-focus-within/project:pr-20')
+      : (mobileVariant ? 'pr-14' : 'pr-7 group-hover/project:pr-14 group-focus-within/project:pr-14'))
+    : (showProjectMenu
+      ? (mobileVariant ? 'pr-14' : 'pr-7 group-hover/project:pr-14 group-focus-within/project:pr-14')
+      : 'pr-7');
 
   React.useEffect(() => {
     setImageFailed(false);
@@ -167,9 +189,7 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                       {...listeners}
                       className={cn(
                         'flex-1 min-w-0 flex items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded-md cursor-grab active:cursor-grabbing transition-[padding]',
-                        isRepo && !hideDirectoryControls
-                          ? (alwaysShowActions ? 'pr-20' : 'pr-7 group-hover/project:pr-20 group-focus-within/project:pr-20')
-                          : (alwaysShowActions ? 'pr-14' : 'pr-7 group-hover/project:pr-14 group-focus-within/project:pr-14'),
+                        togglePaddingClass,
                       )}
                     >
                     <span className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center">
@@ -242,49 +262,53 @@ export const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
                   </Tooltip>
                 ) : null}
 
-                <DropdownMenu
-                  open={isMenuOpen}
-                  onOpenChange={handleMenuOpenChange}
-                >
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className={cn(
-                          'inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 hover:text-foreground',
-                          isMenuOpen
-                            ? 'opacity-100 pointer-events-auto'
-                            : alwaysShowActions
-                              ? 'opacity-100'
-                              : 'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto group-focus-within/project:opacity-100 group-focus-within/project:pointer-events-auto',
+                {showProjectMenu ? (
+                  <DropdownMenu
+                    open={isMenuOpen}
+                    onOpenChange={handleMenuOpenChange}
+                  >
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          className={cn(
+                            'inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 hover:text-foreground',
+                            isMenuOpen
+                              ? 'opacity-100 pointer-events-auto'
+                              : mobileVariant
+                                ? 'opacity-100'
+                                : 'opacity-0 pointer-events-none group-hover/project:opacity-100 group-hover/project:pointer-events-auto group-focus-within/project:opacity-100 group-focus-within/project:pointer-events-auto',
+                          )}
+                          aria-label="Project menu"
+                          onClick={handleMenuTriggerClick}
+                        >
+                          <RiMore2Line className="h-3.5 w-3.5" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="min-w-[180px]">
+                        {showNewSessionMenuItem && (
+                          <DropdownMenuItem onClick={onNewSession}>
+                            <RiAddLine className="mr-1.5 h-4 w-4" />
+                            New Session
+                          </DropdownMenuItem>
                         )}
-                        aria-label={t('sessions.sidebar.project.actions.projectMenu')}
-                        onPointerDown={handleMenuTriggerPointerDown}
-                        onMouseDown={handleMenuTriggerMouseDown}
-                        onClick={handleMenuTriggerClick}
-                      >
-                        <Icon name="more-2" className="h-3.5 w-3.5" />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="min-w-[180px]">
-                      {showCreateButtons && !isRepo && !hideDirectoryControls && onNewSession && (
-                      <DropdownMenuItem onClick={onNewSession}>
-                        <Icon name="add" className="mr-1.5 h-4 w-4" />
-                        {t('sessions.sidebar.project.actions.newSession')}
-                      </DropdownMenuItem>
-                    )}
-                    <DropdownMenuItem onClick={onRenameStart}>
-                      <Icon name="pencil-ai" className="mr-1.5 h-4 w-4" />
-                      {t('sessions.sidebar.session.menu.rename')}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      onClick={onClose}
-                      className="text-destructive focus:text-destructive"
-                    >
-                      <Icon name="close" className="mr-1.5 h-4 w-4" />
-                      {t('sessions.sidebar.project.actions.closeProject')}
-                    </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                        {showRenameAction ? (
+                          <DropdownMenuItem onClick={onRenameStart}>
+                            <RiPencilAiLine className="mr-1.5 h-4 w-4" />
+                            Rename
+                          </DropdownMenuItem>
+                        ) : null}
+                        {showCloseAction ? (
+                          <DropdownMenuItem
+                            onClick={onClose}
+                            className="text-destructive focus:text-destructive"
+                          >
+                            <RiCloseLine className="mr-1.5 h-4 w-4" />
+                            Close Project
+                          </DropdownMenuItem>
+                        ) : null}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                ) : null}
               </div>
 
               {showCreateButtons && onNewSession ? (

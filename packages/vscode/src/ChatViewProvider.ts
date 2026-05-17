@@ -6,27 +6,7 @@ import { getWebviewShikiThemes } from './shikiThemes';
 import { getWebviewHtml } from './webviewHtml';
 import { openSseProxy } from './sseProxy';
 import { resolveWebviewDevServerUrl } from './webviewDevServer';
-import { normalizeWindowsDriveLetter } from './pathUtils';
-
-type ActiveEditorFilePayload = {
-  filePath: string;
-  fileName: string;
-  relativePath: string;
-  fileSize: number | null;
-  selection: { startLine: number; endLine: number; text: string } | null;
-};
-
-const isSameActiveEditorFilePayload = (a: ActiveEditorFilePayload | null, b: ActiveEditorFilePayload | null): boolean => {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return a.filePath === b.filePath
-    && a.fileName === b.fileName
-    && a.relativePath === b.relativePath
-    && a.fileSize === b.fileSize
-    && a.selection?.startLine === b.selection?.startLine
-    && a.selection?.endLine === b.selection?.endLine
-    && a.selection?.text === b.selection?.text;
-};
+import { getWorkspaceContextPayload } from './workspaceRoots';
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'openchamber.chatView';
@@ -344,6 +324,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  public updateWorkspaceContext(): void {
+    if (!this._view) {
+      return;
+    }
+
+    this._view.webview.postMessage({
+      type: 'command',
+      command: 'vscodeWorkspaceContext',
+      payload: getWorkspaceContextPayload(),
+    });
+  }
+
   private _sendCachedState() {
     if (!this._view) {
       return;
@@ -532,9 +524,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private _getHtmlForWebview(webview: vscode.Webview) {
-    const workspaceFolder = normalizeWindowsDriveLetter(
-      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || ''
-    );
+    const workspaceContext = getWorkspaceContextPayload();
     // Use cached values which are updated by onStatusChange callback
     const initialStatus = this._cachedStatus;
     const cliAvailable = this._openCodeManager?.isCliAvailable() ?? false;
@@ -542,7 +532,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return getWebviewHtml({
       webview,
       extensionUri: this._extensionUri,
-      workspaceFolder,
+      workspaceFolder: workspaceContext.workspaceFolder,
+      activeWorkspaceFolder: workspaceContext.activeWorkspaceFolder,
+      workspaceFolders: workspaceContext.workspaceFolders,
       initialStatus,
       cliAvailable,
       extensionVersion: String(this._context.extension?.packageJSON?.version || ''),

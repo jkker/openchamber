@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { type DiscoveredSkill, type SkillScope, type SkillSource } from './opencodeConfig';
 import type { BridgeContext } from './bridge';
+import { getActiveWorkspaceFolderPath } from './workspaceRoots';
 
 const SETTINGS_KEY = 'openchamber.settings';
 const OPENCHAMBER_SHARED_SETTINGS_PATH = path.join(os.homedir(), '.config', 'openchamber', 'settings.json');
@@ -255,10 +256,12 @@ const readPersistedSettings = (ctx?: BridgeContext): Record<string, unknown> => 
 };
 
 export const readSettings = (ctx?: BridgeContext): Record<string, unknown> => {
-  const persisted = readPersistedSettings(ctx);
-  const persistedOpencodeBinary =
-    typeof persisted.opencodeBinary === 'string' ? String(persisted.opencodeBinary).trim() : '';
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+  const stored = ctx?.context?.globalState.get<Record<string, unknown>>(SETTINGS_KEY) || {};
+  const restStored = { ...stored };
+  delete (restStored as Record<string, unknown>).lastDirectory;
+  const shared = readSharedSettingsFromDisk();
+  const sharedOpencodeBinary = typeof shared.opencodeBinary === 'string' ? shared.opencodeBinary.trim() : '';
+  const workspaceFolder = getActiveWorkspaceFolderPath() || '';
   const themeVariant =
     vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Light ||
     vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.HighContrastLight

@@ -196,6 +196,7 @@ export type { VoiceStatus, VoiceMode } from "./voice-store"
 
 export type NewSessionDraftState = {
   open: boolean
+  requestKey: number
   selectedProjectId?: string | null
   backendId?: string | null
   directoryOverride: string | null
@@ -375,7 +376,7 @@ const activateConfigForDirectory = async (directory: string | null | undefined):
 
 const DEFAULT_DRAFT: NewSessionDraftState = {
   open: false,
-  backendId: null,
+  requestKey: 0,
   directoryOverride: null,
   parentID: null,
 }
@@ -503,9 +504,10 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
     persistDraftTarget({ projectId: selectedProject?.id ?? null, directory })
 
-    set({
+    set((s) => ({
       newSessionDraft: {
         open: true,
+        requestKey: s.newSessionDraft.requestKey + 1,
         selectedProjectId: selectedProject?.id ?? null,
         backendId: options?.backendId ?? null,
         directoryOverride: directory,
@@ -520,7 +522,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       },
       currentSessionId: null,
       error: null,
-    })
+    }))
 
     // Clear composer attachments when opening a new session draft.
     // Attachments from the previous session (e.g. restored by revert) must
@@ -538,8 +540,9 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   // closeNewSessionDraft
   // ---------------------------------------------------------------------------
   closeNewSessionDraft: () => {
-    set({
+    set((s) => ({
       newSessionDraft: {
+        ...s.newSessionDraft,
         open: false,
         selectedProjectId: null,
         backendId: null,
@@ -553,7 +556,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         syntheticParts: undefined,
         targetFolderId: undefined,
       },
-    })
+    }))
   },
 
   setNewSessionDraftTarget: (target) => {

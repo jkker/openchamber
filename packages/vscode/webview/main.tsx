@@ -21,6 +21,8 @@ declare global {
     __VSCODE_CONFIG__?: {
       apiUrl?: string;
       workspaceFolder: string;
+      activeWorkspaceFolder?: string;
+      workspaceFolders?: Array<{ name: string; path: string; index?: number }>;
       theme: string;
       connectionStatus: string;
       cliAvailable?: boolean;
@@ -51,6 +53,89 @@ try {
 }
 
 window.__OPENCHAMBER_RUNTIME_APIS__ = createVSCodeAPIs();
+
+const normalizeWorkspacePath = (value: string) => {
+  const normalized = value
+    .replace(/\\/g, '/')
+    .replace(/^([a-z]):\//, (_, letter: string) => `${letter.toUpperCase()}:/`)
+    .replace(/^\/([a-z]):\//, (_, letter: string) => `/${letter.toUpperCase()}:/`);
+  if (normalized === '/') {
+    return '/';
+  }
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+};
+
+const normalizeWorkspaceFolders = (
+  folders: unknown,
+): Array<{ name: string; path: string; index: number }> => {
+  if (!Array.isArray(folders)) {
+    return [];
+  }
+
+  return folders
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+      const candidate = entry as { name?: unknown; path?: unknown; index?: unknown };
+      const pathValue = typeof candidate.path === 'string' ? normalizeWorkspacePath(candidate.path) : '';
+      if (!pathValue) {
+        return null;
+      }
+      const nameValue = typeof candidate.name === 'string' && candidate.name.trim().length > 0
+        ? candidate.name.trim()
+        : pathValue.split('/').filter(Boolean).pop() || pathValue;
+      const indexValue = typeof candidate.index === 'number' && Number.isFinite(candidate.index)
+        ? candidate.index
+        : index;
+      return {
+        name: nameValue,
+        path: pathValue,
+        index: indexValue,
+      };
+    })
+    .filter((entry): entry is { name: string; path: string; index: number } => entry !== null);
+};
+
+const applyWorkspaceContext = (payload?: {
+  workspaceFolder?: string;
+  activeWorkspaceFolder?: string;
+  workspaceFolders?: Array<{ name: string; path: string; index?: number }>;
+}) => {
+  const current = window.__VSCODE_CONFIG__ || {
+    workspaceFolder: '',
+    theme: 'dark',
+    connectionStatus: 'connecting',
+  };
+  const workspaceFolders = normalizeWorkspaceFolders(payload?.workspaceFolders ?? current.workspaceFolders ?? []);
+  const activeWorkspaceFolder = normalizeWorkspacePath(
+    payload?.activeWorkspaceFolder
+      || payload?.workspaceFolder
+      || current.activeWorkspaceFolder
+      || current.workspaceFolder
+      || workspaceFolders[0]?.path
+      || '',
+  );
+
+  window.__VSCODE_CONFIG__ = {
+    ...current,
+    workspaceFolder: activeWorkspaceFolder,
+    activeWorkspaceFolder,
+    workspaceFolders,
+  };
+
+  if (activeWorkspaceFolder) {
+    window.__OPENCHAMBER_HOME__ = activeWorkspaceFolder;
+  }
+
+  window.dispatchEvent(new CustomEvent('openchamber:vscode-workspace-context', {
+    detail: {
+      workspaceFolder: activeWorkspaceFolder,
+      activeWorkspaceFolder,
+      workspaceFolders,
+    },
+  }));
+};
 
 const bootstrapConnectionStatus = () => {
   const initialStatus = (window.__VSCODE_CONFIG__?.connectionStatus as ConnectionStatus | undefined) || 'connecting';
@@ -265,19 +350,10 @@ onThemeChange((payload) => {
   scheduleThemeRecompute(kind);
 });
 
+applyWorkspaceContext(window.__VSCODE_CONFIG__);
+
 const workspaceFolder = window.__VSCODE_CONFIG__?.workspaceFolder;
 if (workspaceFolder) {
-  const normalizeWorkspacePath = (value: string) => {
-    const normalized = value
-      .replace(/\\/g, '/')
-      .replace(/^([a-z]):\//, (_, letter: string) => `${letter.toUpperCase()}:/`)
-      .replace(/^\/([a-z]):\//, (_, letter: string) => `/${letter.toUpperCase()}:/`);
-    if (normalized === '/') {
-      return '/';
-    }
-    return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
-  };
-
   const normalizedWorkspaceFolder = normalizeWorkspacePath(workspaceFolder);
   window.__OPENCHAMBER_HOME__ = normalizedWorkspaceFolder;
   try {
@@ -1235,16 +1311,16 @@ onCommand('settingsSynced', () => {
   });
 });
 
-// Listen for active editor file changes from the extension
-onCommand('activeEditorFile', (payload) => {
-  import('@/sync/input-store').then(({ useInputStore }) => {
-    useInputStore.getState().setActiveEditorFile((payload as VSCodeActiveEditorFile | null) ?? null);
+onCommand('vscodeWorkspaceContext', (payload) => {
+  applyWorkspaceContext(payload as {
+    workspaceFolder?: string;
+    activeWorkspaceFolder?: string;
+    workspaceFolders?: Array<{ name: string; path: string; index?: number }>;
   });
 });
 
-import('@openchamber/ui/apps/renderVSCodeApp')
-  .then(async ({ renderVSCodeApp }) => {
-    renderVSCodeApp(window.__OPENCHAMBER_RUNTIME_APIS__ ?? createVSCodeAPIs());
+import('@/main')
+  .then(async () => {
     await waitForUiMount();
     uiMounted = true;
     maybeHideLoadingOverlay();

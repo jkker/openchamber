@@ -7,7 +7,7 @@ import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useViewportStore } from '@/sync/viewport-store';
 import { useSessions, useDirectorySync, useSessionMessages, useSessionMessagesResolved } from '@/sync/sync-context';
 import { useConfigStore } from '@/stores/useConfigStore';
-import { useBackendsStore } from '@/stores/useBackendsStore';
+import { useProjectsStore } from '@/stores/useProjectsStore';
 import { ContextUsageDisplay } from '@/components/ui/ContextUsageDisplay';
 import { McpDropdown } from '@/components/mcp/McpDropdown';
 import { SessionSwitcherDropdown } from '@/components/session/SessionSwitcherDropdown';
@@ -143,15 +143,8 @@ export const VSCodeLayout: React.FC = () => {
   const sessionBackendSelections = useSelectionStore((state) => state.sessionBackendSelections);
   const defaultBackendId = useBackendsStore((state) => state.defaultBackendId);
   const sessions = useSessions();
-  const activeBackendId = React.useMemo(() => {
-    if (currentSessionId) {
-      const selectedBackendId = sessionBackendSelections.get(currentSessionId);
-      const liveSession = sessions.find((session) => session.id === currentSessionId) as { backendId?: string | null } | undefined;
-      return selectedBackendId || liveSession?.backendId?.trim() || defaultBackendId || 'opencode';
-    }
-    return draftBackendId || lastUsedBackendId || defaultBackendId || 'opencode';
-  }, [currentSessionId, defaultBackendId, draftBackendId, lastUsedBackendId, sessionBackendSelections, sessions]);
-  const requiresOpenCodeConfig = activeBackendId === 'opencode';
+  const projects = useProjectsStore((state) => state.projects);
+  const showOnlyMainWorkspace = projects.length <= 1;
 
   const activeSessionTitle = React.useMemo(() => {
     if (!currentSessionId) {
@@ -160,6 +153,7 @@ export const VSCodeLayout: React.FC = () => {
     return sessions.find((session) => session.id === currentSessionId)?.title || t('vscodeLayout.title.sessionFallback');
   }, [currentSessionId, sessions, t]);
   const newSessionDraftOpen = useSessionUIStore((state) => Boolean(state.newSessionDraft?.open));
+  const newSessionDraftRequestKey = useSessionUIStore((state) => state.newSessionDraft?.requestKey ?? 0);
   const isSyncingMessages = useViewportStore((state) => state.isSyncing);
   const hasActiveSessionWork = useDirectorySync((state) => {
     const statuses = state.session_status;
@@ -185,6 +179,7 @@ export const VSCodeLayout: React.FC = () => {
   const [hasInitializedOnce, setHasInitializedOnce] = React.useState<boolean>(() => configInitialized);
   const [isInitializing, setIsInitializing] = React.useState<boolean>(false);
   const lastBootstrapAttemptAt = React.useRef<number>(0);
+  const previousDraftRequestKeyRef = React.useRef(newSessionDraftRequestKey);
 
   // Navigate to chat when a session is selected
   React.useEffect(() => {
@@ -385,6 +380,26 @@ export const VSCodeLayout: React.FC = () => {
   const usesMobileLayout = containerWidth > 0 && containerWidth < MOBILE_WIDTH_THRESHOLD;
   const usesExpandedLayout = containerWidth >= EXPANDED_LAYOUT_THRESHOLD;
 
+  React.useEffect(() => {
+    const draftRequestChanged = previousDraftRequestKeyRef.current !== newSessionDraftRequestKey;
+    previousDraftRequestKeyRef.current = newSessionDraftRequestKey;
+
+    if (viewMode !== 'sidebar') {
+      return;
+    }
+    if (usesExpandedLayout) {
+      return;
+    }
+    if (currentView !== 'sessions') {
+      return;
+    }
+    if (!newSessionDraftOpen || !draftRequestChanged) {
+      return;
+    }
+
+    setCurrentView('chat');
+  }, [currentView, newSessionDraftOpen, newSessionDraftRequestKey, usesExpandedLayout, viewMode]);
+
   const clampExpandedSidebarWidth = React.useCallback((value: number) => {
     return Math.min(SESSIONS_SIDEBAR_MAX_WIDTH, Math.max(SESSIONS_SIDEBAR_MIN_WIDTH, value));
   }, []);
@@ -470,7 +485,7 @@ export const VSCodeLayout: React.FC = () => {
               mobileVariant
               allowReselect
               hideDirectoryControls
-              showOnlyMainWorkspace
+              showOnlyMainWorkspace={showOnlyMainWorkspace}
             />
             <div
               className={cn(
@@ -518,7 +533,7 @@ export const VSCodeLayout: React.FC = () => {
                 allowReselect
                 onSessionSelected={() => setCurrentView('chat')}
                 hideDirectoryControls
-                showOnlyMainWorkspace
+                showOnlyMainWorkspace={showOnlyMainWorkspace}
               />
             </div>
           </div>

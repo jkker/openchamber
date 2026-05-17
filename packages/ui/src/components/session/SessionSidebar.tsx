@@ -884,17 +884,14 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
   const setDirectory = useDirectoryStore((state) => state.setDirectory);
 
-  const {
-    projects, activeProjectId, removeProject,
-    setActiveProjectIdOnly, updateProjectMeta, reorderProjects,
-  } = useProjectsStore(useShallow((state) => ({
-    projects: state.projects,
-    activeProjectId: state.activeProjectId,
-    removeProject: state.removeProject,
-    setActiveProjectIdOnly: state.setActiveProjectIdOnly,
-    updateProjectMeta: state.updateProjectMeta,
-    reorderProjects: state.reorderProjects,
-  })));
+  const projects = useProjectsStore((state) => state.projects);
+  const includeProjectWorktreesInVSCode = projects.length > 1;
+  const activeProjectId = useProjectsStore((state) => state.activeProjectId);
+  const addProject = useProjectsStore((state) => state.addProject);
+  const removeProject = useProjectsStore((state) => state.removeProject);
+  const setActiveProjectIdOnly = useProjectsStore((state) => state.setActiveProjectIdOnly);
+  const updateProjectMeta = useProjectsStore((state) => state.updateProjectMeta);
+  const reorderProjects = useProjectsStore((state) => state.reorderProjects);
 
   const {
     setActiveMainTab, openContextPanelTab, setSettingsDialogOpen,
@@ -1610,12 +1607,14 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     archivedSessions,
     normalizedProjects,
     isVSCode,
+    includeWorktreesInVSCode: includeProjectWorktreesInVSCode,
     availableWorktreesByProject,
     cleanupSessions,
   });
 
   const { getSessionsForProject, getArchivedSessionsForProject } = useProjectSessionLists({
     isVSCode,
+    includeWorktreesInVSCode: includeProjectWorktreesInVSCode,
     sessions,
     archivedSessions,
     availableWorktreesByProject,
@@ -1627,6 +1626,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     archivedSessions,
     availableWorktreesByProject,
     isVSCode,
+    includeWorktreesInVSCode: includeProjectWorktreesInVSCode,
     isSessionsLoading,
     foldersMap,
     createFolder,

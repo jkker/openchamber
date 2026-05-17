@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import { getThemeKindName } from './theme';
 import type { ConnectionStatus } from './opencode';
+import type { WorkspaceFolderInfo } from './workspaceRoots';
 
 export type PanelType = 'chat' | 'agentManager';
 
@@ -9,6 +10,8 @@ export interface WebviewHtmlOptions {
   webview: vscode.Webview;
   extensionUri: vscode.Uri;
   workspaceFolder: string;
+  workspaceFolders?: WorkspaceFolderInfo[];
+  activeWorkspaceFolder?: string;
   initialStatus: ConnectionStatus;
   cliAvailable: boolean;
   panelType?: PanelType;
@@ -46,6 +49,8 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
     webview,
     extensionUri,
     workspaceFolder,
+    workspaceFolders = [],
+    activeWorkspaceFolder = workspaceFolder,
     initialStatus,
     cliAvailable,
     panelType = 'chat',
@@ -66,6 +71,11 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
   const fontSrc = uniqueTokens([webview.cspSource, 'data:', devServerOrigin]);
 
   const themeKind = getThemeKindName(vscode.window.activeColorTheme.kind);
+  const serializedWorkspaceFolders = JSON.stringify(workspaceFolders)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e');
+  const escapedWorkspaceFolder = workspaceFolder.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escapedActiveWorkspaceFolder = activeWorkspaceFolder.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
   // Use VS Code CSS variables for proper theme integration
   // These variables are automatically provided by VS Code to webviews
@@ -165,7 +175,9 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
     window.process = window.process || { env: { NODE_ENV: 'production' }, platform: '', version: '', browser: true };
 
     window.__VSCODE_CONFIG__ = {
-      workspaceFolder: "${workspaceFolder.replace(/\\/g, '\\\\')}",
+      workspaceFolder: "${escapedWorkspaceFolder}",
+      activeWorkspaceFolder: "${escapedActiveWorkspaceFolder}",
+      workspaceFolders: ${serializedWorkspaceFolders},
       theme: "${themeKind}",
       connectionStatus: "${initialStatus}",
       cliAvailable: ${cliAvailable},
@@ -176,7 +188,7 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
       viewMode: "${viewMode}",
       initialSessionId: ${initialSessionId ? `"${initialSessionId.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : 'null'},
     };
-    window.__OPENCHAMBER_HOME__ = "${workspaceFolder.replace(/\\/g, '\\\\')}";
+    window.__OPENCHAMBER_HOME__ = "${escapedActiveWorkspaceFolder}";
     
     // Handle connection status updates to update loading screen
     window.addEventListener('message', function(event) {

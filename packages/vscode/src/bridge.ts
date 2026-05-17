@@ -20,6 +20,7 @@ import {
   parseDroppedFileReference,
   readUriAsAttachment,
   resolveUserPath,
+  resolveWorkspacePath,
   listDirectoryEntries,
   normalizeFsPath,
   searchDirectory,
@@ -1539,6 +1540,7 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
       { id, type, payload },
       {
         resolveUserPath,
+        resolveWorkspacePath,
         listDirectoryEntries,
         normalizeFsPath,
         execGit,

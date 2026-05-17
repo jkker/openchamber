@@ -39,6 +39,7 @@ import {
   type SkillsCatalogSourceConfig,
 } from './skillsCatalog';
 import type { BridgeContext, BridgeResponse } from './bridge';
+import { getActiveWorkspaceFolderPath } from './workspaceRoots';
 
 type BridgeMessageInput = {
   id: string;
@@ -63,7 +64,7 @@ const MAX_BEHAVIOR_PROMPT_SIZE = 1024 * 1024;
 const resolveWorkingDirectory = (ctx: BridgeContext | undefined, directory?: string): string | undefined => (
   (typeof directory === 'string' && directory.trim())
     ? directory.trim()
-    : (ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath)
+    : (ctx?.manager?.getWorkingDirectory() || getActiveWorkspaceFolderPath())
 );
 
 const parseSkillsCatalogSources = (settings: Record<string, unknown>): SkillsCatalogSourceConfig[] => {
@@ -454,7 +455,7 @@ export async function handleConfigBridgeMessage(
 
     case 'api:config/skills': {
       const { method, name, body } = (payload || {}) as { method?: string; name?: string; body?: Record<string, unknown> };
-      const workingDirectory = ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const workingDirectory = ctx?.manager?.getWorkingDirectory() || getActiveWorkspaceFolderPath();
       const normalizedMethod = typeof method === 'string' && method.trim() ? method.trim().toUpperCase() : 'GET';
 
       if (!name && normalizedMethod === 'GET') {
@@ -536,7 +537,7 @@ export async function handleConfigBridgeMessage(
 
     case 'api:config/skills:catalog': {
       const refresh = Boolean((payload as { refresh?: boolean } | undefined)?.refresh);
-      const workingDirectory = ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const workingDirectory = ctx?.manager?.getWorkingDirectory() || getActiveWorkspaceFolderPath();
       const settings = deps.readSettings(ctx);
       const additionalSources = parseSkillsCatalogSources(settings);
       const installedSkills = (await deps.fetchOpenCodeSkillsFromApi(ctx, workingDirectory)) || undefined;
@@ -564,7 +565,7 @@ export async function handleConfigBridgeMessage(
         conflictDecisions?: Record<string, 'skip' | 'overwrite'>;
       };
 
-      const workingDirectory = ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const workingDirectory = ctx?.manager?.getWorkingDirectory() || getActiveWorkspaceFolderPath();
 
       const data = await installSkillsFromGit({
         source: String(body.source || ''),
@@ -611,7 +612,7 @@ export async function handleConfigBridgeMessage(
         filePath?: string;
         content?: string;
       };
-      const workingDirectory = ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const workingDirectory = ctx?.manager?.getWorkingDirectory() || getActiveWorkspaceFolderPath();
 
       const skillName = typeof name === 'string' ? name.trim() : '';
       if (!skillName) {

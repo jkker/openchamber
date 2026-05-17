@@ -130,10 +130,10 @@ export interface SyntheticContextPart {
 }
 
 export type NewSessionDraftState = {
-  open: boolean;
-  selectedProjectId?: string | null;
-  backendId?: string | null;
-  directoryOverride: string | null;
+    open: boolean;
+    requestKey: number;
+    selectedProjectId?: string | null;
+    directoryOverride: string | null;
     pendingWorktreeRequestId?: string | null;
     bootstrapPendingDirectory?: string | null;
     preserveDirectoryOverride?: boolean;
