@@ -81,11 +81,16 @@ export const useSpeechPlaybackStore = create<SpeechPlaybackStore>()((set, get) =
       ? speakableQueue.find((item) => item.messageId === activeMessageId) ?? null
       : null;
 
-    set({
+    const nextState: Partial<SpeechPlaybackStore> = {
       queue: speakableQueue,
       activeItem: nextActiveItem,
-      ...(nextActiveItem ? {} : { panelState: 'closed', ...EMPTY_RESOURCE }),
-    });
+    };
+
+    if (!nextActiveItem) {
+      Object.assign(nextState, { panelState: 'closed', ...EMPTY_RESOURCE });
+    }
+
+    set(nextState as Pick<SpeechPlaybackStore, keyof SpeechPlaybackStore>);
   },
   openForItem: (item, autoPlay = true) => {
     set((state) => ({

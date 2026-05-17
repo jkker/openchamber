@@ -69,3 +69,10 @@ export const getDictationPlaybackAction = (
 
   return 'stop-dictation';
 };
+
+export const BROWSER_PLAYBACK_PROVIDER_WARNING =
+  'Seekable playback uses Edge TTS because browser speech synthesis does not expose audio timelines.';
+
+export const resolvePlaybackProvider = (provider: string) => (
+  provider === 'browser' ? 'edge-tts' : provider
+);

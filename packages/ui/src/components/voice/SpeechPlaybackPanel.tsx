@@ -10,6 +10,9 @@ import { VoiceButton, type VoiceButtonState } from '@/components/ui/voice-button
 import { cn } from '@/lib/utils';
 import type { SpeechPlaybackItem } from '@/lib/voice/speechPlayback';
 
+const PREVIEW_TEXT_LIMIT = 180;
+const PREVIEW_TEXT_ELLIPSIS_OFFSET = 3;
+
 const PlaybackPanelInner = React.memo(({
   activeItem,
   providerLabel,
@@ -57,8 +60,8 @@ const PlaybackPanelInner = React.memo(({
   const isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined';
   const isMobile = isBrowser && window.matchMedia('(max-width: 767px)').matches;
   const currentIndex = queue.findIndex((item) => item.messageId === activeItem.messageId);
-  const previewText = activeItem.originalText.length > 180
-    ? `${activeItem.originalText.slice(0, 177)}...`
+  const previewText = activeItem.originalText.length > PREVIEW_TEXT_LIMIT
+    ? `${activeItem.originalText.slice(0, PREVIEW_TEXT_LIMIT - PREVIEW_TEXT_ELLIPSIS_OFFSET)}...`
     : activeItem.originalText;
 
   React.useEffect(() => {

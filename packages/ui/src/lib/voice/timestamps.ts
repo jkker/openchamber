@@ -11,6 +11,7 @@ export interface CharacterAlignmentResponseModel {
 }
 
 const DEFAULT_CHARS_PER_SECOND = 14;
+const getLastTimestampEnd = (timestamps: WordTimestamp[]) => timestamps[timestamps.length - 1]?.end;
 
 const clampTime = (value: number, fallback = 0) => {
   if (!Number.isFinite(value)) return fallback;
@@ -35,7 +36,11 @@ const distributeInterval = (
   const step = text.length > 0 ? duration / text.length : 0;
 
   for (let index = 0; index < text.length; index += 1) {
-    characters.push(text[index]!);
+    const character = text[index];
+    if (character == null) {
+      break;
+    }
+    characters.push(character);
     const charStart = safeStart + (step * index);
     const charEnd = index === text.length - 1 ? safeEnd : safeStart + (step * (index + 1));
     starts.push(charStart);
@@ -100,7 +105,7 @@ export const timestampsToCharacterAlignment = (
     const wordText = timestamp.text ?? '';
     const startIndex = findTimestampWordStart(text, wordText, cursor);
     if (startIndex < 0) {
-      return estimateCharacterAlignment(text, options?.audioDurationSeconds ?? timestamps[timestamps.length - 1]?.end);
+      return estimateCharacterAlignment(text, options?.audioDurationSeconds ?? getLastTimestampEnd(timestamps));
     }
 
     const gap = text.slice(cursor, startIndex);
@@ -122,7 +127,7 @@ export const timestampsToCharacterAlignment = (
   }
 
   if (characters.join('') !== text) {
-    return estimateCharacterAlignment(text, options?.audioDurationSeconds ?? previousEnd);
+    return estimateCharacterAlignment(text, options?.audioDurationSeconds ?? getLastTimestampEnd(timestamps) ?? previousEnd);
   }
 
   return {

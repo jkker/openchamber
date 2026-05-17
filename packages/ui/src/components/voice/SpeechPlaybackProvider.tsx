@@ -5,9 +5,11 @@ import { useSessionMessageRecords } from '@/sync/sync-context';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useSpeechPlaybackStore } from '@/stores/useSpeechPlaybackStore';
 import {
+  BROWSER_PLAYBACK_PROVIDER_WARNING,
   buildSpeechPlaybackCacheKey,
   buildSpeechPlaybackConfigHash,
   getAdjacentPlaybackItem,
+  resolvePlaybackProvider,
   type SpeechPlaybackItem,
 } from '@/lib/voice/speechPlayback';
 import {
@@ -48,6 +50,31 @@ const base64ToObjectUrl = (audioBase64: string, contentType: string) => {
     bytes[index] = binary.charCodeAt(index);
   }
   return URL.createObjectURL(new Blob([bytes], { type: contentType }));
+};
+
+const requestPlaybackMetadata = async (payload: Record<string, unknown>) => {
+  const response = await fetch('/api/tts/speak', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(errorPayload.error || `Failed to generate playback (${response.status})`);
+  }
+
+  return response.json() as Promise<{
+    audioBase64: string;
+    contentType: string;
+    provider?: string;
+    model?: string;
+    voice?: string;
+    timestamps?: WordTimestamp[];
+    warnings?: string[];
+  }>;
 };
 
 const clampCache = (cache: Map<string, SpeechPlaybackGeneratedResource>) => {
@@ -245,45 +272,24 @@ export const SpeechPlaybackProvider = ({ children }: { children: React.ReactNode
       return cached;
     }
 
-    const response = await fetch('/api/tts/speak', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        text: transcript,
-        provider: ttsProvider === 'browser' ? 'edge-tts' : ttsProvider,
-        speechSdkProvider: ttsSpeechSdkProvider,
-        voice: ttsVoice,
-        model: ttsModel,
-        speed: ttsRate,
-        pitch: ttsPitch,
-        volume: ttsVolume,
-        baseURL: ttsBaseURL || undefined,
-        apiKeyMode: ttsApiKeyMode,
-        apiKey: ttsApiKeyMode !== 'server' ? (ttsApiKey || undefined) : undefined,
-        timestamps: ttsTimestampsEnabled,
-        providerOptions: ttsProviderOptions,
-        summarize: false,
-        returnMetadata: true,
-        ...(settingsZenModel ? { zenModel: settingsZenModel } : {}),
-      }),
+    const payload = await requestPlaybackMetadata({
+      text: transcript,
+      provider: resolvePlaybackProvider(ttsProvider),
+      speechSdkProvider: ttsSpeechSdkProvider,
+      voice: ttsVoice,
+      model: ttsModel,
+      speed: ttsRate,
+      pitch: ttsPitch,
+      volume: ttsVolume,
+      baseURL: ttsBaseURL || undefined,
+      apiKeyMode: ttsApiKeyMode,
+      apiKey: ttsApiKeyMode !== 'server' ? (ttsApiKey || undefined) : undefined,
+      timestamps: ttsTimestampsEnabled,
+      providerOptions: ttsProviderOptions,
+      summarize: false,
+      returnMetadata: true,
+      ...(settingsZenModel ? { zenModel: settingsZenModel } : {}),
     });
-
-    if (!response.ok) {
-      const errorPayload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-      throw new Error(errorPayload.error || `Failed to generate playback (${response.status})`);
-    }
-
-    const payload = await response.json() as {
-      audioBase64: string;
-      contentType: string;
-      provider?: string;
-      model?: string;
-      voice?: string;
-      timestamps?: WordTimestamp[];
-      warnings?: string[];
-    };
 
     const resource: SpeechPlaybackGeneratedResource = {
       audioUrl: base64ToObjectUrl(payload.audioBase64, payload.contentType),
@@ -296,7 +302,7 @@ export const SpeechPlaybackProvider = ({ children }: { children: React.ReactNode
       voiceLabel: payload.voice || ttsVoice || '',
       warningLabel: payload.warnings?.[0]
         ?? (ttsProvider === 'browser'
-          ? 'Seekable playback uses Edge TTS because browser speech synthesis does not expose audio timelines.'
+          ? BROWSER_PLAYBACK_PROVIDER_WARNING
           : null),
     };
 

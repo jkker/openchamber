@@ -12,6 +12,8 @@ import type { SpeechPlaybackItem } from '@/lib/voice/speechPlayback';
 import { cn } from '@/lib/utils';
 
 const FLOATING_PILL_STORAGE_KEY = 'openchamber:speech-playback-pill-position';
+const DEFAULT_PILL_WIDTH = 312;
+const DEFAULT_PILL_HEIGHT = 120;
 
 const readStoredPosition = () => {
   if (typeof window === 'undefined') return null;
@@ -89,7 +91,10 @@ export const SpeechPlaybackFloatingPill = ({
     return null;
   }
 
-  const position = clampPosition(floatingPosition ?? { x: Math.max(16, window.innerWidth - 312), y: Math.max(16, window.innerHeight - 120) });
+  const position = clampPosition(floatingPosition ?? {
+    x: Math.max(16, window.innerWidth - DEFAULT_PILL_WIDTH),
+    y: Math.max(16, window.innerHeight - DEFAULT_PILL_HEIGHT),
+  });
   const progress = playerSnapshot.duration > 0
     ? Math.min(100, (playerSnapshot.currentTime / playerSnapshot.duration) * 100)
     : 0;
