@@ -204,6 +204,9 @@ export const SpeechPlaybackProvider = ({ children }: { children: React.ReactNode
     isPlaying: false,
   });
   const summaryCacheRef = React.useRef(new Map<string, string>());
+  // Playback responses are cached as object URLs so summary/original switching and
+  // queue navigation can reuse synthesized audio. URLs are revoked on eviction and
+  // provider unmount to avoid leaking Blob-backed browser memory.
   const playbackCacheRef = React.useRef(new Map<string, SpeechPlaybackGeneratedResource>());
 
   const configHash = React.useMemo(() => buildSpeechPlaybackConfigHash({
@@ -261,10 +264,16 @@ export const SpeechPlaybackProvider = ({ children }: { children: React.ReactNode
     return summary;
   }, [summarizeCharacterThreshold, summarizeMaxLength, summarizeMessageTTS]);
 
-    const generatePlaybackResource = React.useCallback(async (
+  const generatePlaybackResource = React.useCallback(async (
     item: SpeechPlaybackItem,
     mode: 'summary' | 'original',
   ): Promise<SpeechPlaybackGeneratedResource> => {
+    /**
+     * Resolve the requested text mode, reuse any cached audio for the active TTS
+     * configuration, and otherwise synthesize a fresh playback resource. This writes
+     * object URLs into the local cache, so callers must rely on the provider cleanup
+     * path to revoke them when entries are discarded.
+     */
     const transcript = await resolveTextForMode(item, mode);
     const cacheKey = buildSpeechPlaybackCacheKey(item.messageId, mode, configHash);
     const cached = playbackCacheRef.current.get(cacheKey);

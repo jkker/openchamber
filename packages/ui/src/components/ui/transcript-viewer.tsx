@@ -54,6 +54,12 @@ export const useTranscriptViewerContext = () => {
 };
 
 const buildSegments = (alignment: CharacterAlignmentResponseModel): TranscriptSegment[] => {
+  /**
+   * Convert per-character timings into alternating word and gap segments so the UI
+   * can preserve visible whitespace while only making speakable words interactive.
+   * A simple stateful buffer groups consecutive whitespace characters separately
+   * from consecutive non-whitespace characters.
+   */
   const segments: TranscriptSegment[] = [];
   let buffer = '';
   let bufferStart = 0;

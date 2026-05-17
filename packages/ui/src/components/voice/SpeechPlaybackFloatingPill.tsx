@@ -22,7 +22,7 @@ const readStoredPosition = () => {
     if (!value) return null;
     const parsed = JSON.parse(value) as { x?: number; y?: number };
     if (!Number.isFinite(parsed.x) || !Number.isFinite(parsed.y)) return null;
-    return { x: parsed.x!, y: parsed.y! };
+    return { x: Number(parsed.x), y: Number(parsed.y) };
   } catch {
     return null;
   }

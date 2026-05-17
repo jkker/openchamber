@@ -56,6 +56,9 @@ const findTimestampWordStart = (text: string, word: string, fromIndex: number): 
     return directMatch;
   }
 
+  // Some providers preserve timing but normalize transcript casing differently than
+  // the visible message text. Fall back to case-insensitive matching so alignment
+  // still succeeds for common "Hello" vs "hello" differences.
   return text.toLowerCase().indexOf(word.toLowerCase(), fromIndex);
 };
 

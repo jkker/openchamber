@@ -127,7 +127,8 @@ export const AudioPlayerProvider = ({
     if (!audio) return;
 
     const tryPlay = () => {
-      void play().catch(() => {
+      void play().catch((error) => {
+        console.warn('[AudioPlayerProvider] Autoplay failed:', error);
         setIsPlaying(false);
       });
     };
