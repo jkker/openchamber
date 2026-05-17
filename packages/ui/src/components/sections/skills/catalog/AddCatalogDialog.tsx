@@ -25,7 +25,7 @@ import { updateDesktopSettings } from '@/lib/persistence';
 import type { DesktopSettings, SkillCatalogConfig } from '@/lib/desktop';
 import { useSkillsCatalogStore } from '@/stores/useSkillsCatalogStore';
 import { useGitIdentitiesStore } from '@/stores/useGitIdentitiesStore';
-import { useI18n } from '@/lib/i18n';
+import { buildRuntimeApiHeaders, resolveRuntimeApiEndpoint } from '@/lib/instances/runtimeApiBaseUrl';
 
 const generateCatalogId = () => `custom:${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
@@ -60,9 +60,9 @@ const loadSettings = async (): Promise<DesktopSettings | null> => {
       return (result?.settings || {}) as DesktopSettings;
     }
 
-    const response = await fetch('/api/config/settings', {
+    const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
       method: 'GET',
-      headers: { Accept: 'application/json' },
+      headers: buildRuntimeApiHeaders(),
     });
 
     if (!response.ok) {

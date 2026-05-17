@@ -13,9 +13,26 @@ declare global {
 
 window.__OPENCHAMBER_RUNTIME_APIS__ = createWebAPIs();
 
-type PrerenderingDocument = Document & {
-  prerendering?: boolean;
-};
+if (import.meta.env.PROD && window.__OPENCHAMBER_RUNTIME_APIS__?.runtime?.platform === 'web') {
+  registerSW({
+    onRegistered(registration: ServiceWorkerRegistration | undefined) {
+      if (!registration) {
+        return;
+      }
+
+      setInterval(() => {
+        void registration.update();
+      }, 60 * 60 * 1000);
+    },
+    onRegisterError(error: unknown) {
+      console.warn('[PWA] service worker registration failed:', error);
+    },
+  });
+} else if ('serviceWorker' in navigator) {
+  void navigator.serviceWorker.getRegistrations()
+    .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+    .catch(() => {});
+}
 
 const canUseServiceWorker = (): boolean => {
   if (!('serviceWorker' in navigator)) return false;

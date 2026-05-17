@@ -450,9 +450,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const [isAgentSelectorOpen, setIsAgentSelectorOpen] = React.useState(false);
     const { favoriteModelsList, recentModelsList } = useModelLists();
 
-    const { isMobile, isTablet } = useDeviceInfo();
-    const alwaysShowHoverDetails = isMobile || isTablet;
-    const isDesktop = React.useMemo(() => isDesktopShell(), []);
+    const { isMobile } = useDeviceInfo();
+    const isDesktop = isDesktopShell();
     const isVSCodeRuntime = useIsVSCodeRuntime();
     // Only use mobile panels on actual mobile devices, VSCode uses desktop dropdowns
     const isCompact = isMobile;

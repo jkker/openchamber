@@ -1,5 +1,5 @@
 import React from 'react';
-import { isDesktopShell } from '@/lib/desktop';
+import { isDesktopShell, isMobileRuntime } from '@/lib/desktop';
 
 export type DeviceType = 'desktop' | 'mobile' | 'tablet';
 
@@ -45,7 +45,8 @@ const getNavigatorDeviceHints = (maxTouchPoints: number) => {
 };
 
 const setRootDeviceAttributes = (
-  isTauriShellRuntime: boolean,
+  isDesktopShellRuntime: boolean,
+  isMobileShellRuntime: boolean,
   deviceType: DeviceType,
   hasTouchInput: boolean,
 ) => {
@@ -57,7 +58,7 @@ const setRootDeviceAttributes = (
   const isMobile = deviceType === 'mobile';
   const isTablet = deviceType === 'tablet';
 
-  root.classList.remove('device-mobile', 'device-tablet', 'device-desktop');
+  root.classList.remove('device-mobile', 'device-tablet', 'device-desktop', 'runtime-ios', 'runtime-android');
   root.classList.add(
     deviceType === 'mobile'
       ? 'device-mobile'
@@ -66,7 +67,20 @@ const setRootDeviceAttributes = (
         : 'device-desktop'
   );
 
-  if (isTauriShellRuntime) {
+  if (isMobileShellRuntime) {
+    root.classList.add('tauri-mobile-runtime');
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent.toLowerCase() : '';
+    if (/iphone|ipad|ipod/.test(ua)) {
+      root.classList.add('runtime-ios');
+    }
+    if (/android/.test(ua)) {
+      root.classList.add('runtime-android');
+    }
+  } else {
+    root.classList.remove('tauri-mobile-runtime');
+  }
+
+  if (isDesktopShellRuntime) {
     root.classList.add('desktop-runtime');
     root.style.setProperty('--is-mobile', '0');
     root.style.setProperty('--device-type', 'desktop');
@@ -76,7 +90,7 @@ const setRootDeviceAttributes = (
     root.classList.remove('mobile-pointer');
   } else {
     root.classList.remove('desktop-runtime');
-    root.style.setProperty('--is-mobile', isMobile ? '1' : '0');
+    root.style.setProperty('--is-mobile', (isMobile || isTablet) ? '1' : '0');
     root.style.setProperty('--device-type', deviceType);
     root.style.setProperty('--font-scale', isMobile ? '0.9' : isTablet ? '0.95' : '1');
     root.style.setProperty('--has-coarse-pointer', hasTouchInput ? '1' : '0');
@@ -91,24 +105,25 @@ const setRootDeviceAttributes = (
 
 export function getDeviceInfo(): DeviceInfo {
   const width = window.innerWidth;
+  const height = window.innerHeight;
   const supportsMatchMedia = typeof window.matchMedia === 'function';
   const pointerQuery = supportsMatchMedia ? window.matchMedia('(pointer: coarse)') : null;
   const hoverQuery = supportsMatchMedia ? window.matchMedia('(hover: none)') : null;
   const prefersCoarsePointer = pointerQuery?.matches ?? false;
   const noHover = hoverQuery?.matches ?? false;
   const maxTouchPoints = typeof navigator !== 'undefined' ? navigator.maxTouchPoints ?? 0 : 0;
+
   const isDesktopShellRuntime = isDesktopShell();
-  const { isExplicitTablet } = getNavigatorDeviceHints(maxTouchPoints);
+  const isMobileShellRuntime = isMobileRuntime();
 
-  const hasTouchInput = prefersCoarsePointer || noHover || maxTouchPoints > 0;
-  const hasTouchOnlyPointer = prefersCoarsePointer || noHover;
+  const hasTouchInput = prefersCoarsePointer || noHover || maxTouchPoints > 0 || isMobileShellRuntime;
 
-  const isTabletWidth = width > BREAKPOINTS.md && width <= BREAKPOINTS.lg;
-  const isMobileWidth = width <= BREAKPOINTS.md;
+  const shortestSide = Math.min(width, height);
+  const isPhoneWidth = shortestSide < BREAKPOINTS.md;
 
-  let isMobile = hasTouchInput && isMobileWidth;
-  let isTablet = hasTouchInput && !isMobile && (isTabletWidth || isExplicitTablet);
-  let isDesktop = !hasTouchInput || (!isTablet && width > BREAKPOINTS.lg);
+  let isMobile = false;
+  let isTablet = false;
+  let isDesktop = true;
   let deviceType: DeviceType = 'desktop';
 
   if (isDesktopShellRuntime) {
@@ -116,16 +131,25 @@ export function getDeviceInfo(): DeviceInfo {
     isTablet = false;
     isDesktop = true;
     deviceType = 'desktop';
-  } else if (isMobile) {
-    deviceType = 'mobile';
-  } else if (isTablet) {
-    deviceType = 'tablet';
+  } else if (hasTouchInput || isMobileShellRuntime) {
+    if (isPhoneWidth) {
+      isMobile = true;
+      isTablet = false;
+      deviceType = 'mobile';
+    } else {
+      isMobile = false;
+      isTablet = true;
+      deviceType = 'tablet';
+    }
+    isDesktop = false;
   } else {
+    isMobile = false;
+    isTablet = false;
     isDesktop = true;
     deviceType = 'desktop';
   }
 
-  setRootDeviceAttributes(isDesktopShellRuntime, deviceType, hasTouchInput);
+  setRootDeviceAttributes(isDesktopShellRuntime, isMobileShellRuntime, deviceType, hasTouchInput);
 
   let breakpoint: keyof typeof BREAKPOINTS = 'xs';
   for (const [key, value] of Object.entries(BREAKPOINTS)) {
@@ -135,7 +159,7 @@ export function getDeviceInfo(): DeviceInfo {
   }
 
   return {
-    isMobile,
+    isMobile: isMobile || isTablet,
     isTablet,
     isDesktop,
     deviceType,
@@ -303,7 +327,7 @@ export function useDeviceInfo(): DeviceInfo {
     const noHover = hoverQuery?.matches ?? false;
     const maxTouchPoints = typeof navigator !== 'undefined' ? navigator.maxTouchPoints ?? 0 : 0;
     const hasTouchInput = prefersCoarsePointer || noHover || maxTouchPoints > 0;
-    setRootDeviceAttributes(isDesktopShellRuntime, deviceInfo.deviceType, hasTouchInput);
+    setRootDeviceAttributes(isDesktopShellRuntime, isMobileRuntime(), deviceInfo.deviceType, hasTouchInput);
   }, [deviceInfo.deviceType, deviceInfo.hasTouchInput]);
 
   return deviceInfo;

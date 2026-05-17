@@ -24,6 +24,7 @@ import { renderMagicPrompt } from '@/lib/magicPrompts';
 import { openExternalUrl } from '@/lib/url';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useDeviceInfo } from '@/lib/device';
+import { openExternalUrl } from '@/lib/desktop';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { SimpleMarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { Icon } from "@/components/icon/Icon";
@@ -246,58 +247,6 @@ type ChatDispatchTarget = {
 };
 
 const pullRequestDraftSnapshots = new Map<string, PullRequestDraftSnapshot>();
-
-const openExternal = openExternalUrl;
-
-function useDetectedUpstreamRepo(directory: string, github: GitHubAPI | undefined) {
-  const [detectedUpstream, setDetectedUpstream] = React.useState<DetectedUpstream | null>(null);
-  const [upstreamBranches, setUpstreamBranches] = React.useState<string[]>([]);
-  const attemptedDirectoryRef = React.useRef<string | null>(null);
-
-  React.useEffect(() => {
-    setDetectedUpstream(null);
-    setUpstreamBranches([]);
-  }, [directory]);
-
-  React.useEffect(() => {
-    if (!directory || !github?.repoUpstream || attemptedDirectoryRef.current === directory) {
-      return;
-    }
-    attemptedDirectoryRef.current = directory;
-
-    let cancelled = false;
-    void (async () => {
-      try {
-        const result = await github.repoUpstream(directory);
-        if (cancelled || !result?.isFork || !result.upstream) {
-          return;
-        }
-
-        setDetectedUpstream(result.upstream);
-        if (!github.repoBranches) {
-          return;
-        }
-
-        try {
-          const branches = await github.repoBranches(result.upstream.owner, result.upstream.repo);
-          if (!cancelled) {
-            setUpstreamBranches(branches);
-          }
-        } catch {
-          // Silently fail - branch list is best-effort.
-        }
-      } catch {
-        // Silently fail - upstream detection is best-effort.
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [directory, github]);
-
-  return { detectedUpstream, upstreamBranches };
-}
 
 export const PullRequestSection: React.FC<{
   directory: string;
@@ -1276,7 +1225,7 @@ export const PullRequestSection: React.FC<{
       const message = e instanceof Error ? e.message : String(e);
       toast.error(t('gitView.pr.toast.mergeFailed'), { description: message });
       if (pr.url) {
-        void openExternal(pr.url);
+        void openExternalUrl(pr.url);
       }
     } finally {
       setIsMerging(false);
@@ -1298,7 +1247,7 @@ export const PullRequestSection: React.FC<{
       const message = e instanceof Error ? e.message : String(e);
       toast.error(t('gitView.pr.toast.markReadyFailed'), { description: message });
       if (pr.url) {
-        void openExternal(pr.url);
+        void openExternalUrl(pr.url);
       }
     } finally {
       setIsMarkingReady(false);
@@ -1403,8 +1352,8 @@ export const PullRequestSection: React.FC<{
                   <button
                     type="button"
                     className="inline-flex size-6 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background/70 hover:bg-interactive-hover/60"
-                    onClick={() => void openExternal(pr.url)}
-                    aria-label={t('gitView.pr.actions.openOnGitHubAria')}
+                    onClick={() => void openExternalUrl(pr.url)}
+                    aria-label="Open PR on GitHub"
                   >
                     <Icon name={prStateIconName} className="size-4 shrink-0" style={{ color: prColorVar }} />
                   </button>

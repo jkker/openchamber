@@ -10,7 +10,7 @@ import { GitHubSettings } from './GitHubSettings';
 import { VoiceSettings } from './VoiceSettings';
 import { TunnelSettings } from './TunnelSettings';
 import { OpenCodeCliSettings } from './OpenCodeCliSettings';
-import { DesktopNetworkSettings } from './DesktopNetworkSettings';
+import { DevicesSettings } from './DevicesSettings';
 import { KeyboardShortcutsSettings } from './KeyboardShortcutsSettings';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { useDeviceInfo } from '@/lib/device';
@@ -20,9 +20,10 @@ import type { OpenChamberSection } from './types';
 interface OpenChamberPageProps {
     /** Which section to display. If undefined, shows all sections (mobile/legacy behavior) */
     section?: OpenChamberSection;
+    userCode?: string | null;
 }
 
-export const OpenChamberPage: React.FC<OpenChamberPageProps> = ({ section }) => {
+export const OpenChamberPage: React.FC<OpenChamberPageProps> = ({ section, userCode }) => {
     const { isMobile } = useDeviceInfo();
     const showAbout = isMobile && isWebRuntime();
     const isVSCode = isVSCodeRuntime();
@@ -54,7 +55,7 @@ export const OpenChamberPage: React.FC<OpenChamberPageProps> = ({ section }) => 
                         <SessionRetentionSettings />
                     </div>
                     <div className="border-t border-border/40 pt-6">
-                        <PasskeySettings />
+                        <DevicesSettings prefillUserCode={userCode} />
                     </div>
                     {showAbout && (
                         <div className="border-t border-border/40 pt-6">
@@ -77,6 +78,8 @@ export const OpenChamberPage: React.FC<OpenChamberPageProps> = ({ section }) => 
                 return <SessionsSectionContent />;
             case 'shortcuts':
                 return <ShortcutsSectionContent />;
+            case 'devices':
+                return <DevicesSettings prefillUserCode={userCode} />;
             case 'git':
                 return <GitSectionContent />;
             case 'github':
@@ -110,21 +113,11 @@ const ShortcutsSectionContent: React.FC = () => {
 
 // Visual section: Theme Mode, Font Size, Spacing, Input Bar Offset (mobile), Nav Rail
 const VisualSectionContent: React.FC = () => {
-    const isVSCode = isVSCodeRuntime();
-    return <OpenChamberVisualSettings visibleSettings={[
-        'theme',
-        'pwaInstallName',
-        'pwaOrientation',
-        'mobileKeyboardMode',
-        'timeFormat',
-        'weekStart',
-        'fontSize',
-        'terminalFontSize',
-        'spacing',
-        'inputBarOffset',
-        ...(!isVSCode ? ['terminalQuickKeys' as const] : []),
-        'reportUsage',
-    ]} />;
+    return (
+        <OpenChamberVisualSettings
+            visibleSettings={['theme', 'fontSize', 'terminalFontSize', 'spacing', 'cornerRadius', 'inputBarOffset', 'terminalQuickKeys', 'mobileHaptics', 'navRail']}
+        />
+    );
 };
 
 // Chat section: User message rendering, Diff layout, Mobile status bar, Show reasoning traces, Queue mode, Persist draft

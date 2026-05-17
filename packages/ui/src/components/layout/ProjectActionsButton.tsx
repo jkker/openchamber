@@ -176,7 +176,7 @@ export const ProjectActionsButton = ({
   const { t } = useI18n();
   const { terminal, runtime } = useRuntimeAPIs();
   const { isMobile } = useDeviceInfo();
-  const isDesktopShellApp = React.useMemo(() => isDesktopShell(), []);
+  const isDesktopShellApp = isDesktopShell();
   const desktopSshInstances = useDesktopSshStore((state) => state.instances);
   const loadDesktopSsh = useDesktopSshStore((state) => state.load);
 

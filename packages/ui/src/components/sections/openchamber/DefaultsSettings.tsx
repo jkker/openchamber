@@ -7,9 +7,8 @@ import { updateDesktopSettings } from '@/lib/persistence';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
-import { cn } from '@/lib/utils';
-import { useI18n } from '@/lib/i18n';
-import { parseModelIdentifier } from '@/lib/modelIdentifier';
+import { getModifierLabel, cn } from '@/lib/utils';
+import { buildRuntimeApiHeaders, resolveRuntimeApiEndpoint } from '@/lib/instances/runtimeApiBaseUrl';
 
 const getDisplayModel = (
   storedModel: string | undefined
@@ -76,9 +75,9 @@ export const DefaultsSettings: React.FC = () => {
         }
 
         if (!data) {
-          const response = await fetch('/api/config/settings', {
+          const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
             method: 'GET',
-            headers: { Accept: 'application/json' },
+            headers: buildRuntimeApiHeaders(),
           });
           if (response.ok) {
             data = await response.json();
@@ -131,9 +130,12 @@ export const DefaultsSettings: React.FC = () => {
 
       try {
         await updateDesktopSettings({ defaultModel: newValue ?? '', defaultVariant: '' });
-        const response = await fetch('/api/config/settings', {
+        const response = await fetch(resolveRuntimeApiEndpoint('/config/settings'), {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            ...buildRuntimeApiHeaders(),
+            'Content-Type': 'application/json',
+          },
           body: JSON.stringify({ defaultModel: newValue }),
         });
         if (!response.ok) {
@@ -143,7 +145,14 @@ export const DefaultsSettings: React.FC = () => {
         console.warn('Failed to save default model:', error);
       }
     },
-    [providers, setCurrentVariant, setModel, setProvider, setSettingsDefaultModel, setSettingsDefaultVariant]
+    [
+      providers,
+      setCurrentVariant,
+      setModel,
+      setProvider,
+      setSettingsDefaultModel,
+      setSettingsDefaultVariant,
+    ]
   );
 
   const DEFAULT_VARIANT_VALUE = '__default__';

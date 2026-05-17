@@ -4,6 +4,7 @@ import './styles/fonts'
 import './index.css'
 import App from './App.tsx'
 import { SessionAuthGate } from './components/auth/SessionAuthGate'
+import { DeviceLoginGate } from './components/auth/DeviceLoginGate'
 import { ThemeSystemProvider } from './contexts/ThemeSystemContext'
 import { ThemeProvider } from './components/providers/ThemeProvider'
 import './lib/debug'
@@ -14,6 +15,8 @@ import { startTypographyWatcher } from './lib/typographyWatcher'
 import { startModelPrefsAutoSave } from './lib/modelPrefsAutoSave'
 import { initializeLocale, I18nProvider } from './lib/i18n'
 import type { RuntimeAPIs } from './lib/api/types'
+import { registerRuntimeAPIs } from './contexts/runtimeAPIRegistry'
+import { useInstancesStore } from './stores/useInstancesStore'
 
 declare global {
   interface Window {
@@ -25,7 +28,45 @@ const runtimeAPIs = (typeof window !== 'undefined' && window.__OPENCHAMBER_RUNTI
   throw new Error('Runtime APIs not provided for legacy UI entrypoint.');
 })();
 
-initializeLocale();
+const waitForInstancesHydration = async (): Promise<void> => {
+  if (useInstancesStore.getState().hydrated) {
+    return;
+  }
+
+  const persistApi = (useInstancesStore as unknown as {
+    persist?: {
+      hasHydrated?: () => boolean;
+      onFinishHydration?: (callback: () => void) => (() => void) | void;
+    };
+  }).persist;
+
+  if (!persistApi?.onFinishHydration) {
+    return;
+  }
+
+  if (persistApi.hasHydrated?.()) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const unsubscribe = persistApi.onFinishHydration?.(() => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+      resolve();
+    });
+  });
+};
+
+registerRuntimeAPIs(runtimeAPIs);
+await waitForInstancesHydration();
+
+await syncDesktopSettings();
+await initializeAppearancePreferences();
+startAppearanceAutoSave();
+startModelPrefsAutoSave();
+startTypographyWatcher();
+await applyPersistedDirectoryPreferences();
 
 // Initialize settings asynchronously — the app renders with defaults first
 // and hydrates once persisted preferences are applied. Users with non-default
@@ -55,14 +96,14 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <I18nProvider>
-      <ThemeSystemProvider>
-        <ThemeProvider>
+    <ThemeSystemProvider>
+      <ThemeProvider>
+        <DeviceLoginGate>
           <SessionAuthGate>
             <App apis={runtimeAPIs} />
           </SessionAuthGate>
-        </ThemeProvider>
-      </ThemeSystemProvider>
-    </I18nProvider>
+        </DeviceLoginGate>
+      </ThemeProvider>
+    </ThemeSystemProvider>
   </StrictMode>,
 );

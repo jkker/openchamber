@@ -4,6 +4,7 @@ import { toast } from '@/components/ui';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import type { GitHubAuthStatus } from '@/lib/api/types';
+import { openExternalUrl } from '@/lib/desktop';
 import { useDeviceInfo } from '@/lib/device';
 import { cn } from '@/lib/utils';
 import { openExternalUrl } from '@/lib/url';

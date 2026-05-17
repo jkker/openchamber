@@ -1,11 +1,80 @@
 import React from 'react';
 import type { Session } from '@opencode-ai/sdk/v2';
 import { toast } from '@/components/ui';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { useI18n } from '@/lib/i18n';
-import { useDeviceInfo, useTabletStandalonePwaRuntime } from '@/lib/device';
-import { isDesktopShell } from '@/lib/desktop';
-import { isDesktopWindowFullscreen as getDesktopWindowFullscreen, onDesktopWindowResized, startDesktopWindowDrag } from '@/lib/desktopNative';
+import { copyTextToClipboard } from '@/lib/clipboard';
+import { isDesktopLocalOriginActive, isDesktopShell, isMobileRuntime as detectMobileRuntime, isTauriShell, isVSCodeRuntime } from '@/lib/desktop';
+import {
+  DndContext,
+  DragOverlay,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  useDraggable,
+  useDroppable,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu';
+
+import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
+import { GridLoader } from '@/components/ui/grid-loader';
+import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
+import {
+  RiAddLine,
+  RiArrowDownSLine,
+  RiArrowRightSLine,
+  RiCheckboxBlankLine,
+  RiCheckboxLine,
+  RiCheckLine,
+  RiCloseLine,
+  RiDeleteBinLine,
+  RiErrorWarningLine,
+  RiFileCopyLine,
+  RiFolderAddLine,
+  RiFolderLine,
+  RiGitBranchLine,
+  RiGitPullRequestLine,
+  RiGitRepositoryLine,
+  RiNodeTree,
+  RiStickyNoteLine,
+  RiLinkUnlinkM,
+
+  RiGithubLine,
+
+  RiMore2Line,
+  RiPencilAiLine,
+  RiPushpinLine,
+  RiShare2Line,
+  RiShieldLine,
+  RiUnpinLine,
+} from '@remixicon/react';
 import { sessionEvents } from '@/lib/sessionEvents';
 import { formatDirectoryName, cn } from '@/lib/utils';
 import { useSessionUIStore } from '@/sync/session-ui-store';
@@ -15,11 +84,21 @@ import { useSync } from '@/sync/use-sync';
 import { useSessionPrefetch } from './sidebar/hooks/useSessionPrefetch';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
+import { useConfigStore } from '@/stores/useConfigStore';
+import { useInstancesStore } from '@/stores/useInstancesStore';
+import type { WorktreeMetadata } from '@/types/worktree';
+import { opencodeClient } from '@/lib/opencode/client';
+import { checkIsGitRepository } from '@/lib/gitApi';
 import { getSafeStorage } from '@/stores/utils/safeStorage';
-import { useGitStore, useGitAllBranches, useGitRepoStatusMap } from '@/stores/useGitStore';
-import { isVSCodeRuntime } from '@/lib/desktop';
-import { NewWorktreeDialog } from './NewWorktreeDialog';
-import { ScheduledTasksDialog } from './ScheduledTasksDialog';
+import { createWorktreeOnly, createWorktreeSession } from '@/lib/worktreeSessionCreator';
+import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
+import { useGitStore } from '@/stores/useGitStore';
+import { useDeviceInfo } from '@/lib/device';
+import { updateDesktopSettings } from '@/lib/persistence';
+import { GitHubIssuePickerDialog } from './GitHubIssuePickerDialog';
+import { GitHubPullRequestPickerDialog } from './GitHubPullRequestPickerDialog';
+import { ProjectNotesTodoPanel } from './ProjectNotesTodoPanel';
+import { BranchPickerDialog } from './BranchPickerDialog';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useArchivedAutoFolders } from './sidebar/hooks/useArchivedAutoFolders';
@@ -255,8 +334,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const toggleHelpDialog = useUIStore((state) => state.toggleHelpDialog);
   const setAboutDialogOpen = useUIStore((state) => state.setAboutDialogOpen);
   const setSessionSwitcherOpen = useUIStore((state) => state.setSessionSwitcherOpen);
-  const setScheduledTasksDialogOpen = useUIStore((state) => state.setScheduledTasksDialogOpen);
-  const toggleSidebar = useUIStore((state) => state.toggleSidebar);
+  const setDeviceLoginOpen = useUIStore((state) => state.setDeviceLoginOpen);
   const openMultiRunLauncher = useUIStore((state) => state.openMultiRunLauncher);
   const notifyOnSubtasks = useUIStore((state) => state.notifyOnSubtasks);
   const showDeletionDialog = useUIStore((state) => state.showDeletionDialog);
@@ -269,6 +347,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   );
 
   const hasSessionSearchQuery = normalizedSessionSearchQuery.length > 0;
+
+  const instances = useInstancesStore((state) => state.instances);
+  const currentInstanceId = useInstancesStore((state) => state.currentInstanceId);
+  const setCurrentInstance = useInstancesStore((state) => state.setCurrentInstance);
+  const touchInstance = useInstancesStore((state) => state.touchInstance);
 
   // Session Folders store
   const collapsedFolderIds = useSessionFoldersStore((state) => state.collapsedFolderIds);
@@ -294,34 +377,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
   const gitBranches = useGitAllBranches();
 
-  const sync = useSync();
-  const liveSessions = useAllLiveSessions();
-  const liveSessionStatuses = useAllSessionStatuses();
-  const hasLoadedGlobalSessions = useGlobalSessionsStore((state) => state.hasLoaded);
-  const globalActiveSessions = useGlobalSessionsStore((state) => state.activeSessions);
-  const archivedSessions = useGlobalSessionsStore((state) => state.archivedSessions);
-  const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
-  const newSessionDraftOpen = useSessionUIStore((state) => Boolean(state.newSessionDraft?.open));
-  const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
-  const updateSessionTitle = useSessionUIStore((state) => state.updateSessionTitle);
-  const shareSession = useSessionUIStore((state) => state.shareSession);
-  const unshareSession = useSessionUIStore((state) => state.unshareSession);
-  // sessionAttentionStates removed — now using notification-store directly in SessionNodeItem
-  const worktreeMetadata = useSessionUIStore((state) => state.worktreeMetadata);
-  const availableWorktreesByProject = useSessionUIStore((state) => state.availableWorktreesByProject);
-  const openNewSessionDraft = useSessionUIStore((state) => state.openNewSessionDraft);
-  const updateStore = useUpdateStore(useShallow((s) => ({
-    checkForUpdates: s.checkForUpdates,
-    available: s.available,
-    runtimeType: s.runtimeType,
-    info: s.info,
-    downloading: s.downloading,
-    downloaded: s.downloaded,
-    progress: s.progress,
-    error: s.error,
-    downloadUpdate: s.downloadUpdate,
-    restartToUpdate: s.restartToUpdate,
-  })));
+  const tauriIpcAvailable = React.useMemo(() => isTauriShell(), []);
+  const isDesktopShellRuntime = isDesktopShell();
 
   const knownSessionDirectories = React.useMemo(
     () => buildKnownSessionDirectories(projects, availableWorktreesByProject),
@@ -917,10 +974,154 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     if (hasInitializedArchivedCollapseRef.current || projectSections.length === 0) {
       return;
     }
-    const archivedGroupKeys = projectSections.flatMap((section) =>
-      section.groups
-        .filter((group) => group.isArchivedBucket)
-        .map((group) => `${section.project.id}:${group.id}`),
+    const projectMap = projectSessionMeta.metaByProject.get(activeProjectId);
+    if (!projectMap || !projectMap.has(currentSessionId)) {
+      return;
+    }
+    setActiveSessionByProject((prev) => {
+      if (prev.get(activeProjectId) === currentSessionId) {
+        return prev;
+      }
+      const next = new Map(prev);
+      next.set(activeProjectId, currentSessionId);
+      return next;
+    });
+  }, [activeProjectId, currentSessionId, projectSessionMeta]);
+
+  const currentSessionDirectory = React.useMemo(() => {
+    if (!currentSessionId) {
+      return null;
+    }
+    const metadataPath = worktreeMetadata.get(currentSessionId)?.path;
+    if (metadataPath) {
+      return normalizePath(metadataPath) ?? metadataPath;
+    }
+    const activeSession = sessions.find((session) => session.id === currentSessionId);
+    if (!activeSession) {
+      return null;
+    }
+    return normalizePath((activeSession as Session & { directory?: string | null }).directory ?? null);
+  }, [currentSessionId, sessions, worktreeMetadata]);
+
+  const getOrderedGroups = React.useCallback(
+    (projectId: string, groups: SessionGroup[]) => {
+      const preferredOrder = groupOrderByProject.get(projectId);
+      if (!preferredOrder || preferredOrder.length === 0) {
+        return groups;
+      }
+      const groupById = new Map(groups.map((group) => [group.id, group]));
+      const ordered: SessionGroup[] = [];
+      preferredOrder.forEach((id) => {
+        const group = groupById.get(id);
+        if (group) {
+          ordered.push(group);
+          groupById.delete(id);
+        }
+      });
+      groups.forEach((group) => {
+        if (groupById.has(group.id)) {
+          ordered.push(group);
+        }
+      });
+      return ordered;
+    },
+    [groupOrderByProject],
+  );
+
+  const handleStartInlineProjectRename = React.useCallback(() => {
+    if (!activeProjectForHeader) {
+      return;
+    }
+    setProjectRenameDraft(formatProjectLabel(
+      activeProjectForHeader.label?.trim()
+      || formatDirectoryName(activeProjectForHeader.normalizedPath, homeDirectory)
+      || activeProjectForHeader.normalizedPath,
+    ));
+    setIsProjectRenameInline(true);
+  }, [activeProjectForHeader, homeDirectory]);
+
+  const handleSaveInlineProjectRename = React.useCallback(() => {
+    if (!activeProjectForHeader) {
+      return;
+    }
+    const trimmed = projectRenameDraft.trim();
+    if (!trimmed) {
+      return;
+    }
+    renameProject(activeProjectForHeader.id, trimmed);
+    setIsProjectRenameInline(false);
+  }, [activeProjectForHeader, projectRenameDraft, renameProject]);
+
+  const desktopHeaderActionButtonClass =
+    'inline-flex h-6 w-6 items-center justify-center rounded-md leading-none text-foreground hover:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50';
+  const mobileHeaderActionButtonClass =
+    'inline-flex h-6 w-6 items-center justify-center rounded-md leading-none text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50';
+  const headerActionButtonClass = mobileVariant ? mobileHeaderActionButtonClass : desktopHeaderActionButtonClass;
+  const headerActionIconClass = 'h-4.5 w-4.5';
+  const addProjectButtonClass = cn(
+    'inline-flex items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
+    mobileVariant
+      ? 'h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50'
+      : 'h-8 w-8 text-foreground hover:bg-interactive-hover',
+    !isDesktopShellRuntime && 'bg-transparent hover:bg-sidebar/40',
+  );
+
+  const isMobileRuntime = React.useMemo(() => {
+    return detectMobileRuntime();
+  }, []);
+
+  const showMobileInstanceSwitcher = mobileVariant && isMobileRuntime;
+
+  const sortedInstances = React.useMemo(() => {
+    return [...instances].sort((a, b) => (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0));
+  }, [instances]);
+
+  const activeInstanceLabel = React.useMemo(() => {
+    const selected = sortedInstances.find((instance) => instance.id === currentInstanceId) ?? sortedInstances[0] ?? null;
+    if (!selected) {
+      return 'Add instance';
+    }
+    return selected.label?.trim() || selected.origin;
+  }, [currentInstanceId, sortedInstances]);
+
+  const handleSwitchInstance = React.useCallback((instanceId: string) => {
+    if (!instanceId || instanceId === currentInstanceId) {
+      return;
+    }
+    setCurrentInstance(instanceId);
+    touchInstance(instanceId);
+    window.location.reload();
+  }, [currentInstanceId, setCurrentInstance, touchInstance]);
+
+  const handleAddInstance = React.useCallback(() => {
+    setDeviceLoginOpen(true);
+    if (mobileVariant) {
+      setSessionSwitcherOpen(false);
+    }
+  }, [mobileVariant, setDeviceLoginOpen, setSessionSwitcherOpen]);
+
+  // Track when project sticky headers become "stuck"
+  React.useEffect(() => {
+    if (!isDesktopShellRuntime) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const projectId = (entry.target as HTMLElement).dataset.projectId;
+          if (!projectId) return;
+          
+          setStuckProjectHeaders((prev) => {
+            const next = new Set(prev);
+            if (!entry.isIntersecting) {
+              next.add(projectId);
+            } else {
+              next.delete(projectId);
+            }
+            return next;
+          });
+        });
+      },
+      { threshold: 0 }
     );
     if (archivedGroupKeys.length > 0) {
       setCollapsedGroups((prev) => new Set([...prev, ...archivedGroupKeys]));
@@ -1599,12 +1800,170 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         mobileVariant ? '' : 'bg-transparent',
       )}
     >
-      {showDesktopSidebarChrome ? (
-        <div
-          onMouseDown={handleDesktopSidebarDragStart}
-          className={cn(
-            'app-region-drag flex h-[var(--oc-header-height,56px)] flex-shrink-0 items-center pr-3',
-            desktopSidebarTopPaddingClass,
+      {!hideDirectoryControls && (
+        <div className={cn('select-none pl-3.5 pr-2 flex-shrink-0 border-b border-border/60', hideProjectSelector ? 'py-1' : 'py-1.5')}>
+          {showMobileInstanceSwitcher ? (
+            <div className="mb-1 flex h-8 items-center justify-between gap-2">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex h-8 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-left text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                  >
+                    <span className="truncate typography-ui-label font-medium">{activeInstanceLabel}</span>
+                    <RiArrowDownSLine className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="min-w-[220px] max-w-[320px]">
+                  {sortedInstances.length > 0 ? (
+                    sortedInstances.map((instance) => (
+                      <DropdownMenuItem
+                        key={instance.id}
+                        onClick={() => handleSwitchInstance(instance.id)}
+                        className="gap-2"
+                      >
+                        {instance.id === currentInstanceId ? <RiCheckLine className="h-4 w-4 text-primary" /> : <span className="h-4 w-4" />}
+                        <span className="truncate">{instance.label || instance.origin}</span>
+                      </DropdownMenuItem>
+                    ))
+                  ) : (
+                    <DropdownMenuItem disabled>No instances yet</DropdownMenuItem>
+                  )}
+                  <div className="my-1 h-px bg-border/70" />
+                  <DropdownMenuItem onClick={handleAddInstance} className="gap-2">
+                    <RiAddLine className="h-4 w-4" />
+                    Add instance
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <button
+                type="button"
+                onClick={handleAddInstance}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                aria-label="Add instance"
+              >
+                <RiAddLine className="h-4.5 w-4.5" />
+              </button>
+            </div>
+          ) : null}
+          {!hideProjectSelector && (
+          <div className="flex h-8 items-center justify-between gap-2">
+            <DropdownMenu
+              onOpenChange={(open) => {
+                if (!open) {
+                  setIsProjectRenameInline(false);
+                }
+              }}
+            >
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="flex h-8 min-w-0 max-w-[calc(100%-2.5rem)] items-center gap-1 rounded-md px-2 text-left text-foreground hover:bg-interactive-hover/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                >
+                  <span className="text-base font-semibold truncate">
+                    {activeProjectForHeader
+                      ? formatProjectLabel(
+                        activeProjectForHeader.label?.trim()
+                        || formatDirectoryName(activeProjectForHeader.normalizedPath, homeDirectory)
+                        || activeProjectForHeader.normalizedPath,
+                      )
+                      : 'Projects'}
+                  </span>
+                  <RiArrowDownSLine className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-[220px] max-w-[320px]">
+                {normalizedProjects.map((project) => {
+                  const label = formatProjectLabel(
+                    project.label?.trim()
+                    || formatDirectoryName(project.normalizedPath, homeDirectory)
+                    || project.normalizedPath
+                  );
+                  return (
+                    <DropdownMenuItem
+                      key={project.id}
+                      onClick={() => setActiveProjectIdOnly(project.id)}
+                      className={cn('truncate', project.id === activeProjectId && 'text-primary')}
+                    >
+                      <span className="truncate">{label}</span>
+                    </DropdownMenuItem>
+                  );
+                })}
+                <div className="my-1 h-px bg-border/70" />
+                {!isProjectRenameInline ? (
+                  <DropdownMenuItem
+                    onClick={(event) => {
+                      event.preventDefault();
+                      handleStartInlineProjectRename();
+                    }}
+                    className="gap-2"
+                  >
+                    <RiPencilAiLine className="h-4 w-4" />
+                    Rename project
+                  </DropdownMenuItem>
+                ) : (
+                  <div className="px-2 py-1.5">
+                    <form
+                      className="flex items-center gap-1"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        handleSaveInlineProjectRename();
+                      }}
+                    >
+                      <input
+                        value={projectRenameDraft}
+                        onChange={(event) => setProjectRenameDraft(event.target.value)}
+                        className="h-7 flex-1 rounded border border-border bg-transparent px-2 typography-ui-label text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                        placeholder="Rename project"
+                        autoFocus
+                        onKeyDown={(event) => {
+                          if (event.key === 'Escape') {
+                            event.stopPropagation();
+                            setIsProjectRenameInline(false);
+                            return;
+                          }
+                          if (event.key === ' ' || event.key === 'Enter') {
+                            event.stopPropagation();
+                          }
+                        }}
+                      />
+                      <button type="submit" className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:text-foreground">
+                        <RiCheckLine className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsProjectRenameInline(false)}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+                      >
+                        <RiCloseLine className="h-4 w-4" />
+                      </button>
+                    </form>
+                  </div>
+                )}
+                <DropdownMenuItem
+                  onClick={() => {
+                    if (!activeProjectForHeader) {
+                      return;
+                    }
+                    removeProject(activeProjectForHeader.id);
+                  }}
+                  className="text-destructive focus:text-destructive gap-2"
+                >
+                  <RiCloseLine className="h-4 w-4" />
+                  Close project
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <button
+              type="button"
+              onClick={handleOpenDirectoryDialog}
+              className={addProjectButtonClass}
+              aria-label="Add project"
+              title="Add project"
+            >
+              <RiFolderAddLine className={headerActionIconClass} />
+            </button>
+          </div>
           )}
         >
           <Tooltip>

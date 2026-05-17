@@ -1,6 +1,9 @@
 import { createOpencodeClient, OpencodeClient } from "@opencode-ai/sdk/v2";
 import type { FilesAPI, RuntimeAPIs } from "../api/types";
 import { getDesktopHomeDirectory } from "../desktop";
+import { resolveRuntimeApiBaseUrl } from "@/lib/instances/runtimeApiBaseUrl";
+import { resolveSelectedInstance } from "@/stores/useInstancesStore";
+import { getAccessToken } from "@/lib/auth/tokenStorage";
 import type {
   Session,
   Message,
@@ -23,9 +26,6 @@ import {
   getRetryDelayMs,
 } from "./provider-tracker";
 
-// Use relative path by default (works with both dev and nginx proxy server)
-// Can be overridden with VITE_OPENCODE_URL for absolute URLs in special deployments
-const DEFAULT_BASE_URL = import.meta.env.VITE_OPENCODE_URL || "/api";
 const ABSOLUTE_URL_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//;
 const ID_RANDOM_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const ID_RANDOM_LENGTH = 14;
@@ -95,31 +95,6 @@ const ensureAbsoluteBaseUrl = (candidate: string): string => {
     console.warn("Failed to normalize OpenCode base URL:", error);
     return normalized;
   }
-};
-
-const resolveDesktopBaseUrl = (): string | null => {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  const desktopServer = (window as typeof window & {
-    __OPENCHAMBER_DESKTOP_SERVER__?: { origin: string; apiPrefix?: string };
-    __OPENCHAMBER_RUNTIME_APIS__?: RuntimeAPIs;
-  }).__OPENCHAMBER_DESKTOP_SERVER__;
-
-  const isDesktop = Boolean(
-    (window as typeof window & { __OPENCHAMBER_RUNTIME_APIS__?: RuntimeAPIs }).__OPENCHAMBER_RUNTIME_APIS__?.runtime?.isDesktop
-  );
-
-  if (!desktopServer || !isDesktop) {
-    return null;
-  }
-
-  const origin = typeof desktopServer.origin === "string" && desktopServer.origin.length > 0 ? desktopServer.origin : null;
-  if (!origin) {
-    return null;
-  }
-
-  return `${origin}/api`;
 };
 
 interface App {
@@ -192,11 +167,47 @@ class OpencodeService {
   private listDirectoryInFlight: Map<string, Promise<FilesystemEntry[]>> = new Map();
   private listDirectoryCache: Map<string, { entries: FilesystemEntry[]; expiresAt: number }> = new Map();
 
-  constructor(baseUrl: string = DEFAULT_BASE_URL) {
-    const desktopBase = resolveDesktopBaseUrl();
-    const requestedBaseUrl = desktopBase || baseUrl;
+  private getAuthorizationHeader(): string | null {
+    const selectedInstance = resolveSelectedInstance();
+    if (!selectedInstance) {
+      return null;
+    }
+    const accessToken = getAccessToken(selectedInstance.id);
+    if (!accessToken) {
+      return null;
+    }
+    return `Bearer ${accessToken}`;
+  }
+
+  private mergeAuthHeaders(headers?: HeadersInit): Headers {
+    const nextHeaders = new Headers(headers ?? undefined);
+    if (!nextHeaders.has('Authorization')) {
+      const authorization = this.getAuthorizationHeader();
+      if (authorization) {
+        nextHeaders.set('Authorization', authorization);
+      }
+    }
+    return nextHeaders;
+  }
+
+  private fetchWithAuth = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+    const requestHeaders = input instanceof Request ? input.headers : undefined;
+    const mergedHeaders = this.mergeAuthHeaders(requestHeaders);
+    const initHeaders = new Headers(init.headers ?? undefined);
+    initHeaders.forEach((value, key) => {
+      mergedHeaders.set(key, value);
+    });
+
+    return fetch(input, {
+      ...init,
+      headers: mergedHeaders,
+    });
+  };
+
+  constructor(baseUrl: string = resolveRuntimeApiBaseUrl()) {
+    const requestedBaseUrl = baseUrl || resolveRuntimeApiBaseUrl();
     this.baseUrl = ensureAbsoluteBaseUrl(requestedBaseUrl);
-    this.client = createOpencodeClient({ baseUrl: this.baseUrl });
+    this.client = createOpencodeClient({ baseUrl: this.baseUrl, fetch: this.fetchWithAuth });
   }
 
   getBaseUrl(): string {
@@ -224,7 +235,7 @@ class OpencodeService {
     if (existing) {
       return existing;
     }
-    const scoped = createOpencodeClient({ baseUrl: this.baseUrl, directory: normalized });
+    const scoped = createOpencodeClient({ baseUrl: this.baseUrl, directory: normalized, fetch: this.fetchWithAuth });
     this.scopedClients.set(key, scoped);
     return scoped;
   }
@@ -480,7 +491,7 @@ class OpencodeService {
         url.searchParams.set("directory", this.currentDirectory);
       }
 
-      const response = await fetch(url.toString(), {
+      const response = await this.fetchWithAuth(url.toString(), {
         method: "GET",
         headers: {
           Accept: "application/json",
@@ -966,7 +977,7 @@ class OpencodeService {
         url.searchParams.set("directory", trimmedDirectory);
       }
 
-      const response = await fetch(url.toString(), {
+      const response = await this.fetchWithAuth(url.toString(), {
         method: "GET",
         headers: {
           Accept: "application/json",
@@ -1007,7 +1018,7 @@ class OpencodeService {
   > {
     try {
       // Web server endpoint - use relative path that works with both dev and prod
-      const response = await fetch('/api/session-activity', {
+      const response = await this.fetchWithAuth(`${this.baseUrl.replace(/\/+$/, '')}/session-activity`, {
         method: 'GET',
         headers: {
           Accept: 'application/json',
@@ -1191,7 +1202,7 @@ class OpencodeService {
     // The config should be global, not directory-specific
     const url = `${this.baseUrl}/config`;
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithAuth(url, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
@@ -1268,15 +1279,628 @@ class OpencodeService {
     }
   }
 
-  // SSE infrastructure removed — EventPipeline in sync/event-pipeline.ts handles
-  // all SSE event ingestion via the SDK's global.event() async iterator.
+  private parseSseBlock(block: string): { data: unknown; id?: string } | null {
+    if (!block) return null;
+
+    const lines = block.split('\n');
+    const dataLines: string[] = [];
+    let eventId: string | undefined;
+
+    for (const line of lines) {
+      if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).replace(/^\s/, ''));
+      } else if (line.startsWith('id:')) {
+        const candidate = line.slice(3).trim();
+        if (candidate) {
+          eventId = candidate;
+        }
+      }
+    }
+
+    if (dataLines.length === 0) {
+      return null;
+    }
+
+    const payloadText = dataLines.join('\n').trim();
+    if (!payloadText) {
+      return null;
+    }
+
+    try {
+      const data = JSON.parse(payloadText) as unknown;
+      return { data, id: eventId };
+    } catch {
+      return null;
+    }
+  }
+
+  private normalizeRoutedSsePayload(raw: unknown): RoutedOpencodeEvent | null {
+    if (!raw || typeof raw !== 'object') {
+      return null;
+    }
+
+    const record = raw as Record<string, unknown>;
+
+    const directoryCandidate =
+      typeof record.directory === 'string'
+        ? record.directory
+        : typeof record.properties === 'object' && record.properties !== null
+          ? ((record.properties as Record<string, unknown>).directory as unknown)
+          : null;
+
+    const normalizedDirectory =
+      typeof directoryCandidate === 'string'
+        ? this.normalizeCandidatePath(directoryCandidate) ?? directoryCandidate.trim()
+        : null;
+
+    if (typeof record.type === 'string') {
+      return {
+        directory: normalizedDirectory && normalizedDirectory.length > 0 ? normalizedDirectory : 'global',
+        payload: record as Event,
+      };
+    }
+
+    const nestedPayload = record.payload;
+    if (nestedPayload && typeof nestedPayload === 'object') {
+      const nestedRecord = nestedPayload as Record<string, unknown>;
+      if (typeof nestedRecord.type === 'string') {
+        return {
+          directory: normalizedDirectory && normalizedDirectory.length > 0 ? normalizedDirectory : 'global',
+          payload: nestedRecord as Event,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  private emitGlobalSseEvent(event: RoutedOpencodeEvent) {
+    this.enqueueGlobalSseEvent(event);
+  }
+
+  private notifyGlobalSseOpen() {
+    for (const handler of this.globalSseOpenListeners) {
+      try {
+        handler();
+      } catch (error) {
+        console.warn('[OpencodeClient] Global SSE open handler error:', error);
+      }
+    }
+  }
+
+  private notifyGlobalSseError(error: unknown) {
+    for (const handler of this.globalSseErrorListeners) {
+      try {
+        handler(error);
+      } catch (listenerError) {
+        console.warn('[OpencodeClient] Global SSE error handler failed:', listenerError);
+      }
+    }
+  }
+
+  private ensureGlobalSseStarted() {
+    if (this.globalSseTask) {
+      return;
+    }
+
+    const abortController = new AbortController();
+    this.globalSseAbortController = abortController;
+
+    this.globalSseTask = this.runGlobalSseLoop(abortController)
+      .catch((error) => {
+        if ((error as Error)?.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
+        console.error('[OpencodeClient] Global SSE task failed:', error);
+      })
+      .finally(() => {
+        if (this.globalSseAbortController === abortController) {
+          this.globalSseAbortController = null;
+        }
+        this.globalSseTask = null;
+        this.globalSseIsConnected = false;
+      });
+  }
+
+  private maybeStopGlobalSse() {
+    if (this.globalSseListeners.size > 0) {
+      return;
+    }
+
+    if (this.globalSseAbortController && !this.globalSseAbortController.signal.aborted) {
+      this.globalSseAbortController.abort();
+    }
+    this.globalSseAbortController = null;
+    this.clearGlobalSseQueue();
+  }
+
+  private clearGlobalSseQueue() {
+    if (this.globalSseFlushTimer) {
+      clearTimeout(this.globalSseFlushTimer);
+      this.globalSseFlushTimer = null;
+    }
+    this.globalSseQueue.length = 0;
+    this.globalSseBuffer.length = 0;
+    this.globalSseCoalesced.clear();
+  }
+
+  private getGlobalSseCoalesceKey(event: RoutedOpencodeEvent): string | null {
+    const payload = event.payload as unknown as Record<string, unknown>;
+    const eventType = typeof payload.type === 'string' ? payload.type : null;
+    if (!eventType) {
+      return null;
+    }
+
+    const properties =
+      typeof payload.properties === 'object' && payload.properties !== null
+        ? (payload.properties as Record<string, unknown>)
+        : null;
+
+    if (eventType === 'session.status') {
+      const sessionId = typeof properties?.sessionID === 'string'
+        ? properties.sessionID
+        : typeof properties?.sessionId === 'string'
+          ? properties.sessionId
+          : null;
+      if (!sessionId) {
+        return null;
+      }
+      return `session.status:${event.directory}:${sessionId}`;
+    }
+
+    if (eventType === 'openchamber:session-status') {
+      const sessionId = typeof properties?.sessionId === 'string'
+        ? properties.sessionId
+        : typeof properties?.sessionID === 'string'
+          ? properties.sessionID
+          : null;
+      if (!sessionId) {
+        return null;
+      }
+      return `openchamber:session-status:${sessionId}`;
+    }
+
+    return null;
+  }
+
+  private flushGlobalSseQueue = () => {
+    if (this.globalSseFlushTimer) {
+      clearTimeout(this.globalSseFlushTimer);
+      this.globalSseFlushTimer = null;
+    }
+
+    if (this.globalSseQueue.length === 0) {
+      return;
+    }
+
+    const events = this.globalSseQueue;
+    this.globalSseQueue = this.globalSseBuffer;
+    this.globalSseBuffer = events;
+    this.globalSseQueue.length = 0;
+    this.globalSseCoalesced.clear();
+    this.globalSseLastFlushAt = Date.now();
+
+    for (const event of events) {
+      if (!event) continue;
+      for (const listener of this.globalSseListeners) {
+        try {
+          listener(event);
+        } catch (error) {
+          console.warn('[OpencodeClient] Global SSE listener error:', error);
+        }
+      }
+    }
+
+    this.globalSseBuffer.length = 0;
+  };
+
+  private scheduleGlobalSseFlush() {
+    if (this.globalSseFlushTimer) {
+      return;
+    }
+    const elapsed = Date.now() - this.globalSseLastFlushAt;
+    const delay = Math.max(0, 16 - elapsed);
+    this.globalSseFlushTimer = setTimeout(this.flushGlobalSseQueue, delay);
+  }
+
+  private enqueueGlobalSseEvent(event: RoutedOpencodeEvent) {
+    const key = this.getGlobalSseCoalesceKey(event);
+    if (key) {
+      const existingIndex = this.globalSseCoalesced.get(key);
+      if (existingIndex !== undefined) {
+        this.globalSseQueue[existingIndex] = undefined;
+      }
+      this.globalSseCoalesced.set(key, this.globalSseQueue.length);
+    }
+
+    this.globalSseQueue.push(event);
+    this.scheduleGlobalSseFlush();
+  }
+
+  private async runGlobalSseLoop(abortController: AbortController): Promise<void> {
+    const globalEndpoint = `${this.baseUrl.replace(/\/+$/, '')}/global/event`;
+    let attempt = 0;
+
+    while (!abortController.signal.aborted) {
+      try {
+        const headers: Record<string, string> = {
+          Accept: 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        };
+        if (this.globalSseLastEventId) {
+          headers['Last-Event-ID'] = this.globalSseLastEventId;
+        }
+
+        const response = await this.fetchWithAuth(globalEndpoint, {
+          method: 'GET',
+          headers,
+          signal: abortController.signal,
+        });
+
+        if (!response.ok || !response.body) {
+          throw new Error(`Global SSE connect failed with status ${response.status}`);
+        }
+
+        attempt = 0;
+        this.globalSseIsConnected = true;
+        if (!abortController.signal.aborted) {
+          this.notifyGlobalSseOpen();
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (abortController.signal.aborted) break;
+          if (!value || value.length === 0) continue;
+
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+          const blocks = buffer.split('\n\n');
+          buffer = blocks.pop() ?? '';
+
+          for (const block of blocks) {
+            const parsed = this.parseSseBlock(block);
+            if (!parsed) continue;
+            if (parsed.id) {
+              this.globalSseLastEventId = parsed.id;
+            }
+
+            const routed = this.normalizeRoutedSsePayload(parsed.data);
+            if (routed) {
+              this.emitGlobalSseEvent(routed);
+            }
+          }
+        }
+
+        const remaining = buffer.trim();
+        if (remaining && !abortController.signal.aborted) {
+          const parsed = this.parseSseBlock(remaining);
+          if (parsed?.id) {
+            this.globalSseLastEventId = parsed.id;
+          }
+          const routed = parsed ? this.normalizeRoutedSsePayload(parsed.data) : null;
+          if (routed) {
+            this.emitGlobalSseEvent(routed);
+          }
+        }
+
+        // Stream ended; force reconnect.
+        this.globalSseIsConnected = false;
+      } catch (error: unknown) {
+        this.globalSseIsConnected = false;
+        if ((error as Error)?.name === 'AbortError' || abortController.signal.aborted) {
+          return;
+        }
+        console.error('[OpencodeClient] Global SSE stream error (will retry):', error);
+        this.notifyGlobalSseError(error);
+      }
+
+      if (abortController.signal.aborted) {
+        break;
+      }
+
+      attempt += 1;
+      const delay = Math.min(3000 * Math.pow(2, attempt), 30000);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+
+    this.flushGlobalSseQueue();
+  }
+
+  subscribeToGlobalEvents(
+    onEvent: (event: RoutedOpencodeEvent) => void,
+    onError?: (error: unknown) => void,
+    onOpen?: () => void,
+    options?: { directory?: string | null }
+  ): () => void {
+    const directoryFilter = this.normalizeCandidatePath(options?.directory ?? null);
+    const listener = (event: RoutedOpencodeEvent) => {
+      if (directoryFilter && event.directory !== directoryFilter) {
+        return;
+      }
+      onEvent(event);
+    };
+
+    this.globalSseListeners.add(listener);
+
+    if (onOpen) {
+      this.globalSseOpenListeners.add(onOpen);
+      if (this.globalSseIsConnected) {
+        setTimeout(() => {
+          if (this.globalSseOpenListeners.has(onOpen)) {
+            try {
+              onOpen();
+            } catch (error) {
+              console.warn('[OpencodeClient] Global SSE open handler error:', error);
+            }
+          }
+        }, 0);
+      }
+    }
+
+    if (onError) {
+      this.globalSseErrorListeners.add(onError);
+    }
+
+    this.ensureGlobalSseStarted();
+
+    return () => {
+      this.globalSseListeners.delete(listener);
+      if (onOpen) {
+        this.globalSseOpenListeners.delete(onOpen);
+      }
+      if (onError) {
+        this.globalSseErrorListeners.delete(onError);
+      }
+      this.maybeStopGlobalSse();
+    };
+  }
+
+  // Event Streaming using SDK SSE (Server-Sent Events) with AsyncGenerator
+  subscribeToEvents(
+    onMessage: (event: { type: string; properties?: Record<string, unknown> }) => void,
+    onError?: (error: unknown) => void,
+    onOpen?: () => void,
+    directoryOverride?: string | null,
+    options?: { scope?: 'global' | 'directory'; key?: string }
+  ): () => void {
+    const subscriptionKey = options?.key ?? 'default';
+    const scope = options?.scope ?? 'directory';
+    const existingController = this.sseAbortControllers.get(subscriptionKey);
+    if (existingController) {
+      existingController.abort();
+    }
+
+    // Create new AbortController for this subscription
+    const abortController = new AbortController();
+    this.sseAbortControllers.set(subscriptionKey, abortController);
+
+    let lastEventId: string | undefined;
+
+    if (scope === 'global') {
+      let globalUnsub: (() => void) | null = null;
+
+      const attachDirectory = (event: RoutedOpencodeEvent): Event => {
+        if (event.directory === 'global') {
+          return event.payload;
+        }
+
+        const payloadRecord = event.payload as unknown as Record<string, unknown>;
+        const existingProperties =
+          typeof payloadRecord.properties === 'object' && payloadRecord.properties !== null
+            ? (payloadRecord.properties as Record<string, unknown>)
+            : {};
+
+        if (existingProperties.directory === event.directory) {
+          return event.payload;
+        }
+
+        return {
+          ...payloadRecord,
+          properties: {
+            ...existingProperties,
+            directory: event.directory,
+          },
+        } as Event;
+      };
+
+      const cleanup = () => {
+        if (globalUnsub) {
+          try {
+            globalUnsub();
+          } catch {
+            // ignore
+          }
+          globalUnsub = null;
+        }
+
+        if (this.sseAbortControllers.get(subscriptionKey) === abortController) {
+          this.sseAbortControllers.delete(subscriptionKey);
+        }
+      };
+
+      abortController.signal.addEventListener('abort', cleanup, { once: true });
+
+      globalUnsub = this.subscribeToGlobalEvents(
+        (event) => {
+          if (abortController.signal.aborted) {
+            return;
+          }
+          onMessage(attachDirectory(event));
+        },
+        onError
+          ? (error) => {
+              if (!abortController.signal.aborted) {
+                onError(error);
+              }
+            }
+          : undefined,
+        onOpen
+          ? () => {
+              if (!abortController.signal.aborted) {
+                onOpen();
+              }
+            }
+          : undefined,
+      );
+
+      return () => {
+        cleanup();
+        abortController.abort();
+      };
+    }
+
+    const normalizeEventPayload = (payload: unknown): Event | null => {
+      if (!payload || typeof payload !== 'object') {
+        return null;
+      }
+
+      const record = payload as Record<string, unknown>;
+      if (typeof record.type === 'string') {
+        return record as Event;
+      }
+
+      const nestedPayload = record.payload;
+      if (nestedPayload && typeof nestedPayload === 'object') {
+        const nestedRecord = nestedPayload as Record<string, unknown>;
+        if (typeof nestedRecord.type === 'string') {
+          if (typeof record.directory === 'string' && record.directory.length > 0) {
+            const existingProperties =
+              typeof nestedRecord.properties === 'object' && nestedRecord.properties !== null
+                ? (nestedRecord.properties as Record<string, unknown>)
+                : null;
+            const properties = {
+              ...(existingProperties ?? {}),
+              directory: record.directory,
+            };
+            return { ...nestedRecord, properties } as Event;
+          }
+          return nestedRecord as Event;
+        }
+      }
+
+      return null;
+    };
+
+
+    console.log('[OpencodeClient] Starting SSE subscription...');
+
+    // Start async generator in background with reconnect on failure
+    (async () => {
+      const resolvedDirectory =
+        typeof directoryOverride === 'string' && directoryOverride.trim().length > 0
+          ? directoryOverride.trim()
+          : this.currentDirectory;
+
+      console.log('[OpencodeClient] Connecting to SSE with directory:', resolvedDirectory ?? 'default');
+
+      const connect = async (attempt: number): Promise<void> => {
+        try {
+          const subscribeParameters = resolvedDirectory ? { directory: resolvedDirectory } : undefined;
+          const subscribeOptions: {
+            signal: AbortSignal;
+            sseDefaultRetryDelay: number;
+            sseMaxRetryDelay: number;
+            onSseError?: (error: unknown) => void;
+            onSseEvent: (event: StreamEvent<unknown>) => void;
+            headers?: Record<string, string>;
+          } = {
+            signal: abortController.signal,
+            sseDefaultRetryDelay: 3000,
+            sseMaxRetryDelay: 30000,
+            onSseError: (error: unknown) => {
+              if (error instanceof Error && error.name === 'AbortError') {
+                return;
+              }
+              console.error('[OpencodeClient] SSE error:', error);
+              if (onError && !abortController.signal.aborted) {
+                onError(error);
+              }
+            },
+            onSseEvent: (event: StreamEvent<unknown>) => {
+              if (abortController.signal.aborted) return;
+              if (event.id && typeof event.id === 'string') {
+                lastEventId = event.id;
+              }
+              const payload = event.data;
+              const normalized = normalizeEventPayload(payload);
+              if (normalized) {
+                onMessage(normalized);
+              }
+            },
+          };
+
+          if (lastEventId) {
+            subscribeOptions.headers = { ...(subscribeOptions.headers || {}), 'Last-Event-ID': lastEventId };
+          }
+
+          const result = await this.client.event.subscribe(subscribeParameters, subscribeOptions);
+
+          if (onOpen && !abortController.signal.aborted) {
+            console.log('[OpencodeClient] SSE connection opened');
+            onOpen();
+          }
+
+          for await (const _ of result.stream) {
+            void _;
+            if (abortController.signal.aborted) {
+              console.log('[OpencodeClient] SSE stream aborted');
+              break;
+            }
+          }
+        } catch (error: unknown) {
+          if ((error as Error)?.name === 'AbortError' || abortController.signal.aborted) {
+            console.log('[OpencodeClient] SSE stream aborted normally');
+            return;
+          }
+          console.error('[OpencodeClient] SSE stream error (will retry):', error);
+          if (onError) {
+            onError(error);
+          }
+          const delay = Math.min(3000 * Math.pow(2, attempt), 30000);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          if (!abortController.signal.aborted) {
+            await connect(attempt + 1);
+          }
+          return;
+        }
+
+        if (!abortController.signal.aborted) {
+          const delay = Math.min(3000 * Math.pow(2, attempt), 30000);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          await connect(attempt + 1);
+        }
+      };
+
+      try {
+        await connect(0);
+      } finally {
+        console.log('[OpencodeClient] SSE subscription cleanup');
+        if (this.sseAbortControllers.get(subscriptionKey) === abortController) {
+          this.sseAbortControllers.delete(subscriptionKey);
+        }
+      }
+    })();
+
+    // Return cleanup function
+    return () => {
+      if (this.sseAbortControllers.get(subscriptionKey) === abortController) {
+        this.sseAbortControllers.delete(subscriptionKey);
+      }
+      abortController.abort();
+    };
+
+  }
 
   // File Operations
   async readFile(path: string): Promise<string> {
     try {
       // For now, we'll use a placeholder implementation
       // In a real implementation, this would call an API endpoint to read the file
-      const response = await fetch(`${this.baseUrl}/files/read`, {
+      const response = await this.fetchWithAuth(`${this.baseUrl}/files/read`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1302,7 +1926,7 @@ class OpencodeService {
   async listFiles(directory?: string): Promise<Record<string, unknown>[]> {
     try {
       const targetDir = directory || this.currentDirectory || '/';
-      const response = await fetch(`${this.baseUrl}/files/list`, {
+      const response = await this.fetchWithAuth(`${this.baseUrl}/files/list`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1427,7 +2051,12 @@ class OpencodeService {
       } else {
         healthUrl = `${normalizedBase}/health`;
       }
-      const response = await fetch(healthUrl);
+      const response = await fetch(healthUrl, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
       if (!response.ok) {
         return false;
       }
@@ -1465,7 +2094,7 @@ class OpencodeService {
       ...(options?.allowOutsideWorkspace ? { allowOutsideWorkspace: true } : {}),
     };
 
-    const response = await fetch(`${this.baseUrl}/fs/mkdir`, {
+    const response = await this.fetchWithAuth(`${this.baseUrl}/fs/mkdir`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1549,7 +2178,7 @@ class OpencodeService {
         params.set('respectGitignore', 'true');
       }
       const query = params.toString();
-      const response = await fetch(`${this.baseUrl}/fs/list${query ? `?${query}` : ''}`);
+      const response = await this.fetchWithAuth(`${this.baseUrl}/fs/list${query ? `?${query}` : ''}`);
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
         const message = typeof error.error === 'string' ? error.error : 'Failed to list directory';
@@ -1626,6 +2255,43 @@ class OpencodeService {
       console.error('Failed to search files:', error);
       throw error;
     }
+
+    const params = new URLSearchParams();
+    if (directory && directory.length > 0) {
+      params.set('directory', directory);
+    }
+    if (typeof query === 'string') {
+      params.set('q', query);
+    }
+    if (typeof options?.limit === 'number' && Number.isFinite(options.limit)) {
+      params.set('limit', String(options.limit));
+    }
+    if (options?.includeHidden) {
+      params.set('includeHidden', 'true');
+    }
+    if (options?.respectGitignore === false) {
+      params.set('respectGitignore', 'false');
+    }
+
+    const searchUrl = `${this.baseUrl}/fs/search${params.toString() ? `?${params.toString()}` : ''}`;
+    const response = await this.fetchWithAuth(searchUrl, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      const message = typeof error.error === 'string' ? error.error : 'Failed to search files';
+      throw new Error(message);
+    }
+
+    const result = await response.json();
+    if (!result || !Array.isArray(result.files)) {
+      return [];
+    }
+    return result.files as ProjectFileSearchHit[];
   }
 
   async getFilesystemHome(): Promise<string | null> {
@@ -1637,7 +2303,7 @@ class OpencodeService {
     }
 
     try {
-      const response = await fetch(`${this.baseUrl}/fs/home`, {
+      const response = await this.fetchWithAuth(`${this.baseUrl}/fs/home`, {
         method: 'GET',
         headers: {
           Accept: 'application/json'
@@ -1674,7 +2340,7 @@ class OpencodeService {
     console.log('[OpencodeClient] POST', url, 'with path:', directoryPath);
 
     try {
-      const response = await fetch(url, {
+      const response = await this.fetchWithAuth(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'

@@ -18,8 +18,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
-import { Icon } from "@/components/icon/Icon";
-import { isDesktopShell, isVSCodeRuntime, isWebRuntime } from '@/lib/desktop';
+import { isNativeMobileApp, isVSCodeRuntime } from '@/lib/desktop';
 import { useDeviceInfo } from '@/lib/device';
 import { usePwaDetection } from '@/hooks/usePwaDetection';
 import { updateDesktopSettings } from '@/lib/persistence';
@@ -97,144 +96,7 @@ const MERMAID_RENDERING_OPTIONS: Option<'svg' | 'ascii'>[] = [
     },
 ];
 
-const DEFAULT_PWA_INSTALL_NAME = 'OpenChamber - AI Coding Assistant';
-const PWA_ORIENTATION_OPTIONS: Option<'system' | 'portrait' | 'landscape'>[] = [
-    {
-        id: 'system',
-        labelKey: 'settings.openchamber.visual.option.pwaOrientation.system.label',
-        descriptionKey: 'settings.openchamber.visual.option.pwaOrientation.system.description',
-    },
-    {
-        id: 'portrait',
-        labelKey: 'settings.openchamber.visual.option.pwaOrientation.portrait.label',
-        descriptionKey: 'settings.openchamber.visual.option.pwaOrientation.portrait.description',
-    },
-    {
-        id: 'landscape',
-        labelKey: 'settings.openchamber.visual.option.pwaOrientation.landscape.label',
-        descriptionKey: 'settings.openchamber.visual.option.pwaOrientation.landscape.description',
-    },
-];
-
-const MOBILE_KEYBOARD_MODE_OPTIONS: Option<MobileKeyboardMode>[] = [
-    {
-        id: 'native',
-        labelKey: 'settings.openchamber.visual.option.mobileKeyboardMode.native.label',
-        descriptionKey: 'settings.openchamber.visual.option.mobileKeyboardMode.native.description',
-    },
-    {
-        id: 'resize-content',
-        labelKey: 'settings.openchamber.visual.option.mobileKeyboardMode.resizeContent.label',
-        descriptionKey: 'settings.openchamber.visual.option.mobileKeyboardMode.resizeContent.description',
-    },
-];
-
-type PwaInstallNameWindow = Window & {
-    __OPENCHAMBER_SET_PWA_INSTALL_NAME__?: (value: string) => string;
-    __OPENCHAMBER_SET_PWA_ORIENTATION__?: (value: 'system' | 'portrait' | 'landscape') => 'system' | 'portrait' | 'landscape';
-    __OPENCHAMBER_UPDATE_PWA_MANIFEST__?: () => void;
-};
-
-const normalizePwaOrientation = (value: unknown): 'system' | 'portrait' | 'landscape' => {
-    return value === 'portrait' || value === 'landscape' ? value : 'system';
-};
-
-const USER_MESSAGE_RENDERING_OPTIONS: Option<'markdown' | 'plain'>[] = [
-    {
-        id: 'markdown',
-        labelKey: 'settings.openchamber.visual.option.userMessageRendering.markdown.label',
-        descriptionKey: 'settings.openchamber.visual.option.userMessageRendering.markdown.description',
-    },
-    {
-        id: 'plain',
-        labelKey: 'settings.openchamber.visual.option.userMessageRendering.plain.label',
-        descriptionKey: 'settings.openchamber.visual.option.userMessageRendering.plain.description',
-    },
-];
-
-const CHAT_RENDER_MODE_OPTIONS: Option<'sorted' | 'live'>[] = [
-    {
-        id: 'sorted',
-        labelKey: 'settings.openchamber.visual.option.chatRenderMode.sorted.label',
-        descriptionKey: 'settings.openchamber.visual.option.chatRenderMode.sorted.description',
-    },
-    {
-        id: 'live',
-        labelKey: 'settings.openchamber.visual.option.chatRenderMode.live.label',
-        descriptionKey: 'settings.openchamber.visual.option.chatRenderMode.live.description',
-    },
-];
-
-const MESSAGE_STREAM_TRANSPORT_OPTIONS: Option<'auto' | 'ws' | 'sse'>[] = [
-    {
-        id: 'auto',
-        labelKey: 'settings.openchamber.visual.option.messageTransport.auto.label',
-        descriptionKey: 'settings.openchamber.visual.option.messageTransport.auto.description',
-    },
-    {
-        id: 'ws',
-        labelKey: 'settings.openchamber.visual.option.messageTransport.ws.label',
-        descriptionKey: 'settings.openchamber.visual.option.messageTransport.ws.description',
-    },
-    {
-        id: 'sse',
-        labelKey: 'settings.openchamber.visual.option.messageTransport.sse.label',
-        descriptionKey: 'settings.openchamber.visual.option.messageTransport.sse.description',
-    },
-];
-
-const ACTIVITY_RENDER_MODE_OPTIONS: Option<'collapsed' | 'summary'>[] = [
-    {
-        id: 'collapsed',
-        labelKey: 'settings.openchamber.visual.option.activityRenderMode.collapsed.label',
-        descriptionKey: 'settings.openchamber.visual.option.activityRenderMode.collapsed.description',
-    },
-    {
-        id: 'summary',
-        labelKey: 'settings.openchamber.visual.option.activityRenderMode.summary.label',
-        descriptionKey: 'settings.openchamber.visual.option.activityRenderMode.summary.description',
-    },
-];
-
-const TIME_FORMAT_OPTIONS: Option<'auto' | '12h' | '24h'>[] = [
-    {
-        id: 'auto',
-        labelKey: 'settings.openchamber.visual.option.timeFormat.auto.label',
-        descriptionKey: 'settings.openchamber.visual.option.timeFormat.auto.description',
-    },
-    {
-        id: '24h',
-        labelKey: 'settings.openchamber.visual.option.timeFormat.24h.label',
-        descriptionKey: 'settings.openchamber.visual.option.timeFormat.24h.description',
-    },
-    {
-        id: '12h',
-        labelKey: 'settings.openchamber.visual.option.timeFormat.12h.label',
-        descriptionKey: 'settings.openchamber.visual.option.timeFormat.12h.description',
-    },
-];
-
-const WEEK_START_OPTIONS: Option<'auto' | 'monday' | 'sunday'>[] = [
-    {
-        id: 'auto',
-        labelKey: 'settings.openchamber.visual.option.weekStart.auto.label',
-        descriptionKey: 'settings.openchamber.visual.option.weekStart.auto.description',
-    },
-    {
-        id: 'monday',
-        labelKey: 'settings.openchamber.visual.option.weekStart.monday.label',
-    },
-    {
-        id: 'sunday',
-        labelKey: 'settings.openchamber.visual.option.weekStart.sunday.label',
-    },
-];
-
-const normalizeUserMessageRenderingMode = (mode: unknown): 'markdown' | 'plain' => {
-    return mode === 'markdown' ? 'markdown' : 'plain';
-};
-
-export type VisibleSetting = 'theme' | 'pwaInstallName' | 'pwaOrientation' | 'mobileKeyboardMode' | 'timeFormat' | 'weekStart' | 'fontSize' | 'terminalFontSize' | 'spacing' | 'inputBarOffset' | 'mermaidRendering' | 'userMessageRendering' | 'chatRenderMode' | 'messageTransport' | 'activityRenderMode' | 'stickyUserHeader' | 'wideChatLayout' | 'splitAssistantMessageActions' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'reasoning' | 'showToolFileIcons' | 'expandedTools' | 'queueMode' | 'terminalQuickKeys' | 'persistDraft' | 'inputSpellcheck' | 'reportUsage';
+export type VisibleSetting = 'theme' | 'fontSize' | 'terminalFontSize' | 'spacing' | 'cornerRadius' | 'inputBarOffset' | 'navRail' | 'toolOutput' | 'mermaidRendering' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'reasoning' | 'queueMode' | 'textJustificationActivity' | 'terminalQuickKeys' | 'persistDraft' | 'mobileHaptics';
 
 interface OpenChamberVisualSettingsProps {
     /** Which settings to show. If undefined, shows all. */
@@ -288,20 +150,11 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
     const setQueueMode = useMessageQueueStore(state => state.setQueueMode);
     const persistChatDraft = useUIStore(state => state.persistChatDraft);
     const setPersistChatDraft = useUIStore(state => state.setPersistChatDraft);
-    const inputSpellcheckEnabled = useUIStore(state => state.inputSpellcheckEnabled);
-    const setInputSpellcheckEnabled = useUIStore(state => state.setInputSpellcheckEnabled);
-    const showToolFileIcons = useUIStore(state => state.showToolFileIcons);
-    const setShowToolFileIcons = useUIStore(state => state.setShowToolFileIcons);
-    const showExpandedBashTools = useUIStore(state => state.showExpandedBashTools);
-    const setShowExpandedBashTools = useUIStore(state => state.setShowExpandedBashTools);
-    const showExpandedEditTools = useUIStore(state => state.showExpandedEditTools);
-    const setShowExpandedEditTools = useUIStore(state => state.setShowExpandedEditTools);
-    const timeFormatPreference = useUIStore(state => state.timeFormatPreference);
-    const setTimeFormatPreference = useUIStore(state => state.setTimeFormatPreference);
-    const weekStartPreference = useUIStore(state => state.weekStartPreference);
-    const setWeekStartPreference = useUIStore(state => state.setWeekStartPreference);
-    const showSplitAssistantMessageActions = useUIStore(state => state.showSplitAssistantMessageActions);
-    const setShowSplitAssistantMessageActions = useUIStore(state => state.setShowSplitAssistantMessageActions);
+    const mobileHapticsEnabled = useUIStore(state => state.mobileHapticsEnabled);
+    const setMobileHapticsEnabled = useUIStore(state => state.setMobileHapticsEnabled);
+    const isNativeMobile = React.useMemo(() => isNativeMobileApp(), []);
+    const isNavRailExpanded = useUIStore(state => state.isNavRailExpanded);
+    const setNavRailExpanded = useUIStore(state => state.setNavRailExpanded);
     const showMobileSessionStatusBar = useUIStore(state => state.showMobileSessionStatusBar);
     const setShowMobileSessionStatusBar = useUIStore(state => state.setShowMobileSessionStatusBar);
     const messageStreamTransport = useConfigStore((state) => state.settingsMessageStreamTransport);
@@ -498,6 +351,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
         || shouldShow('splitAssistantMessageActions')
         || shouldShow('diffLayout')
         || (shouldShow('mobileStatusBar') && isMobile)
+        || (shouldShow('mobileHaptics') && isNativeMobile)
         || shouldShow('dotfiles')
         || shouldShow('reasoning')
         || shouldShow('queueMode')
@@ -1189,88 +1043,217 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                 {hasBehaviorSettings && (
                     <div className="space-y-3">
 
-                            {(shouldShow('userMessageRendering') || shouldShow('mermaidRendering') || shouldShow('chatRenderMode') || shouldShow('messageTransport') || (shouldShow('activityRenderMode') && chatRenderMode === 'sorted') || (shouldShow('diffLayout') && !isVSCode)) && (
-                                <div className="grid grid-cols-1 gap-y-2 md:grid-cols-[minmax(0,16rem)_minmax(0,16rem)] md:justify-start md:gap-x-2">
-                                    {shouldShow('chatRenderMode') && (
-                                        <section className="p-2 md:col-span-2">
-                                            <h4 className="typography-ui-header font-medium text-foreground">{t('settings.openchamber.visual.section.chatRenderMode')}</h4>
-                                            <div role="radiogroup" aria-label={t('settings.openchamber.visual.section.chatRenderModeAria')} className="mt-1 grid w-full max-w-[26rem] grid-cols-1 gap-3 sm:grid-cols-2">
-                                                {CHAT_RENDER_MODE_OPTIONS.map((option) => {
-                                                    const selected = chatRenderMode === option.id;
-                                                    const previewPhase = chatRenderPreviewTick % 12;
-                                                    return (
-                                                        <button
-                                                            key={option.id}
-                                                            type="button"
-                                                            onClick={() => handleChatRenderModeChange(option.id)}
-                                                            aria-pressed={selected}
-                                                            className={cn(
-                                                                'flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition-colors',
-                                                                selected
-                                                                    ? 'border-primary bg-primary/5'
-                                                                    : 'border-border hover:border-border/80 hover:bg-muted/50'
-                                                            )}
-                                                        >
-                                                            <span className={cn('typography-ui-label', selected ? 'text-foreground' : 'text-muted-foreground')}>
-                                                                {tUnsafe(option.labelKey)}
-                                                            </span>
-                                                            <div className="mt-2 w-full rounded-md border border-border/60 bg-muted/30 p-2">
-                                                                {option.id === 'live' ? (
-                                                                    <div className="space-y-1.5">
-                                                                        {[0, 1, 2].map((index) => {
-                                                                            const rowStart = index * 3 + 1;
-                                                                            const rowProgressPhase = previewPhase - rowStart + 1;
-                                                                            const rowProgress = rowProgressPhase <= 0
-                                                                                ? 0
-                                                                                : rowProgressPhase === 1
-                                                                                    ? 42
-                                                                                    : rowProgressPhase === 2
-                                                                                        ? 68
-                                                                                        : 92;
-                                                                            const visible = rowProgress > 0;
-                                                                            return (
-                                                                                <div
-                                                                                    key={index}
-                                                                                    className={cn(
-                                                                                        'flex items-center gap-1.5 transition-all duration-300 motion-reduce:transition-none',
-                                                                                        visible ? 'translate-y-0 opacity-100' : 'translate-y-1 opacity-0'
-                                                                                    )}
-                                                                                >
-                                                                                    <span className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/55" />
-                                                                                    <span
-                                                                                        className="h-1.5 rounded bg-muted-foreground/30 transition-all duration-300 motion-reduce:transition-none"
-                                                                                        style={{ width: `${rowProgress}%` }}
-                                                                                    />
-                                                                                </div>
-                                                                            );
-                                                                        })}
-                                                                    </div>
-                                                                ) : (
-                                                                    <div className="space-y-1.5">
-                                                                        {[0, 1, 2].map((index) => {
-                                                                            const visible = previewPhase >= (index + 1) * 3;
-                                                                            return (
-                                                                                <div
-                                                                                    key={index}
-                                                                                    className={cn(
-                                                                                        'flex items-center gap-1.5 transition-all duration-300 motion-reduce:transition-none',
-                                                                                        visible ? 'translate-y-0 opacity-100' : 'translate-y-1 opacity-0'
-                                                                                    )}
-                                                                                >
-                                                                                    <span className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/55" />
-                                                                                    <span
-                                                                                        className="h-1.5 rounded bg-muted-foreground/30"
-                                                                                        style={{ width: '92%' }}
-                                                                                    />
-                                                                                </div>
-                                                                            );
-                                                                        })}
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        </button>
-                                                    );
-                                                })}
+                            {shouldShow('toolOutput') && (
+                                <section className="px-2 pb-2 pt-0">
+                                    <h4 className="typography-ui-header font-medium text-foreground">Default Tool Output</h4>
+                                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                                        {TOOL_EXPANSION_OPTIONS.map((option) => {
+                                            return (
+                                                <ButtonSmall
+                                                    key={option.value}
+                                                    variant="outline"
+                                                    size="xs"
+                                                    className={cn(
+                                                        '!font-normal',
+                                                        toolCallExpansion === option.value
+                                                            ? 'border-[var(--primary-base)] text-[var(--primary-base)] bg-[var(--primary-base)]/10 hover:text-[var(--primary-base)]'
+                                                            : 'text-foreground'
+                                                    )}
+                                                    onClick={() => setToolCallExpansion(option.value)}
+                                                >
+                                                    {option.label}
+                                                </ButtonSmall>
+                                            );
+                                        })}
+                                    </div>
+                                </section>
+                            )}
+
+                            {shouldShow('mermaidRendering') && (
+                                <section className="p-2">
+                                    <h4 className="typography-ui-header font-medium text-foreground">Mermaid Rendering</h4>
+                                    <div role="radiogroup" aria-label="Mermaid rendering mode" className="mt-1 space-y-0">
+                                        {MERMAID_RENDERING_OPTIONS.map((option) => {
+                                            const selected = mermaidRenderingMode === option.id;
+                                            return (
+                                                <div
+                                                    key={option.id}
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    aria-pressed={selected}
+                                                    onClick={() => setMermaidRenderingMode(option.id)}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key === ' ' || event.key === 'Enter') {
+                                                            event.preventDefault();
+                                                            setMermaidRenderingMode(option.id);
+                                                        }
+                                                    }}
+                                                    className="flex w-full items-center gap-2 py-0.5 text-left"
+                                                >
+                                                    <Radio
+                                                        checked={selected}
+                                                        onChange={() => setMermaidRenderingMode(option.id)}
+                                                        ariaLabel={`Mermaid rendering: ${option.label}`}
+                                                    />
+                                                    <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
+                                                        {option.label}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </section>
+                            )}
+
+                            {shouldShow('diffLayout') && !isVSCodeRuntime() && (
+                                <section className="p-2">
+                                    <h4 className="typography-ui-header font-medium text-foreground">Diff Layout</h4>
+                                    <div role="radiogroup" aria-label="Diff layout" className="mt-1 space-y-0">
+                                        {DIFF_LAYOUT_OPTIONS.map((option) => {
+                                            const selected = diffLayoutPreference === option.id;
+                                            return (
+                                                <div
+                                                    key={option.id}
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    aria-pressed={selected}
+                                                    onClick={() => setDiffLayoutPreference(option.id)}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key === ' ' || event.key === 'Enter') {
+                                                            event.preventDefault();
+                                                            setDiffLayoutPreference(option.id);
+                                                        }
+                                                    }}
+                                                    className="flex w-full items-center gap-2 py-0.5 text-left"
+                                                >
+                                                    <Radio
+                                                        checked={selected}
+                                                        onChange={() => setDiffLayoutPreference(option.id)}
+                                                        ariaLabel={`Diff layout: ${option.label}`}
+                                                    />
+                                                    <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
+                                                        {option.label}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </section>
+                            )}
+
+                            {shouldShow('diffLayout') && !isVSCodeRuntime() && (
+                                <section className="p-2">
+                                    <h4 className="typography-ui-header font-medium text-foreground">Diff View Mode</h4>
+                                    <div role="radiogroup" aria-label="Diff view mode" className="mt-1 space-y-0">
+                                        {DIFF_VIEW_MODE_OPTIONS.map((option) => {
+                                            const selected = diffViewMode === option.id;
+                                            return (
+                                                <div
+                                                    key={option.id}
+                                                    role="button"
+                                                    tabIndex={0}
+                                                    aria-pressed={selected}
+                                                    onClick={() => setDiffViewMode(option.id)}
+                                                    onKeyDown={(event) => {
+                                                        if (event.key === ' ' || event.key === 'Enter') {
+                                                            event.preventDefault();
+                                                            setDiffViewMode(option.id);
+                                                        }
+                                                    }}
+                                                    className="flex w-full items-center gap-2 py-0.5 text-left"
+                                                >
+                                                    <Radio
+                                                        checked={selected}
+                                                        onChange={() => setDiffViewMode(option.id)}
+                                                        ariaLabel={`Diff view mode: ${option.label}`}
+                                                    />
+                                                    <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
+                                                        {option.label}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </section>
+                            )}
+
+                            {((shouldShow('mobileStatusBar') && isMobile) || (shouldShow('mobileHaptics') && isNativeMobile) || shouldShow('dotfiles') || shouldShow('queueMode') || shouldShow('persistDraft') || shouldShow('reasoning') || shouldShow('textJustificationActivity')) && (
+                                <section className="p-2 space-y-0.5">
+                                    {shouldShow('mobileStatusBar') && isMobile && (
+                                        <div
+                                            className="group flex cursor-pointer items-center gap-2 py-1.5"
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-pressed={showMobileSessionStatusBar}
+                                            onClick={() => setShowMobileSessionStatusBar(!showMobileSessionStatusBar)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === ' ' || event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    setShowMobileSessionStatusBar(!showMobileSessionStatusBar);
+                                                }
+                                            }}
+                                        >
+                                            <Checkbox
+                                                checked={showMobileSessionStatusBar}
+                                                onChange={setShowMobileSessionStatusBar}
+                                                ariaLabel="Show mobile status bar"
+                                            />
+                                            <span className="typography-ui-label text-foreground">Show Mobile Status Bar</span>
+                                        </div>
+                                    )}
+
+                                    {shouldShow('dotfiles') && !isVSCodeRuntime() && (
+                                        <div
+                                            className="group flex cursor-pointer items-center gap-2 py-1.5"
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-pressed={directoryShowHidden}
+                                            onClick={() => setDirectoryShowHidden(!directoryShowHidden)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === ' ' || event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    setDirectoryShowHidden(!directoryShowHidden);
+                                                }
+                                            }}
+                                        >
+                                            <Checkbox
+                                                checked={directoryShowHidden}
+                                                onChange={setDirectoryShowHidden}
+                                                ariaLabel="Show dotfiles"
+                                            />
+                                            <span className="typography-ui-label text-foreground">Show Dotfiles</span>
+                                        </div>
+                                    )}
+
+                                    {shouldShow('queueMode') && (
+                                        <div
+                                            className="group flex cursor-pointer items-center gap-2 py-1.5"
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-pressed={queueModeEnabled}
+                                            onClick={() => setQueueMode(!queueModeEnabled)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === ' ' || event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    setQueueMode(!queueModeEnabled);
+                                                }
+                                            }}
+                                        >
+                                            <Checkbox
+                                                checked={queueModeEnabled}
+                                                onChange={setQueueMode}
+                                                ariaLabel="Queue messages by default"
+                                            />
+                                            <div className="flex min-w-0 items-center gap-1.5">
+                                                <span className="typography-ui-label text-foreground">Queue Messages by Default</span>
+                                                <Tooltip delayDuration={1000}>
+                                                    <TooltipTrigger asChild>
+                                                        <RiInformationLine className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
+                                                    </TooltipTrigger>
+                                                    <TooltipContent sideOffset={8} className="max-w-xs">
+                                                        When enabled, Enter queues messages. Use {getModifierLabel()}+Enter to send.
+                                                    </TooltipContent>
+                                                </Tooltip>
                                             </div>
                                         </section>
                                     )}
@@ -1303,238 +1286,29 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                         </section>
                                     )}
 
-                                    {shouldShow('activityRenderMode') && chatRenderMode === 'sorted' && (
-                                        <section className="p-2 md:col-span-2">
-                                            <h4 className="typography-ui-header font-medium text-foreground">{t('settings.openchamber.visual.section.activityDefault')}</h4>
-                                            <div role="radiogroup" aria-label={t('settings.openchamber.visual.section.activityDefaultAria')} className="mt-0.5 space-y-0">
-                                                {ACTIVITY_RENDER_MODE_OPTIONS.map((option) => {
-                                                    const selected = activityRenderMode === option.id;
-                                                    return (
-                                                        <div
-                                                            key={option.id}
-                                                            role="button"
-                                                            tabIndex={0}
-                                                            aria-pressed={selected}
-                                                            onClick={() => handleActivityRenderModeChange(option.id)}
-                                                            onKeyDown={(event) => {
-                                                                if (event.key === ' ' || event.key === 'Enter') {
-                                                                    event.preventDefault();
-                                                                    handleActivityRenderModeChange(option.id);
-                                                                }
-                                                            }}
-                                                            className="flex w-full items-center gap-2 py-0 text-left"
-                                                        >
-                                                            <Radio
-                                                                checked={selected}
-                                                                onChange={() => handleActivityRenderModeChange(option.id)}
-                                                                ariaLabel={t('settings.openchamber.visual.field.activityDefaultModeAria', { option: tUnsafe(option.labelKey) })}
-                                                            />
-                                                            <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
-                                                                {tUnsafe(option.labelKey)}
-                                                            </span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </section>
+                                    {shouldShow('mobileHaptics') && isNativeMobile && (
+                                        <div
+                                            className="group flex cursor-pointer items-center gap-2 py-1.5"
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-pressed={mobileHapticsEnabled}
+                                            onClick={() => setMobileHapticsEnabled(!mobileHapticsEnabled)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === ' ' || event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    setMobileHapticsEnabled(!mobileHapticsEnabled);
+                                                }
+                                            }}
+                                        >
+                                            <Checkbox
+                                                checked={mobileHapticsEnabled}
+                                                onChange={setMobileHapticsEnabled}
+                                                ariaLabel="Enable haptic feedback"
+                                            />
+                                            <span className="typography-ui-label text-foreground">Haptic Feedback</span>
+                                        </div>
                                     )}
 
-                                    {shouldShow('expandedTools') && (
-                                        <section className="p-2 md:col-span-2 space-y-0.5">
-                                            <div className="typography-ui-header font-medium text-foreground py-1.5">{t('settings.openchamber.visual.section.showToolsOpenedByDefault')}</div>
-
-                                            <div
-                                                className="group flex cursor-pointer items-center gap-2 py-0.5"
-                                                role="button"
-                                                tabIndex={0}
-                                                aria-pressed={showExpandedBashTools}
-                                                onClick={() => handleShowExpandedBashToolsChange(!showExpandedBashTools)}
-                                                onKeyDown={(event) => {
-                                                    if (event.key === ' ' || event.key === 'Enter') {
-                                                        event.preventDefault();
-                                                        handleShowExpandedBashToolsChange(!showExpandedBashTools);
-                                                    }
-                                                }}
-                                            >
-                                                <Checkbox
-                                                    checked={showExpandedBashTools}
-                                                    onChange={handleShowExpandedBashToolsChange}
-                                                    ariaLabel={t('settings.openchamber.visual.field.showExpandedBashToolsAria')}
-                                                />
-                                                <span className="typography-ui-label text-foreground">{t('settings.openchamber.visual.field.bash')}</span>
-                                            </div>
-
-                                            <div
-                                                className="group flex cursor-pointer items-center gap-2 py-0.5"
-                                                role="button"
-                                                tabIndex={0}
-                                                aria-pressed={showExpandedEditTools}
-                                                onClick={() => handleShowExpandedEditToolsChange(!showExpandedEditTools)}
-                                                onKeyDown={(event) => {
-                                                    if (event.key === ' ' || event.key === 'Enter') {
-                                                        event.preventDefault();
-                                                        handleShowExpandedEditToolsChange(!showExpandedEditTools);
-                                                    }
-                                                }}
-                                            >
-                                                <Checkbox
-                                                    checked={showExpandedEditTools}
-                                                    onChange={handleShowExpandedEditToolsChange}
-                                                    ariaLabel={t('settings.openchamber.visual.field.showExpandedEditToolsAria')}
-                                                />
-                                                <span className="typography-ui-label text-foreground">{t('settings.openchamber.visual.field.editTools')}</span>
-                                            </div>
-                                        </section>
-                                    )}
-
-                                    {shouldShow('userMessageRendering') && (
-                                        <section className="p-2">
-                                            <h4 className="typography-ui-header font-medium text-foreground">{t('settings.openchamber.visual.section.userMessageRendering')}</h4>
-                                            <div role="radiogroup" aria-label={t('settings.openchamber.visual.section.userMessageRenderingAria')} className="mt-0.5 space-y-0">
-                                                {USER_MESSAGE_RENDERING_OPTIONS.map((option) => {
-                                                    const selected = normalizeUserMessageRenderingMode(userMessageRenderingMode) === option.id;
-                                                    return (
-                                                        <div
-                                                            key={option.id}
-                                                            role="button"
-                                                            tabIndex={0}
-                                                            aria-pressed={selected}
-                                                            onClick={() => handleUserMessageRenderingModeChange(option.id)}
-                                                            onKeyDown={(event) => {
-                                                                if (event.key === ' ' || event.key === 'Enter') {
-                                                                    event.preventDefault();
-                                                                    handleUserMessageRenderingModeChange(option.id);
-                                                                }
-                                                            }}
-                                                            className="flex w-full items-center gap-2 py-0 text-left"
-                                                        >
-                                                            <Radio
-                                                                checked={selected}
-                                                                onChange={() => handleUserMessageRenderingModeChange(option.id)}
-                                                                ariaLabel={t('settings.openchamber.visual.field.userMessageRenderingAria', { option: tUnsafe(option.labelKey) })}
-                                                            />
-                                                            <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
-                                                                {tUnsafe(option.labelKey)}
-                                                            </span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </section>
-                                    )}
-
-                                    {shouldShow('mermaidRendering') && (
-                                        <section className="p-2">
-                                            <h4 className="typography-ui-header font-medium text-foreground">{t('settings.openchamber.visual.section.mermaidRendering')}</h4>
-                                            <div role="radiogroup" aria-label={t('settings.openchamber.visual.section.mermaidRenderingAria')} className="mt-0.5 space-y-0">
-                                                {MERMAID_RENDERING_OPTIONS.map((option) => {
-                                                    const selected = mermaidRenderingMode === option.id;
-                                                    return (
-                                                        <div
-                                                            key={option.id}
-                                                            role="button"
-                                                            tabIndex={0}
-                                                            aria-pressed={selected}
-                                                            onClick={() => handleMermaidRenderingModeChange(option.id)}
-                                                            onKeyDown={(event) => {
-                                                                if (event.key === ' ' || event.key === 'Enter') {
-                                                                    event.preventDefault();
-                                                                    handleMermaidRenderingModeChange(option.id);
-                                                                }
-                                                            }}
-                                                            className="flex w-full items-center gap-2 py-0 text-left"
-                                                        >
-                                                            <Radio
-                                                                checked={selected}
-                                                                onChange={() => handleMermaidRenderingModeChange(option.id)}
-                                                                ariaLabel={t('settings.openchamber.visual.field.mermaidRenderingAria', { option: tUnsafe(option.labelKey) })}
-                                                            />
-                                                            <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
-                                                                {tUnsafe(option.labelKey)}
-                                                            </span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </section>
-                                    )}
-
-                                    {shouldShow('diffLayout') && !isVSCode && (
-                                        <section className="p-2">
-                                            <h4 className="typography-ui-header font-medium text-foreground">{t('settings.openchamber.visual.section.diffLayout')}</h4>
-                                            <div role="radiogroup" aria-label={t('settings.openchamber.visual.section.diffLayoutAria')} className="mt-0.5 space-y-0">
-                                                {DIFF_LAYOUT_OPTIONS.map((option) => {
-                                                    const selected = diffLayoutPreference === option.id;
-                                                    return (
-                                                        <div
-                                                            key={option.id}
-                                                            role="button"
-                                                            tabIndex={0}
-                                                            aria-pressed={selected}
-                                                            onClick={() => setDiffLayoutPreference(option.id)}
-                                                            onKeyDown={(event) => {
-                                                                if (event.key === ' ' || event.key === 'Enter') {
-                                                                    event.preventDefault();
-                                                                    setDiffLayoutPreference(option.id);
-                                                                }
-                                                            }}
-                                                            className="flex w-full items-center gap-2 py-0 text-left"
-                                                        >
-                                                            <Radio
-                                                                checked={selected}
-                                                                onChange={() => setDiffLayoutPreference(option.id)}
-                                                                ariaLabel={t('settings.openchamber.visual.field.diffLayoutAria', { option: tUnsafe(option.labelKey) })}
-                                                            />
-                                                            <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
-                                                                {tUnsafe(option.labelKey)}
-                                                            </span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </section>
-                                    )}
-
-                                    {shouldShow('diffLayout') && !isVSCode && (
-                                        <section className="p-2">
-                                            <h4 className="typography-ui-header font-medium text-foreground">{t('settings.openchamber.visual.section.diffViewMode')}</h4>
-                                            <div role="radiogroup" aria-label={t('settings.openchamber.visual.section.diffViewModeAria')} className="mt-0.5 space-y-0">
-                                                {DIFF_VIEW_MODE_OPTIONS.map((option) => {
-                                                    const selected = diffViewMode === option.id;
-                                                    return (
-                                                        <div
-                                                            key={option.id}
-                                                            role="button"
-                                                            tabIndex={0}
-                                                            aria-pressed={selected}
-                                                            onClick={() => setDiffViewMode(option.id)}
-                                                            onKeyDown={(event) => {
-                                                                if (event.key === ' ' || event.key === 'Enter') {
-                                                                    event.preventDefault();
-                                                                    setDiffViewMode(option.id);
-                                                                }
-                                                            }}
-                                                            className="flex w-full items-center gap-2 py-0 text-left"
-                                                        >
-                                                            <Radio
-                                                                checked={selected}
-                                                                onChange={() => setDiffViewMode(option.id)}
-                                                                ariaLabel={t('settings.openchamber.visual.field.diffViewModeAria', { option: tUnsafe(option.labelKey) })}
-                                                            />
-                                                            <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
-                                                                {tUnsafe(option.labelKey)}
-                                                            </span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </section>
-                                    )}
-                                </div>
-                            )}
-
-                            {(shouldShow('stickyUserHeader') || shouldShow('wideChatLayout') || shouldShow('splitAssistantMessageActions') || (shouldShow('mobileStatusBar') && isMobile) || shouldShow('dotfiles') || shouldShow('queueMode') || shouldShow('persistDraft') || shouldShow('showToolFileIcons') || (!isMobile && shouldShow('inputSpellcheck')) || shouldShow('reasoning')) && (
-                                <section className="p-2 space-y-0.5">
                                     {shouldShow('reasoning') && (
                                         <div
                                             className="group flex cursor-pointer items-center gap-2 py-0.5"

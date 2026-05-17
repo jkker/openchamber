@@ -205,12 +205,7 @@ export const MultiRunLauncher: React.FC<MultiRunLauncherProps> = ({
     return { id: `path:${base}`, path: base };
   }, [selectedProject, currentDirectory, vscodeWorkspaceFolder]);
 
-  const [isDesktopApp, setIsDesktopApp] = React.useState<boolean>(() => {
-    if (typeof window === 'undefined') {
-      return false;
-    }
-    return isDesktopShell();
-  });
+  const isDesktopApp = isDesktopShell();
 
   const isMacPlatform = React.useMemo(() => {
     if (typeof navigator === 'undefined') {
@@ -219,13 +214,6 @@ export const MultiRunLauncher: React.FC<MultiRunLauncherProps> = ({
     return /Macintosh|Mac OS X/.test(navigator.userAgent || '');
   }, []);
   const isTabletStandalonePwa = useTabletStandalonePwaRuntime();
-
-  React.useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    setIsDesktopApp(isDesktopShell());
-  }, []);
 
   const macosMajorVersion = React.useMemo(() => {
     if (typeof window === 'undefined') {

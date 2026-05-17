@@ -17,7 +17,7 @@ export type SettingsPageSlug =
   | 'chat'
   | 'shortcuts'
   | 'sessions'
-  | 'magic-prompts'
+  | 'devices'
   | 'notifications'
   | 'voice'
   | 'tunnel';
@@ -182,6 +182,15 @@ export const SETTINGS_PAGE_METADATA: readonly SettingsPageMeta[] = [
     group: 'general',
     kind: 'split',
     keywords: ['prompts', 'templates', 'git', 'github', 'review', 'commit', 'pull request'],
+    isAvailable: (ctx) => !ctx.isVSCode,
+  },
+
+  {
+    slug: 'devices',
+    title: 'Devices',
+    group: 'general',
+    kind: 'single',
+    keywords: ['devices', 'device login', 'mobile', 'remote', 'auth', 'authentication', 'user code'],
     isAvailable: (ctx) => !ctx.isVSCode,
   },
 

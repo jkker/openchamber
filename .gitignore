@@ -20,7 +20,8 @@ changelog-*.png
 /tsc
 /openchamber@*
 local-dev*
-.tmp/
+local-build*
+*.bun-build
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -3,7 +3,16 @@ import { MainLayout } from '@/components/layout/MainLayout';
 import { ChatView } from '@/components/views/ChatView';
 import { FireworksProvider } from '@/contexts/FireworksContext';
 import { Toaster } from '@/components/ui/sonner';
+import { toast } from '@/components/ui';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { MemoryDebugPanel } from '@/components/ui/MemoryDebugPanel';
 import { setStreamPerfEnabled } from '@/stores/utils/streamDebug';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
@@ -16,20 +25,11 @@ import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
 import { useWindowTitle } from '@/hooks/useWindowTitle';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { hasModifier } from '@/lib/utils';
-import { isDesktopLocalOriginActive, isDesktopShell, isTauriShell, restartDesktopApp } from '@/lib/desktop';
-import {
-  getInjectedBootOutcome,
-  getBootInjectionStatus,
-  resolveDesktopBootView,
-  canDismissInitialLoading,
-  shouldRestartDesktopBootFlow,
-  type BootInjectionStatus,
-  type DesktopBootView,
-} from '@/lib/desktopBoot';
-import type { RecoveryVariant } from '@/components/onboarding/DesktopConnectionRecovery';
-import { useSessionUIStore } from '@/sync/session-ui-store';
+import { authenticateWithBiometrics, getBiometricStatus, isDesktopLocalOriginActive, isDesktopShell, isMobileRuntime, isNativeMobileApp, isTauriShell } from '@/lib/desktop';
+import { OnboardingScreen } from '@/components/onboarding/OnboardingScreen';
+import { useSessionStore } from '@/stores/useSessionStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
-import { useProjectsStore } from '@/stores/useProjectsStore';
+import { useInstancesStore } from '@/stores/useInstancesStore';
 import { opencodeClient } from '@/lib/opencode/client';
 import { SyncProvider } from '@/sync/sync-context';
 import { useSync } from '@/sync/use-sync';
@@ -93,62 +93,34 @@ type AppProps = {
   apis: RuntimeAPIs;
 };
 
-type EmbeddedSessionChatConfig = {
-  sessionId: string;
-  directory: string | null;
-  readOnly: boolean;
-};
-
-type EmbeddedVisibilityPayload = {
-  visible?: unknown;
-};
-
-const normalizeEmbeddedDirectory = (value: string | null | undefined): string => {
-  if (!value) return '';
-  return value.replace(/\\/g, '/').replace(/\/+$/g, '');
-};
-
-const readEmbeddedSessionChatConfig = (): EmbeddedSessionChatConfig | null => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const params = new URLSearchParams(window.location.search);
-  if (params.get('ocPanel') !== 'session-chat') {
-    return null;
-  }
-
-  const sessionIdRaw = params.get('sessionId');
-  const sessionId = typeof sessionIdRaw === 'string' ? sessionIdRaw.trim() : '';
-  if (!sessionId) {
-    return null;
-  }
-
-  const directoryRaw = params.get('directory');
-  const directory = typeof directoryRaw === 'string' && directoryRaw.trim().length > 0
-    ? directoryRaw.trim()
-    : null;
-
-  return {
-    sessionId,
-    directory,
-    readOnly: params.get('readOnly') === '1' || params.get('readOnly') === 'true',
+type PendingDeviceGrant = {
+  userCode: string;
+  requestedName?: string | null;
+  userAgent?: string;
+  platform?: {
+    os?: string;
+    model?: string;
+    version?: string;
+    arch?: string;
+    type?: string;
+    runtime?: string;
   };
+  createdAt?: number;
 };
 
-const isMcpOAuthCallbackPath = (): boolean => {
-  if (typeof window === 'undefined') {
-    return false;
-  }
-
-  return window.location.pathname === MCP_OAUTH_CALLBACK_PATH;
+const formatPendingDeviceLabel = (grant: PendingDeviceGrant): string => {
+  const name = (grant.requestedName || '').trim() || 'Unnamed device';
+  const platform = grant.platform || {};
+  const primary = [platform.model, platform.os].find((value) => typeof value === 'string' && value.trim().length > 0) || 'Unknown platform';
+  const extra = [platform.version, platform.arch].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  return extra.length > 0
+    ? `${name} - ${primary} (${extra.join(', ')})`
+    : `${name} - ${primary}`;
 };
 
-const EmbeddedSessionChatContent: React.FC<{
-  embeddedSessionChat: EmbeddedSessionChatConfig;
-  isVSCodeRuntime: boolean;
-  embeddedBackgroundWorkEnabled: boolean;
-}> = ({ embeddedSessionChat, isVSCodeRuntime, embeddedBackgroundWorkEnabled }) => {
+function App({ apis }: AppProps) {
+  const { initializeApp, isInitialized, isConnected } = useConfigStore();
+  const { error, clearError, loadSessions } = useSessionStore();
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
   const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
   const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
@@ -209,51 +181,34 @@ function App({ apis }: AppProps) {
   const setDirectory = useDirectoryStore((state) => state.setDirectory);
   const isSwitchingDirectory = useDirectoryStore((state) => state.isSwitchingDirectory);
   const [showMemoryDebug, setShowMemoryDebug] = React.useState(false);
+  const [connectionCheckCompleted, setConnectionCheckCompleted] = React.useState<boolean>(() => apis.runtime.isVSCode);
+  const [isRetryingConnection, setIsRetryingConnection] = React.useState(false);
+  const { uiFont, monoFont } = useFontPreferences();
   const refreshGitHubAuthStatus = useGitHubAuthStore((state) => state.refreshStatus);
   const [isVSCodeRuntime, setIsVSCodeRuntime] = React.useState<boolean>(() => apis.runtime.isVSCode);
-  const [isEmbeddedVisible, setIsEmbeddedVisible] = React.useState(true);
-  const [initRetryExhausted, setInitRetryExhausted] = React.useState(false);
-  const [initRetryEpoch, setInitRetryEpoch] = React.useState(0);
-  const [manualInitRetrying, setManualInitRetrying] = React.useState(false);
-  const wideChatLayoutEnabled = useUIStore((state) => state.wideChatLayoutEnabled);
-  const mobileKeyboardMode = useUIStore((state) => state.mobileKeyboardMode);
-  const isDesktopRuntime = React.useMemo(() => isDesktopShell(), []);
-  const setPlanModeEnabled = useFeatureFlagsStore((state) => state.setPlanModeEnabled);
-  const [bootInjectionStatus, setBootInjectionStatus] = React.useState<BootInjectionStatus>(() => {
-    return getBootInjectionStatus();
-  });
-  const [bootView, setBootView] = React.useState<DesktopBootView | null>(() => {
-    const outcome = getInjectedBootOutcome();
-    return outcome !== null
-      ? resolveDesktopBootView({ isDesktopShell: true, bootOutcome: outcome })
-      : null;
-  });
+  const [showCliOnboarding, setShowCliOnboarding] = React.useState(false);
+  const instances = useInstancesStore((state) => state.instances);
+  const currentInstanceId = useInstancesStore((state) => state.currentInstanceId);
+  const setCurrentInstance = useInstancesStore((state) => state.setCurrentInstance);
+  const touchInstance = useInstancesStore((state) => state.touchInstance);
+  const isDeviceLoginOpen = useUIStore((state) => state.isDeviceLoginOpen);
+  const setDeviceLoginOpen = useUIStore((state) => state.setDeviceLoginOpen);
+  const biometricLockEnabled = useUIStore((state) => state.biometricLockEnabled);
+  const setBiometricLockEnabled = useUIStore((state) => state.setBiometricLockEnabled);
   const appReadyDispatchedRef = React.useRef(false);
-  const embeddedSessionChat = React.useMemo<EmbeddedSessionChatConfig | null>(() => readEmbeddedSessionChatConfig(), []);
-  const embeddedBackgroundWorkEnabled = !embeddedSessionChat || isEmbeddedVisible;
-  const isMcpOAuthCallback = React.useMemo(() => isMcpOAuthCallbackPath(), []);
-
-  React.useEffect(() => {
-    setStreamPerfEnabled(showMemoryDebug);
-    return () => {
-      setStreamPerfEnabled(false);
-    };
-  }, [showMemoryDebug]);
-
-  React.useEffect(() => {
-    applyMobileKeyboardMode(mobileKeyboardMode);
-  }, [mobileKeyboardMode]);
+  const pendingGrantToastIdsRef = React.useRef<Map<string, string | number>>(new Map());
+  const pendingGrantActionBusyRef = React.useRef<Set<string>>(new Set());
+  const pendingGrantPollingErrorShownRef = React.useRef(false);
+  const [biometricRequired, setBiometricRequired] = React.useState(false);
+  const [biometricBusy, setBiometricBusy] = React.useState(false);
 
   React.useEffect(() => {
     setIsVSCodeRuntime(apis.runtime.isVSCode);
   }, [apis.runtime.isVSCode]);
 
   React.useEffect(() => {
-    document.documentElement.classList.toggle('wide-chat-layout', wideChatLayoutEnabled);
-    return () => {
-      document.documentElement.classList.remove('wide-chat-layout');
-    };
-  }, [wideChatLayoutEnabled]);
+    setConnectionCheckCompleted(isVSCodeRuntime);
+  }, [isVSCodeRuntime]);
 
   React.useEffect(() => {
     registerRuntimeAPIs(apis);
@@ -415,44 +370,33 @@ function App({ apis }: AppProps) {
   }, [isInitialized]);
 
   React.useEffect(() => {
-    if (!initRetryExhausted) return;
+    let cancelled = false;
 
-    const loadingElement = document.getElementById('initial-loading');
-    if (loadingElement) {
-      loadingElement.classList.add('fade-out');
-      setTimeout(() => {
-        loadingElement.remove();
-      }, 300);
-    }
-  }, [initRetryExhausted]);
+    const init = async () => {
+      if (isVSCodeRuntime) {
+        if (!cancelled) {
+          setConnectionCheckCompleted(true);
+        }
+        return;
+      }
 
-  // Startup recovery: poll until providers AND agents are loaded.
-  // loadProviders/loadAgents resolve normally even on failure (errors swallowed),
-  // so a reactive effect can't detect failure — we need an interval.
-  React.useEffect(() => {
-    if (isVSCodeRuntime || !isConnected) return;
-    if (providersCount > 0 && agentsCount > 0) return;
+      if (!cancelled) {
+        setConnectionCheckCompleted(false);
+      }
 
-    let active = true;
-    let retries = 0;
-    const MAX_RETRIES = 15;
-    const attempt = async () => {
-      const state = useConfigStore.getState();
-      if (state.providers.length > 0 && state.agents.length > 0) return;
-      try {
-        if (state.providers.length === 0) await loadProviders();
-        if (useConfigStore.getState().agents.length === 0) await loadAgents();
-      } catch { /* retry next interval */ }
+      await initializeApp();
+
+      if (!cancelled) {
+        setConnectionCheckCompleted(true);
+      }
     };
 
-    void attempt();
-    const id = setInterval(() => {
-      if (!active) return;
-      if (++retries >= MAX_RETRIES) { clearInterval(id); return; }
-      void attempt();
-    }, 2000);
-    return () => { active = false; clearInterval(id); };
-  }, [isConnected, isVSCodeRuntime, loadAgents, loadProviders, providersCount, agentsCount]);
+    void init();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initializeApp, isVSCodeRuntime]);
 
   React.useEffect(() => {
     if (isSwitchingDirectory) {
@@ -636,7 +580,11 @@ function App({ apis }: AppProps) {
   useSessionStatusBootstrap({ enabled: embeddedBackgroundWorkEnabled });
 
   React.useEffect(() => {
-    if (embeddedSessionChat) {
+    if (!isDesktopShell() || !isTauriShell()) {
+      return;
+    }
+    const tauri = (window as unknown as { __TAURI__?: { core?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } } }).__TAURI__;
+    if (typeof tauri?.core?.invoke !== 'function') {
       return;
     }
 
@@ -667,10 +615,165 @@ function App({ apis }: AppProps) {
     }
   }, [clearError, embeddedSessionChat, error]);
 
-  // Poll for the injected boot outcome until it becomes available (desktop only).
-  // The Rust backend sets window.__OPENCHAMBER_DESKTOP_BOOT_OUTCOME__ once the
-  // sidecar reaches a stable state. We poll with exponential backoff to handle
-  // potential race conditions during startup and config writes.
+  const handlePendingDeviceDecision = React.useCallback(async (userCode: string, decision: 'approve' | 'deny') => {
+    const normalizedCode = userCode.trim();
+    if (!normalizedCode) {
+      return;
+    }
+
+    const actionKey = `${decision}:${normalizedCode}`;
+    if (pendingGrantActionBusyRef.current.has(actionKey)) {
+      return;
+    }
+    pendingGrantActionBusyRef.current.add(actionKey);
+
+    try {
+      const endpoint = decision === 'approve' ? '/api/auth/devices/approve' : '/api/auth/devices/deny';
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ user_code: normalizedCode }),
+      });
+
+      const payload = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || response.statusText || 'request_failed');
+      }
+
+      const toastId = pendingGrantToastIdsRef.current.get(normalizedCode);
+      if (toastId !== undefined) {
+        toast.dismiss(toastId);
+      }
+      pendingGrantToastIdsRef.current.delete(normalizedCode);
+      if (decision === 'approve') {
+        toast.success('Device approved');
+      } else {
+        toast.success('Device declined');
+      }
+    } catch {
+      toast.error(decision === 'approve' ? 'Failed to approve device' : 'Failed to decline device');
+    } finally {
+      pendingGrantActionBusyRef.current.delete(actionKey);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (isVSCodeRuntime || !isConnected) {
+      return;
+    }
+
+    let cancelled = false;
+    const pendingToastIds = pendingGrantToastIdsRef.current;
+
+    const notifyPendingGrantsPollingError = (message: string) => {
+      if (pendingGrantPollingErrorShownRef.current) {
+        return;
+      }
+      pendingGrantPollingErrorShownRef.current = true;
+      toast.error(message);
+    };
+
+    const clearPendingGrantsPollingError = () => {
+      pendingGrantPollingErrorShownRef.current = false;
+    };
+
+    const syncPendingGrants = async () => {
+      try {
+        const response = await fetch('/api/auth/devices/pending', {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+        });
+
+        if (!response.ok) {
+          if (response.status >= 500 || response.status === 0) {
+            notifyPendingGrantsPollingError('Failed to load pending device requests');
+          }
+          return;
+        }
+
+        const payload = (await response.json().catch(() => null)) as {
+          ok?: boolean;
+          pending?: PendingDeviceGrant[];
+        } | null;
+
+        if (cancelled || !payload?.ok || !Array.isArray(payload.pending)) {
+          notifyPendingGrantsPollingError('Invalid pending device response');
+          return;
+        }
+
+        clearPendingGrantsPollingError();
+
+        const activeCodes = new Set<string>();
+        for (const grant of payload.pending) {
+          const userCode = typeof grant?.userCode === 'string' ? grant.userCode.trim() : '';
+          if (!userCode) {
+            continue;
+          }
+          activeCodes.add(userCode);
+
+          if (pendingToastIds.has(userCode)) {
+            continue;
+          }
+
+          const toastId = toast.info('New device login request', {
+            description: formatPendingDeviceLabel(grant),
+            duration: Number.POSITIVE_INFINITY,
+            action: {
+              label: 'Approve',
+              onClick: () => {
+                void handlePendingDeviceDecision(userCode, 'approve');
+              },
+            },
+            cancel: {
+              label: 'Decline',
+              onClick: () => {
+                void handlePendingDeviceDecision(userCode, 'deny');
+              },
+            },
+          });
+
+          pendingToastIds.set(userCode, toastId);
+        }
+
+        const staleCodes: string[] = [];
+        for (const userCode of pendingToastIds.keys()) {
+          if (!activeCodes.has(userCode)) {
+            staleCodes.push(userCode);
+          }
+        }
+
+        for (const userCode of staleCodes) {
+          const toastId = pendingToastIds.get(userCode);
+          if (toastId !== undefined) {
+            toast.dismiss(toastId);
+          }
+          pendingToastIds.delete(userCode);
+        }
+      } catch {
+        notifyPendingGrantsPollingError('Failed to load pending device requests');
+      }
+    };
+
+    void syncPendingGrants();
+    const interval = window.setInterval(() => {
+      void syncPendingGrants();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      for (const toastId of pendingToastIds.values()) {
+        toast.dismiss(toastId);
+      }
+      pendingToastIds.clear();
+    };
+  }, [handlePendingDeviceDecision, isConnected, isVSCodeRuntime]);
+
   React.useEffect(() => {
     if (!isDesktopRuntime || bootInjectionStatus !== 'not-injected') {
       return;
@@ -737,57 +840,148 @@ function App({ apis }: AppProps) {
     window.location.reload();
   }, []);
 
-  const handleManualInitRetry = React.useCallback(async () => {
-    if (manualInitRetrying) return;
-
-    setInitRetryExhausted(false);
-    setManualInitRetrying(true);
+  const handleRetryConnection = React.useCallback(async () => {
+    setIsRetryingConnection(true);
     try {
-      await useConfigStore.getState().initializeApp();
+      await initializeApp();
+      setConnectionCheckCompleted(true);
     } finally {
-      setManualInitRetrying(false);
+      setIsRetryingConnection(false);
+    }
+  }, [initializeApp]);
+
+  const sortedInstances = React.useMemo(() => {
+    return [...instances].sort((a, b) => (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0));
+  }, [instances]);
+
+  const alternativeInstances = React.useMemo(() => {
+    return sortedInstances.filter((instance) => instance.id !== currentInstanceId);
+  }, [currentInstanceId, sortedInstances]);
+
+  const handleSwitchInstance = React.useCallback((instanceId: string) => {
+    if (!instanceId || instanceId === currentInstanceId) {
+      return;
+    }
+    setCurrentInstance(instanceId);
+    touchInstance(instanceId);
+    window.location.reload();
+  }, [currentInstanceId, setCurrentInstance, touchInstance]);
+
+  const showConnectionRecoveryDialog = connectionCheckCompleted
+    && !isVSCodeRuntime
+    && !isConnected
+    && !isDeviceLoginOpen;
+
+  const isMobileShellRuntime = React.useMemo(() => isMobileRuntime(), []);
+
+  const requestBiometricUnlock = React.useCallback(async () => {
+    if (!isNativeMobileApp() || !biometricLockEnabled) {
+      setBiometricRequired(false);
+      return true;
     }
 
-    if (!useConfigStore.getState().isInitialized) {
-      setInitRetryEpoch((value) => value + 1);
-    }
-  }, [manualInitRetrying]);
+    setBiometricBusy(true);
+    try {
+      const status = await getBiometricStatus();
+      if (!status.isAvailable) {
+        setBiometricRequired(true);
+        return false;
+      }
 
-  // Map boot outcome kind to recovery variant
-  const mapBootViewToRecoveryVariant = (view: DesktopBootView): RecoveryVariant | undefined => {
-    if (view.screen === 'recovery') {
-      return view.variant;
+      const authenticated = await authenticateWithBiometrics('Unlock OpenChamber', {
+        allowDeviceCredential: true,
+        title: 'Unlock OpenChamber',
+        subtitle: 'Authenticate to continue',
+        confirmationRequired: false,
+      });
+      setBiometricRequired(!authenticated);
+      return authenticated;
+    } finally {
+      setBiometricBusy(false);
     }
-    return undefined;
-  };
+  }, [biometricLockEnabled]);
 
-  // Desktop boot view routing.
-  // When the boot outcome resolves to a non-main screen (chooser, recovery),
-  // render OnboardingScreen with appropriate mode/variant.
-  if (isDesktopRuntime && bootView && bootView.screen !== 'main') {
-    // First-launch chooser
-    if (bootView.screen === 'chooser') {
-      return (
-        <ErrorBoundary>
-          <div className="h-full text-foreground bg-transparent">
-            <React.Suspense fallback={<div className="h-full" />}>
-              <OnboardingScreen
-                mode="first-launch"
-                onCliAvailable={handleDesktopBootDismiss}
-                onChooseRemote={() => {
-                  // Switch to remote tab - handled internally by OnboardingScreen
-                }}
-              />
-            </React.Suspense>
+  React.useEffect(() => {
+    if (!isNativeMobileApp() || !biometricLockEnabled) {
+      setBiometricRequired(false);
+      return;
+    }
+    void requestBiometricUnlock();
+  }, [biometricLockEnabled, requestBiometricUnlock]);
+
+  const connectionRecoveryDialog = showConnectionRecoveryDialog ? (
+    <Dialog open={showConnectionRecoveryDialog} onOpenChange={() => {}}>
+      <DialogContent className="max-w-md" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>Connection required</DialogTitle>
+          <DialogDescription>
+            Unable to reach `{opencodeClient.getBaseUrl()}`. Retry, switch to another saved instance, or connect a new one.
+          </DialogDescription>
+        </DialogHeader>
+
+        {alternativeInstances.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {alternativeInstances.slice(0, 4).map((instance) => (
+              <Button
+                key={instance.id}
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => handleSwitchInstance(instance.id)}
+              >
+                {instance.label || instance.origin}
+              </Button>
+            ))}
           </div>
-        </ErrorBoundary>
-      );
-    }
+        ) : null}
 
-    // Recovery screens
-    const recoveryVariant = mapBootViewToRecoveryVariant(bootView);
-    const hostUrl = bootView.screen === 'recovery' && 'url' in bootView ? bootView.url : undefined;
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setDeviceLoginOpen(true);
+            }}
+          >
+            {isMobileShellRuntime ? 'Connect Another Instance' : 'Add Instance'}
+          </Button>
+          <Button type="button" onClick={() => void handleRetryConnection()} disabled={isRetryingConnection}>
+            {isRetryingConnection ? 'Retrying...' : 'Retry'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  ) : null;
 
+  const biometricLockDialog = biometricRequired ? (
+    <Dialog open={biometricRequired} onOpenChange={() => {}}>
+      <DialogContent className="max-w-md" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>Unlock OpenChamber</DialogTitle>
+          <DialogDescription>
+            Biometric verification is required to access this app.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setBiometricLockEnabled(false);
+              setBiometricRequired(false);
+            }}
+          >
+            Disable lock
+          </Button>
+          <Button type="button" onClick={() => void requestBiometricUnlock()} disabled={biometricBusy}>
+            {biometricBusy ? 'Checking...' : 'Unlock'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  ) : null;
+
+  if (showCliOnboarding) {
     return (
       <ErrorBoundary>
         <div className="h-full text-foreground bg-transparent">
@@ -808,15 +1002,28 @@ function App({ apis }: AppProps) {
   if (embeddedSessionChat) {
     return (
       <ErrorBoundary>
-        <SyncProvider sdk={opencodeClient.getSdkClient()} directory={currentDirectory || ''}>
-          <RuntimeAPIProvider apis={apis}>
-            <TooltipProvider delayDuration={300} skipDelayDuration={150}>
+        <RuntimeAPIProvider apis={apis}>
+          <TooltipProvider delayDuration={700} skipDelayDuration={150}>
+            <div className="h-full text-foreground bg-background">
+              <AgentManagerView />
+              <Toaster />
+              {connectionRecoveryDialog}
+            </div>
+          </TooltipProvider>
+        </RuntimeAPIProvider>
+      </ErrorBoundary>
+    );
+    }
+    
+    return (
+      <ErrorBoundary>
+        <RuntimeAPIProvider apis={apis}>
+          <FireworksProvider>
+            <TooltipProvider delayDuration={700} skipDelayDuration={150}>
               <div className="h-full text-foreground bg-background">
-                <EmbeddedSessionChatContent
-                  embeddedSessionChat={embeddedSessionChat}
-                  isVSCodeRuntime={isVSCodeRuntime}
-                  embeddedBackgroundWorkEnabled={embeddedBackgroundWorkEnabled}
-                />
+                <VSCodeLayout />
+                <Toaster />
+                {connectionRecoveryDialog}
               </div>
             </TooltipProvider>
           </RuntimeAPIProvider>
@@ -870,6 +1077,8 @@ function App({ apis }: AppProps) {
                       )}
                     </>
                   )}
+                  {connectionRecoveryDialog}
+                  {biometricLockDialog}
                 </div>
               </TooltipProvider>
             </VoiceProvider>

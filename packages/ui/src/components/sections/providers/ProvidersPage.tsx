@@ -15,6 +15,7 @@ import { toast } from '@/components/ui';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Icon } from "@/components/icon/Icon";
 import { reloadOpenCodeConfiguration } from '@/stores/useAgentsStore';
+import { openExternalUrl } from '@/lib/desktop';
 import { cn } from '@/lib/utils';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { openExternalUrl } from '@/lib/url';
@@ -409,7 +410,7 @@ export const ProvidersPage: React.FC = () => {
       }));
 
       if (urlCandidate) {
-        void openExternalUrl(urlCandidate);
+        await openExternalUrl(urlCandidate);
       }
       setPendingOAuth({ providerId, methodIndex });
       toast.message(t('settings.providers.page.toast.completeOAuthInBrowser'));
