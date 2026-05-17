@@ -5,6 +5,7 @@ import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useAgentsStore } from '@/stores/useAgentsStore';
 import { useCommandsStore } from '@/stores/useCommandsStore';
 import { useMcpConfigStore } from '@/stores/useMcpConfigStore';
+import { usePromptTemplatesStore } from '@/stores/usePromptTemplatesStore';
 import { useSkillsStore } from '@/stores/useSkillsStore';
 import { useSkillsCatalogStore } from '@/stores/useSkillsCatalogStore';
 import { useBackendsStore } from '@/stores/useBackendsStore';
@@ -56,6 +57,8 @@ import { UsageSidebar } from '@/components/sections/usage/UsageSidebar';
 import { UsagePage } from '@/components/sections/usage/UsagePage';
 import { MagicPromptsSidebar } from '@/components/sections/magic-prompts/MagicPromptsSidebar';
 import { MagicPromptsPage } from '@/components/sections/magic-prompts/MagicPromptsPage';
+import { PromptTemplatesSidebar } from '@/components/sections/prompt-templates/PromptTemplatesSidebar';
+import { PromptTemplatesPage } from '@/components/sections/prompt-templates/PromptTemplatesPage';
 import { GitPage } from '@/components/sections/git-identities/GitPage';
 import type { OpenChamberSection } from '@/components/sections/openchamber/types';
 import { OpenChamberPage } from '@/components/sections/openchamber/OpenChamberPage';
@@ -110,6 +113,7 @@ const pageOrder: SettingsPageSlug[] = [
   'shortcuts',
   'git',
   'magic-prompts',
+  'prompt-templates',
   'projects',
   'remote-instances',
   'agents',
@@ -182,6 +186,8 @@ export function getSettingsNavIcon(slug: SettingsPageSlug): IconName | null {
       return 'chat-ai-3';
     case 'magic-prompts':
       return 'ai-generate-2';
+    case 'prompt-templates':
+      return 'file-text';
     case 'notifications':
       return 'notification-3';
     case 'shortcuts':
@@ -447,7 +453,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
       void useSkillsStore.getState().loadSkills();
       void useSkillsCatalogStore.getState().loadCatalog();
     }
-  }, [activeProjectId, settingsSlug]);
+    if (settingsSlug === 'prompt-templates') {
+      void usePromptTemplatesStore.getState().loadTemplates();
+    }
+  }, [activeProjectId, isSettingsDialogOpen, runtimeCtx.isVSCode, settingsSlug]);
+
   const openPage = React.useCallback((slug: SettingsPageSlug) => {
     setSettingsPage(slug);
     autoNavSlugRef.current = slug;
@@ -513,6 +523,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return t('settings.page.sessions.title');
       case 'magic-prompts':
         return t('settings.page.magicPrompts.title');
+      case 'prompt-templates':
+        return t('settings.page.promptTemplates.title');
       case 'notifications':
         return t('settings.page.notifications.title');
       case 'voice':
@@ -558,6 +570,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <UsageSidebar onItemSelect={opts.onItemSelect} />;
       case 'magic-prompts':
         return <MagicPromptsSidebar onItemSelect={opts.onItemSelect} />;
+      case 'prompt-templates':
+        return <PromptTemplatesSidebar onItemSelect={opts.onItemSelect} />;
       default:
         return null;
     }
@@ -598,6 +612,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
         return <UsagePage />;
       case 'magic-prompts':
         return <MagicPromptsPage />;
+      case 'prompt-templates':
+        return <PromptTemplatesPage />;
       case 'git':
         return <GitPage />;
       case 'appearance':

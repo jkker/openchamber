@@ -65,10 +65,11 @@ export {
   deleteMcpConfig,
 } from './mcp.js';
 
-
 export {
-  isOhMyOpencodeInstalled,
-  readOhMyOpencodeConfig,
-  writeOhMyOpencodeCategories,
-  writeOhMyOpencodeAgents,
-} from './oh-my-opencode.js';
+  listPromptTemplates,
+  getPromptTemplate,
+  createPromptTemplate,
+  updatePromptTemplate,
+  deletePromptTemplate,
+  slugify as slugifyPromptTemplate,
+} from './prompt-templates.js';
