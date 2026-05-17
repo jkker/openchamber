@@ -113,11 +113,11 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
     if (typeof rootDirectory === 'string' && rootDirectory.length > 0) {
       const normalized = rootDirectory.replace(/\\/g, '/');
       const stripped = stripTrailingSlashes(normalized);
-      if (stripped && stripped !== '/') {
+      if (stripped) {
         return stripped as string;
       }
     }
-    if (normalizedHomeDirectory && normalizedHomeDirectory !== '/') {
+    if (normalizedHomeDirectory) {
       return normalizedHomeDirectory;
     }
     return null;
@@ -144,6 +144,10 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
       }
       if (!rootReady || !effectiveRoot) {
         return false;
+      }
+      // When root is '/', all absolute paths are valid
+      if (effectiveRoot === '/') {
+        return true;
       }
       const normalizedTargetRaw = targetPath.replace(/\\/g, '/');
       const normalizedTarget =
@@ -410,7 +414,7 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
       ? stripTrailingSlashes(normalizedPath) ?? normalizedPath
       : null;
 
-    if (normalizedTarget) {
+    if (normalizedTarget && normalizedHome !== '/') {
       const homePrefix = `${normalizedHome}/`;
       const withinHome = normalizedTarget === normalizedHome || normalizedTarget.startsWith(homePrefix);
       if (!withinHome) {
@@ -430,6 +434,10 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
           }
           const normalizedEntryRaw = entry.path.replace(/\\/g, '/');
           const normalizedEntryPath = stripTrailingSlashes(normalizedEntryRaw) ?? normalizedEntryRaw;
+          // When root is '/', show all directories
+          if (normalizedHome === '/') {
+            return true;
+          }
           const entryPrefix = normalizedEntryPath === normalizedHome ? normalizedHome : `${normalizedHome}/`;
           return normalizedEntryPath === normalizedHome || normalizedEntryPath.startsWith(entryPrefix);
         })
@@ -462,6 +470,10 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
             }
             const rawPath = String(item.absolute || item.path || item.name).replace(/\\/g, '/');
             const absolutePath = stripTrailingSlashes(rawPath) ?? rawPath;
+            // When root is '/', show all directories
+            if (normalizedHome === '/') {
+              return true;
+            }
             const entryPrefix = absolutePath === normalizedHome ? normalizedHome : `${normalizedHome}/`;
             return absolutePath === normalizedHome || absolutePath.startsWith(entryPrefix);
           })

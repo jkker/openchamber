@@ -519,43 +519,78 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
     </button>
   );
 
-  const inputSection = (
-    <div className="px-2.5 py-1.5">
-      {isCloneMode ? (
-        <div className="mb-1.5 flex items-center gap-1.5">
-          <Input
-            value={cloneRemoteUrl}
-            onChange={(event) => setCloneRemoteUrl(event.target.value)}
-            placeholder={t('directoryExplorerDialog.clone.remoteUrlPlaceholder')}
-            className="min-w-0 flex-1 border-border/60 bg-[var(--surface-elevated)] font-mono typography-ui-label shadow-none"
-            spellCheck={false}
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-          />
-          <IdentityDropdown
-            activeProfile={selectedGitIdentity}
-            identities={availableGitIdentities}
-            onSelect={(profile) => setSelectedGitIdentityId(profile.id)}
-            isApplying={isConfirming}
-            iconOnly
-          />
-        </div>
-      ) : null}
-      <div className="relative">
-        <Icon name="folder-add" className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/80" />
-        <Input
-          ref={inputRef}
-          value={query}
-          onChange={(event) => setQuery(normalizeSeparators(event.target.value))}
-          onKeyDown={handleKeyDown}
-          placeholder={t('directoryExplorerDialog.pathInput.placeholder')}
-          className="border-transparent bg-transparent pl-9 font-mono typography-ui-label shadow-none focus-visible:ring-0"
-          style={!isMobile && addButtonWidth > 0 ? { paddingRight: `${addButtonWidth + 24}px` } : undefined}
-          spellCheck={false}
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
+  const dialogHeader = (
+    <DialogHeader className="flex-shrink-0 px-4 pb-2 pt-[calc(var(--oc-safe-area-top,0px)+0.5rem)] sm:px-0 sm:pb-3 sm:pt-0">
+      <DialogTitle>Add project directory</DialogTitle>
+      <div className="hidden sm:flex sm:items-center sm:justify-between sm:gap-4">
+        <DialogDescription className="flex-1">
+          Choose a folder to add as a project.
+        </DialogDescription>
+        {showHiddenToggle}
+      </div>
+    </DialogHeader>
+  );
+
+  const pathInputSection = (
+    <div className="relative">
+      <Input
+        value={pathInputValue}
+        onChange={handlePathInputChange}
+        onKeyDown={handlePathInputKeyDown}
+        placeholder="Enter path or select from tree..."
+        className="font-mono typography-meta"
+        spellCheck={false}
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+      />
+      <DirectoryAutocomplete
+        ref={autocompleteRef}
+        inputValue={pathInputValue}
+        homeDirectory={homeDirectory}
+        onSelectSuggestion={handleAutocompleteSuggestion}
+        visible={autocompleteVisible}
+        onClose={handleAutocompleteClose}
+        showHidden={showHidden}
+      />
+    </div>
+  );
+
+  const treeSection = (
+    <div className="flex-1 min-h-0 rounded-xl border border-border/40 bg-sidebar/70 overflow-hidden flex flex-col">
+        <DirectoryTree
+        variant="inline"
+        currentPath={pendingPath ?? currentDirectory}
+        onSelectPath={handleSelectPath}
+        onDoubleClickPath={handleDoubleClickPath}
+        className="flex-1 min-h-0 sm:min-h-[280px] sm:max-h-[380px]"
+        selectionBehavior="deferred"
+        showHidden={showHidden}
+        rootDirectory="/"
+        isRootReady={true}
+      />
+    </div>
+  );
+
+  // Mobile: use flex layout where tree takes remaining space
+  const mobileContent = (
+    <div className="flex flex-col gap-3 h-full">
+      <div className="flex-shrink-0">{pathInputSection}</div>
+      <div className="flex-shrink-0 flex items-center justify-end">
+        {showHiddenToggle}
+      </div>
+      <div className="flex-1 min-h-0 rounded-xl border border-border/40 bg-sidebar/70 overflow-hidden flex flex-col">
+        <DirectoryTree
+          variant="inline"
+          currentPath={pendingPath ?? currentDirectory}
+          onSelectPath={handleSelectPath}
+          onDoubleClickPath={handleDoubleClickPath}
+          className="flex-1 min-h-0"
+          selectionBehavior="deferred"
+          showHidden={showHidden}
+          rootDirectory={isHomeReady ? homeDirectory : null}
+          isRootReady={isHomeReady}
+          alwaysShowActions
         />
         {!isMobile ? (
           <Button
