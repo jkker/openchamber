@@ -659,7 +659,7 @@ export const MultiRunLauncher: React.FC<MultiRunLauncherProps> = ({
               onClick={addGroup}
               className="flex items-center gap-1.5 py-2 px-3 -mx-3 rounded-lg typography-meta font-medium text-muted-foreground hover:text-foreground hover:bg-[var(--interactive-hover)]/50 transition-colors"
             >
-              <RiAddLine className="h-3.5 w-3.5" />
+              <Icon name="add" className="h-3.5 w-3.5" />
               {t('multirun.launcher.groups.addGroup')}
             </button>
 
@@ -756,7 +756,7 @@ const RunGroupCard: React.FC<RunGroupCardProps> = ({
             className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
             aria-label={t('multirun.launcher.groups.removeGroup')}
           >
-            <RiCloseLine className="h-3.5 w-3.5" />
+            <Icon name="close" className="h-3.5 w-3.5" />
           </button>
         )}
       </div>
