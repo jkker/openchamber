@@ -6,6 +6,9 @@ import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import http from 'http';
 import net from 'net';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
+import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'url';
 import os from 'os';
 import crypto from 'crypto';
@@ -192,6 +195,34 @@ const PLAN_MODE_EXPERIMENT_ENABLED =
   || isEnvFlagEnabled(process.env.OPENCODE_EXPERIMENTAL);
 
 const fsPromises = fs.promises;
+const FILE_SEARCH_MAX_CONCURRENCY = 5;
+const FILE_SEARCH_EXCLUDED_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'dist',
+  'build',
+  '.next',
+  '.turbo',
+  '.cache',
+  'coverage',
+  'tmp',
+  'logs'
+]);
+const OPENCHAMBER_FS_UPLOAD_MAX_BYTES = (() => {
+  const raw = Number(process.env.OPENCHAMBER_FS_UPLOAD_MAX_BYTES);
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.trunc(raw);
+  }
+  return 512 * 1024 * 1024;
+})();
+const FS_UPLOAD_TOO_LARGE_ERROR_CODE = 'OPENCHAMBER_UPLOAD_TOO_LARGE';
+const FS_UPLOAD_TOO_LARGE_ERROR_MESSAGE = 'Upload payload is too large for current server limits';
+
+const createFsUploadTooLargeError = () => {
+  const error = new Error(FS_UPLOAD_TOO_LARGE_ERROR_MESSAGE);
+  error.code = FS_UPLOAD_TOO_LARGE_ERROR_CODE;
+  return error;
+};
 
 const settingsNormalizationRuntime = createSettingsNormalizationRuntime({
   os,
@@ -231,32 +262,1118 @@ const OPENCHAMBER_PROJECTS_CONFIG_DIR = path.join(OPENCHAMBER_USER_CONFIG_ROOT, 
 const MAX_THEME_JSON_BYTES = 512 * 1024;
 
 
-const themeRuntime = createThemeRuntime({
-  fsPromises,
-  path,
-  themesDir: OPENCHAMBER_USER_THEMES_DIR,
-  maxThemeJsonBytes: MAX_THEME_JSON_BYTES,
-  logger: console,
-});
+const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value));
 
-const readCustomThemesFromDisk = (...args) => themeRuntime.readCustomThemesFromDisk(...args);
+const normalizeTunnelBootstrapTtlMs = (value) => {
+  if (value === null) {
+    return null;
+  }
+  if (!Number.isFinite(value)) {
+    return TUNNEL_BOOTSTRAP_TTL_DEFAULT_MS;
+  }
+  return clampNumber(Math.round(value), TUNNEL_BOOTSTRAP_TTL_MIN_MS, TUNNEL_BOOTSTRAP_TTL_MAX_MS);
+};
 
-let notificationTemplateRuntime = null;
+const normalizeTunnelSessionTtlMs = (value) => {
+  if (!Number.isFinite(value)) {
+    return TUNNEL_SESSION_TTL_DEFAULT_MS;
+  }
+  return clampNumber(Math.round(value), TUNNEL_SESSION_TTL_MIN_MS, TUNNEL_SESSION_TTL_MAX_MS);
+};
 
-const createTimeoutSignal = (...args) => notificationTemplateRuntime.createTimeoutSignal(...args);
-const formatProjectLabel = (...args) => notificationTemplateRuntime.formatProjectLabel(...args);
-const resolveNotificationTemplate = (...args) => notificationTemplateRuntime.resolveNotificationTemplate(...args);
-const shouldApplyResolvedTemplateMessage = (...args) => notificationTemplateRuntime.shouldApplyResolvedTemplateMessage(...args);
-const fetchFreeZenModels = (...args) => notificationTemplateRuntime.fetchFreeZenModels(...args);
-const resolveZenModel = (...args) => notificationTemplateRuntime.resolveZenModel(...args);
-const validateZenModelAtStartup = (...args) => notificationTemplateRuntime.validateZenModelAtStartup(...args);
-const summarizeText = (...args) => notificationTemplateRuntime.summarizeText(...args);
-const extractTextFromParts = (...args) => notificationTemplateRuntime.extractTextFromParts(...args);
-const extractLastMessageText = (...args) => notificationTemplateRuntime.extractLastMessageText(...args);
-const fetchLastAssistantMessageText = (...args) => notificationTemplateRuntime.fetchLastAssistantMessageText(...args);
-const maybeCacheSessionInfoFromEvent = (...args) => notificationTemplateRuntime.maybeCacheSessionInfoFromEvent(...args);
-const buildTemplateVariables = (...args) => notificationTemplateRuntime.buildTemplateVariables(...args);
-const getCachedZenModels = (...args) => notificationTemplateRuntime.getCachedZenModels(...args);
+const normalizeManagedRemoteTunnelHostname = (value) => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const parsed = (() => {
+    try {
+      if (trimmed.includes('://')) {
+        return new URL(trimmed);
+      }
+      return new URL(`https://${trimmed}`);
+    } catch {
+      return null;
+    }
+  })();
+
+  const hostname = parsed?.hostname?.trim().toLowerCase() || '';
+  if (!hostname) {
+    return undefined;
+  }
+  return hostname;
+};
+
+const normalizeManagedRemoteTunnelPresets = (value) => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const result = [];
+  const seenIds = new Set();
+  const seenHostnames = new Set();
+
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const candidate = entry;
+    const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
+    const name = typeof candidate.name === 'string' ? candidate.name.trim() : '';
+    const hostname = normalizeManagedRemoteTunnelHostname(candidate.hostname);
+    if (!id || !name || !hostname) continue;
+    if (seenIds.has(id) || seenHostnames.has(hostname)) continue;
+    seenIds.add(id);
+    seenHostnames.add(hostname);
+    result.push({ id, name, hostname });
+  }
+
+  return result;
+};
+
+const normalizeManagedRemoteTunnelPresetTokens = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const result = {};
+  for (const [rawId, rawToken] of Object.entries(value)) {
+    const id = typeof rawId === 'string' ? rawId.trim() : '';
+    const token = typeof rawToken === 'string' ? rawToken.trim() : '';
+    if (!id || !token) {
+      continue;
+    }
+    result[id] = token;
+  }
+
+  return Object.keys(result).length > 0 ? result : undefined;
+};
+
+const isValidThemeColor = (value) => isNonEmptyString(value);
+
+const normalizeThemeJson = (raw) => {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
+  const metadata = raw.metadata && typeof raw.metadata === 'object' ? raw.metadata : null;
+  const colors = raw.colors && typeof raw.colors === 'object' ? raw.colors : null;
+  if (!metadata || !colors) {
+    return null;
+  }
+
+  const id = metadata.id;
+  const name = metadata.name;
+  const variant = metadata.variant;
+  if (!isNonEmptyString(id) || !isNonEmptyString(name) || (variant !== 'light' && variant !== 'dark')) {
+    return null;
+  }
+
+  const primary = colors.primary;
+  const surface = colors.surface;
+  const interactive = colors.interactive;
+  const status = colors.status;
+  const syntax = colors.syntax;
+  const syntaxBase = syntax && typeof syntax === 'object' ? syntax.base : null;
+  const syntaxHighlights = syntax && typeof syntax === 'object' ? syntax.highlights : null;
+
+  if (!primary || !surface || !interactive || !status || !syntaxBase || !syntaxHighlights) {
+    return null;
+  }
+
+  // Minimal fields required by CSSVariableGenerator and diff/syntax rendering.
+  const required = [
+    primary.base,
+    primary.foreground,
+    surface.background,
+    surface.foreground,
+    surface.muted,
+    surface.mutedForeground,
+    surface.elevated,
+    surface.elevatedForeground,
+    surface.subtle,
+    interactive.border,
+    interactive.selection,
+    interactive.selectionForeground,
+    interactive.focusRing,
+    interactive.hover,
+    status.error,
+    status.errorForeground,
+    status.errorBackground,
+    status.errorBorder,
+    status.warning,
+    status.warningForeground,
+    status.warningBackground,
+    status.warningBorder,
+    status.success,
+    status.successForeground,
+    status.successBackground,
+    status.successBorder,
+    status.info,
+    status.infoForeground,
+    status.infoBackground,
+    status.infoBorder,
+    syntaxBase.background,
+    syntaxBase.foreground,
+    syntaxBase.keyword,
+    syntaxBase.string,
+    syntaxBase.number,
+    syntaxBase.function,
+    syntaxBase.variable,
+    syntaxBase.type,
+    syntaxBase.comment,
+    syntaxBase.operator,
+    syntaxHighlights.diffAdded,
+    syntaxHighlights.diffRemoved,
+    syntaxHighlights.lineNumber,
+  ];
+
+  if (!required.every(isValidThemeColor)) {
+    return null;
+  }
+
+  const tags = Array.isArray(metadata.tags)
+    ? metadata.tags.filter((tag) => typeof tag === 'string' && tag.trim().length > 0)
+    : [];
+
+  return {
+    ...raw,
+    metadata: {
+      ...metadata,
+      id: id.trim(),
+      name: name.trim(),
+      description: typeof metadata.description === 'string' ? metadata.description : '',
+      version: typeof metadata.version === 'string' && metadata.version.trim().length > 0 ? metadata.version : '1.0.0',
+      variant,
+      tags,
+    },
+  };
+};
+
+const readCustomThemesFromDisk = async () => {
+  try {
+    const entries = await fsPromises.readdir(OPENCHAMBER_USER_THEMES_DIR, { withFileTypes: true });
+    const themes = [];
+    const seen = new Set();
+
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.toLowerCase().endsWith('.json')) continue;
+
+      const filePath = path.join(OPENCHAMBER_USER_THEMES_DIR, entry.name);
+      try {
+        const stat = await fsPromises.stat(filePath);
+        if (!stat.isFile()) continue;
+        if (stat.size > MAX_THEME_JSON_BYTES) {
+          console.warn(`[themes] Skip ${entry.name}: too large (${stat.size} bytes)`);
+          continue;
+        }
+
+        const rawText = await fsPromises.readFile(filePath, 'utf8');
+        const parsed = JSON.parse(rawText);
+        const normalized = normalizeThemeJson(parsed);
+        if (!normalized) {
+          console.warn(`[themes] Skip ${entry.name}: invalid theme JSON`);
+          continue;
+        }
+
+        const id = normalized.metadata.id;
+        if (seen.has(id)) {
+          console.warn(`[themes] Skip ${entry.name}: duplicate theme id "${id}"`);
+          continue;
+        }
+
+        seen.add(id);
+        themes.push(normalized);
+      } catch (error) {
+        console.warn(`[themes] Failed to read ${entry.name}:`, error);
+      }
+    }
+
+    return themes;
+  } catch (error) {
+    // Missing dir is fine.
+    if (error && typeof error === 'object' && error.code === 'ENOENT') {
+      return [];
+    }
+    console.warn('[themes] Failed to list custom themes dir:', error);
+    return [];
+  }
+};
+
+const isPathWithinRoot = (resolvedPath, rootPath) => {
+  const resolvedRoot = path.resolve(rootPath || os.homedir());
+  const relative = path.relative(resolvedRoot, resolvedPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return false;
+  }
+  return true;
+};
+
+const resolveWorkspacePath = (targetPath, baseDirectory) => {
+  const normalized = normalizeDirectoryPath(targetPath);
+  if (!normalized || typeof normalized !== 'string') {
+    return { ok: false, error: 'Path is required' };
+  }
+
+  const resolved = path.resolve(normalized);
+  const resolvedBase = path.resolve(baseDirectory || os.homedir());
+
+  if (isPathWithinRoot(resolved, resolvedBase)) {
+    return { ok: true, base: resolvedBase, resolved };
+  }
+
+  // Allow writing OpenChamber per-project config under ~/.config/openchamber.
+  // LEGACY_PROJECT_CONFIG: migration target root; allowed outside workspace.
+  if (isPathWithinRoot(resolved, OPENCHAMBER_USER_CONFIG_ROOT)) {
+    return { ok: true, base: path.resolve(OPENCHAMBER_USER_CONFIG_ROOT), resolved };
+  }
+
+  return { ok: false, error: 'Path is outside of active workspace' };
+};
+
+const resolveWorkspacePathFromWorktrees = async (targetPath, baseDirectory) => {
+  const normalized = normalizeDirectoryPath(targetPath);
+  if (!normalized || typeof normalized !== 'string') {
+    return { ok: false, error: 'Path is required' };
+  }
+
+  const resolved = path.resolve(normalized);
+  const resolvedBase = path.resolve(baseDirectory || os.homedir());
+
+  try {
+    const { getWorktrees } = await import('./lib/git/index.js');
+    const worktrees = await getWorktrees(resolvedBase);
+
+    for (const worktree of worktrees) {
+      const candidatePath = typeof worktree?.path === 'string'
+        ? worktree.path
+        : (typeof worktree?.worktree === 'string' ? worktree.worktree : '');
+      const candidate = normalizeDirectoryPath(candidatePath);
+      if (!candidate) {
+        continue;
+      }
+      const candidateResolved = path.resolve(candidate);
+      if (isPathWithinRoot(resolved, candidateResolved)) {
+        return { ok: true, base: candidateResolved, resolved };
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to resolve worktree roots:', error);
+  }
+
+  return { ok: false, error: 'Path is outside of active workspace' };
+};
+
+const resolveWorkspacePathFromContext = async (req, targetPath) => {
+  const resolvedProject = await resolveProjectDirectory(req);
+  if (!resolvedProject.directory) {
+    return { ok: false, error: resolvedProject.error || 'Active workspace is required' };
+  }
+
+  const resolved = resolveWorkspacePath(targetPath, resolvedProject.directory);
+  if (resolved.ok || resolved.error !== 'Path is outside of active workspace') {
+    return resolved;
+  }
+
+  return resolveWorkspacePathFromWorktrees(targetPath, resolvedProject.directory);
+};
+
+const resolveCanonicalPath = async (targetPath) => {
+  return fsPromises.realpath(targetPath).catch(() => path.resolve(targetPath));
+};
+
+const findNearestExistingPath = async (targetPath) => {
+  let current = path.resolve(targetPath);
+
+  while (true) {
+    try {
+      await fsPromises.lstat(current);
+      return current;
+    } catch (error) {
+      if (!error || typeof error !== 'object' || error.code !== 'ENOENT') {
+        throw error;
+      }
+
+      const parent = path.dirname(current);
+      if (parent === current) {
+        return current;
+      }
+      current = parent;
+    }
+  }
+};
+
+const resolveWritableTargetPath = async (targetPath, basePath) => {
+  const resolvedTargetPath = path.resolve(targetPath);
+  const canonicalBase = await resolveCanonicalPath(basePath);
+
+  let targetExists = false;
+  try {
+    await fsPromises.lstat(resolvedTargetPath);
+    targetExists = true;
+  } catch (error) {
+    if (!error || typeof error !== 'object' || error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  const validationStartPath = targetExists
+    ? resolvedTargetPath
+    : path.dirname(resolvedTargetPath);
+  const nearestExistingPath = await findNearestExistingPath(validationStartPath);
+  const canonicalNearestExistingPath = await resolveCanonicalPath(nearestExistingPath);
+
+  if (!isPathWithinRoot(canonicalNearestExistingPath, canonicalBase)) {
+    return { ok: false };
+  }
+
+  const targetDirectory = path.dirname(resolvedTargetPath);
+  await fsPromises.mkdir(targetDirectory, { recursive: true });
+
+  const canonicalTargetDirectory = await resolveCanonicalPath(targetDirectory);
+  if (!isPathWithinRoot(canonicalTargetDirectory, canonicalBase)) {
+    return { ok: false };
+  }
+
+  if (targetExists) {
+    const canonicalTargetPath = await resolveCanonicalPath(resolvedTargetPath);
+    if (!isPathWithinRoot(canonicalTargetPath, canonicalBase)) {
+      return { ok: false };
+    }
+
+    return { ok: true, path: canonicalTargetPath };
+  }
+
+  return { ok: true, path: path.join(canonicalTargetDirectory, path.basename(resolvedTargetPath)) };
+};
+
+
+const normalizeRelativeSearchPath = (rootPath, targetPath) => {
+  const relative = path.relative(rootPath, targetPath) || path.basename(targetPath);
+  return relative.split(path.sep).join('/') || targetPath;
+};
+
+const shouldSkipSearchDirectory = (name, includeHidden) => {
+  if (!name) {
+    return false;
+  }
+  if (!includeHidden && name.startsWith('.')) {
+    return true;
+  }
+  return FILE_SEARCH_EXCLUDED_DIRS.has(name.toLowerCase());
+};
+
+const listDirectoryEntries = async (dirPath) => {
+  try {
+    return await fsPromises.readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Fuzzy match scoring function.
+ * Returns a score > 0 if the query fuzzy-matches the candidate, null otherwise.
+ * Higher scores indicate better matches.
+ */
+const fuzzyMatchScoreNormalized = (normalizedQuery, candidate) => {
+  if (!normalizedQuery) return 0;
+
+  const q = normalizedQuery;
+  const c = candidate.toLowerCase();
+
+  // Fast path: exact substring match gets high score
+  if (c.includes(q)) {
+    const idx = c.indexOf(q);
+    // Bonus for match at start or after word boundary
+    let bonus = 0;
+    if (idx === 0) {
+      bonus = 20;
+    } else {
+      const prev = c[idx - 1];
+      if (prev === '/' || prev === '_' || prev === '-' || prev === '.' || prev === ' ') {
+        bonus = 15;
+      }
+    }
+    return 100 + bonus - Math.min(idx, 20) - Math.floor(c.length / 5);
+  }
+
+  // Fuzzy match: all query chars must appear in order
+  let score = 0;
+  let lastIndex = -1;
+  let consecutive = 0;
+
+  for (let i = 0; i < q.length; i++) {
+    const ch = q[i];
+    if (!ch || ch === ' ') continue;
+
+    const idx = c.indexOf(ch, lastIndex + 1);
+    if (idx === -1) {
+      return null; // No match
+    }
+
+    const gap = idx - lastIndex - 1;
+    if (gap === 0) {
+      consecutive++;
+    } else {
+      consecutive = 0;
+    }
+
+    score += 10;
+    score += Math.max(0, 18 - idx); // Prefer matches near start
+    score -= Math.min(gap, 10); // Penalize gaps
+
+    // Bonus for word boundary matches
+    if (idx === 0) {
+      score += 12;
+    } else {
+      const prev = c[idx - 1];
+      if (prev === '/' || prev === '_' || prev === '-' || prev === '.' || prev === ' ') {
+        score += 10;
+      }
+    }
+
+    score += consecutive > 0 ? 12 : 0; // Bonus for consecutive matches
+    lastIndex = idx;
+  }
+
+  // Prefer shorter paths
+  score += Math.max(0, 24 - Math.floor(c.length / 3));
+
+  return score;
+};
+
+const searchFilesystemFiles = async (rootPath, options) => {
+  const { limit, query, includeHidden, respectGitignore } = options;
+  const includeHiddenEntries = Boolean(includeHidden);
+  const normalizedQuery = query.trim().toLowerCase();
+  const matchAll = normalizedQuery.length === 0;
+  const queue = [rootPath];
+  const visited = new Set([rootPath]);
+  const shouldRespectGitignore = respectGitignore !== false;
+  // Collect more candidates for fuzzy matching, then sort and trim
+  const collectLimit = matchAll ? limit : Math.max(limit * 3, 200);
+  const candidates = [];
+
+  while (queue.length > 0 && candidates.length < collectLimit) {
+    const batch = queue.splice(0, FILE_SEARCH_MAX_CONCURRENCY);
+
+    const dirResults = await Promise.all(
+      batch.map(async (dir) => {
+        if (!shouldRespectGitignore) {
+          return { dir, dirents: await listDirectoryEntries(dir), ignoredPaths: new Set() };
+        }
+
+        try {
+          const dirents = await listDirectoryEntries(dir);
+          const pathsToCheck = dirents.map((dirent) => dirent.name).filter(Boolean);
+          if (pathsToCheck.length === 0) {
+            return { dir, dirents, ignoredPaths: new Set() };
+          }
+
+          const result = await new Promise((resolve) => {
+            const child = spawn(resolveGitBinaryForSpawn(), ['check-ignore', '--', ...pathsToCheck], {
+              cwd: dir,
+              windowsHide: true,
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
+
+            let stdout = '';
+            child.stdout.on('data', (data) => { stdout += data.toString(); });
+            child.on('close', () => resolve(stdout));
+            child.on('error', () => resolve(''));
+          });
+
+          const ignoredNames = new Set(
+            String(result)
+              .split('\n')
+              .map((name) => name.trim())
+              .filter(Boolean)
+          );
+
+          return { dir, dirents, ignoredPaths: ignoredNames };
+        } catch {
+          return { dir, dirents: await listDirectoryEntries(dir), ignoredPaths: new Set() };
+        }
+      })
+    );
+
+    for (const { dir: currentDir, dirents, ignoredPaths } of dirResults) {
+      for (const dirent of dirents) {
+        const entryName = dirent.name;
+        if (!entryName || (!includeHiddenEntries && entryName.startsWith('.'))) {
+          continue;
+        }
+
+        if (shouldRespectGitignore && ignoredPaths.has(entryName)) {
+          continue;
+        }
+
+        const entryPath = path.join(currentDir, entryName);
+
+        if (dirent.isDirectory()) {
+          if (shouldSkipSearchDirectory(entryName, includeHiddenEntries)) {
+            continue;
+          }
+          if (!visited.has(entryPath)) {
+            visited.add(entryPath);
+            queue.push(entryPath);
+          }
+          continue;
+        }
+
+        if (!dirent.isFile()) {
+          continue;
+        }
+
+        const relativePath = normalizeRelativeSearchPath(rootPath, entryPath);
+        const extension = entryName.includes('.') ? entryName.split('.').pop()?.toLowerCase() : undefined;
+
+        if (matchAll) {
+          candidates.push({
+            name: entryName,
+            path: entryPath,
+            relativePath,
+            extension,
+            score: 0
+          });
+        } else {
+          // Try fuzzy match against relative path (includes filename)
+          const score = fuzzyMatchScoreNormalized(normalizedQuery, relativePath);
+          if (score !== null) {
+            candidates.push({
+              name: entryName,
+              path: entryPath,
+              relativePath,
+              extension,
+              score
+            });
+          }
+        }
+
+        if (candidates.length >= collectLimit) {
+          queue.length = 0;
+          break;
+        }
+      }
+
+      if (candidates.length >= collectLimit) {
+        break;
+      }
+    }
+  }
+
+  // Sort by score descending, then by path length, then alphabetically
+  if (!matchAll) {
+    candidates.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (a.relativePath.length !== b.relativePath.length) {
+        return a.relativePath.length - b.relativePath.length;
+      }
+      return a.relativePath.localeCompare(b.relativePath);
+    });
+  }
+
+  // Return top results without the score field
+  return candidates.slice(0, limit).map(({ name, path: filePath, relativePath, extension }) => ({
+    name,
+    path: filePath,
+    relativePath,
+    extension
+  }));
+};
+
+const createTimeoutSignal = (timeoutMs) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup: () => clearTimeout(timer),
+  };
+};
+
+/** Humanize a project label: replace dashes/underscores with spaces, title-case each word. Mirrors the UI's formatProjectLabel. */
+const formatProjectLabel = (label) => {
+  if (!label || typeof label !== 'string') return '';
+  return label
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+};
+
+const resolveNotificationTemplate = (template, variables) => {
+  if (!template || typeof template !== 'string') return '';
+  return template.replace(/\{(\w+)\}/g, (_match, key) => {
+    const value = variables[key];
+    if (value === undefined || value === null) return '';
+    return String(value);
+  });
+};
+
+const shouldApplyResolvedTemplateMessage = (template, resolved, variables) => {
+  if (!resolved) {
+    return false;
+  }
+
+  if (typeof template !== 'string') {
+    return true;
+  }
+
+  if (template.includes('{last_message}')) {
+    return typeof variables?.last_message === 'string' && variables.last_message.trim().length > 0;
+  }
+
+  return true;
+};
+
+const ZEN_DEFAULT_MODEL = 'gpt-5-nano';
+
+/**
+ * Validated fallback zen model determined at startup by checking available free
+ * models from the zen API. When `null`, startup validation hasn't run yet (or
+ * failed), so `resolveZenModel` falls back to `ZEN_DEFAULT_MODEL`.
+ */
+let validatedZenFallback = null;
+
+/** Cached free zen models response and timestamp (shared by startup + endpoint). */
+let cachedZenModels = null;
+let cachedZenModelsTimestamp = 0;
+const ZEN_MODELS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Fetch free models from the zen API with caching. Returns an array of
+ * `{ id, owned_by }` objects (may be empty on failure). Results are cached
+ * for `ZEN_MODELS_CACHE_TTL` ms.
+ */
+const fetchFreeZenModels = async () => {
+  const now = Date.now();
+  if (cachedZenModels && now - cachedZenModelsTimestamp < ZEN_MODELS_CACHE_TTL) {
+    return cachedZenModels.models;
+  }
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 8000) : null;
+  try {
+    const response = await fetch('https://opencode.ai/zen/v1/models', {
+      signal: controller?.signal,
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) {
+      throw new Error(`zen/v1/models responded with status ${response.status}`);
+    }
+    const data = await response.json();
+    const allModels = Array.isArray(data?.data) ? data.data : [];
+    const freeModels = allModels
+      .filter((m) => typeof m?.id === 'string' && m.id.endsWith('-free'))
+      .map((m) => ({ id: m.id, owned_by: m.owned_by }));
+
+    cachedZenModels = { models: freeModels };
+    cachedZenModelsTimestamp = Date.now();
+    return freeModels;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+};
+
+/**
+ * Resolve the zen model to use. Checks the provided override first,
+ * then falls back to the stored zenModel setting, then to the validated
+ * startup fallback, then to the hardcoded default.
+ */
+const resolveZenModel = async (override) => {
+  if (typeof override === 'string' && override.trim().length > 0) {
+    return override.trim();
+  }
+  try {
+    const settings = await readSettingsFromDisk();
+    if (typeof settings?.zenModel === 'string' && settings.zenModel.trim().length > 0) {
+      return settings.zenModel.trim();
+    }
+  } catch {
+    // ignore
+  }
+  return validatedZenFallback || ZEN_DEFAULT_MODEL;
+};
+
+const validateZenModelAtStartup = async () => {
+  try {
+    const freeModels = await fetchFreeZenModels();
+    const freeModelIds = freeModels.map((m) => m.id);
+
+    if (freeModelIds.length > 0) {
+      validatedZenFallback = freeModelIds[0];
+
+      const settings = await readSettingsFromDisk();
+      const storedModel = typeof settings?.zenModel === 'string' ? settings.zenModel.trim() : '';
+
+      if (!storedModel || !freeModelIds.includes(storedModel)) {
+        const fallback = freeModelIds[0];
+        console.log(
+          storedModel
+            ? `[zen] Stored model "${storedModel}" not found in free models, falling back to "${fallback}"`
+            : `[zen] No model configured, setting default to "${fallback}"`
+        );
+        await persistSettings({ zenModel: fallback });
+      } else {
+        console.log(`[zen] Stored model "${storedModel}" verified as available`);
+      }
+    } else {
+      console.warn('[zen] No free models returned from API, skipping validation');
+    }
+  } catch (error) {
+    console.warn('[zen] Startup model validation failed (non-blocking):', error?.message || error);
+  }
+};
+
+
+const summarizeText = async (text, targetLength, zenModel) => {
+  if (!text || typeof text !== 'string' || text.trim().length === 0) return text;
+
+  try {
+    const prompt = `Summarize the following text in approximately ${targetLength} characters. Be concise and capture the key point. Output ONLY the summary text, nothing else.\n\nText:\n${text}`;
+
+    const completionTimeout = createTimeoutSignal(15000);
+    let response;
+    try {
+      response = await fetch('https://opencode.ai/zen/v1/responses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: zenModel || ZEN_DEFAULT_MODEL,
+          input: [{ role: 'user', content: prompt }],
+          max_output_tokens: 1000,
+          stream: false,
+          reasoning: { effort: 'low' },
+        }),
+        signal: completionTimeout.signal,
+      });
+    } finally {
+      completionTimeout.cleanup();
+    }
+
+    if (!response.ok) return text;
+
+    const data = await response.json();
+    const summary = data?.output?.find((item) => item?.type === 'message')
+      ?.content?.find((item) => item?.type === 'output_text')?.text?.trim();
+
+    return summary || text;
+  } catch {
+    return text;
+  }
+};
+
+const NOTIFICATION_BODY_MAX_CHARS = 1000;
+
+/**
+ * Extract text from parts array (used when parts are available inline or fetched from API).
+ */
+const extractTextFromParts = (parts, maxLength = NOTIFICATION_BODY_MAX_CHARS) => {
+  if (!Array.isArray(parts) || parts.length === 0) return '';
+
+  const textParts = parts
+    .filter((p) => p && (p.type === 'text' || typeof p.text === 'string' || typeof p.content === 'string'))
+    .map((p) => p.text || p.content || '')
+    .filter(Boolean);
+
+  let text = textParts.length > 0 ? textParts.join('\n').trim() : '';
+
+  // Truncate to prevent oversized notification payloads
+  if (maxLength > 0 && text.length > maxLength) {
+    text = text.slice(0, maxLength);
+  }
+
+  return text;
+};
+
+/**
+ * Try to extract message text from the payload itself (fast path).
+ * Note: message.updated events from the OpenCode SSE stream typically do NOT include
+ * parts inline — parts are sent via separate message.part.updated events. This function
+ * is a fast path for the rare case where parts are included.
+ */
+const extractLastMessageText = (payload, maxLength = NOTIFICATION_BODY_MAX_CHARS) => {
+  const info = payload?.properties?.info;
+  if (!info) return '';
+
+  // Try inline parts on info or on properties
+  const parts = info.parts || payload?.properties?.parts;
+  const text = extractTextFromParts(parts, maxLength);
+  if (text) return text;
+
+  // Fallback: try content array (legacy)
+  const content = info.content;
+  if (Array.isArray(content)) {
+    const textContent = content
+      .filter((c) => c && (c.type === 'text' || typeof c.text === 'string'))
+      .map((c) => c.text || '')
+      .filter(Boolean);
+    if (textContent.length > 0) {
+      let result = textContent.join('\n').trim();
+      if (maxLength > 0 && result.length > maxLength) {
+        result = result.slice(0, maxLength);
+      }
+      return result;
+    }
+  }
+
+  return '';
+};
+
+/**
+ * Fetch the last assistant message text from the OpenCode API.
+ * This is needed because message.updated events don't include parts;
+ * we must fetch them separately via the session messages endpoint.
+ */
+const fetchLastAssistantMessageText = async (sessionId, messageId, maxLength = NOTIFICATION_BODY_MAX_CHARS) => {
+  if (!sessionId) return '';
+
+  try {
+    // Fetch last few messages to find the one that triggered the notification
+    const url = buildOpenCodeUrl(`/session/${encodeURIComponent(sessionId)}/message`, '');
+    const response = await fetch(`${url}?limit=5`, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        ...getOpenCodeAuthHeaders(),
+      },
+      signal: AbortSignal.timeout(3000),
+    });
+
+    if (!response.ok) return '';
+
+    const messages = await response.json().catch(() => null);
+    if (!Array.isArray(messages)) return '';
+
+    // Find the specific message by ID, or fall back to the last assistant message
+    let target = null;
+    if (messageId) {
+      target = messages.find((m) => m?.info?.id === messageId && m?.info?.role === 'assistant');
+    }
+    if (!target) {
+      // Find the last assistant message with finish === 'stop'
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m?.info?.role === 'assistant' && m?.info?.finish === 'stop') {
+          target = m;
+          break;
+        }
+      }
+    }
+
+    if (!target || !Array.isArray(target.parts)) return '';
+
+    return extractTextFromParts(target.parts, maxLength);
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * In-memory cache of session titles populated from SSE session.updated / session.created events.
+ * This is the preferred source for session titles since it is populated passively and doesn't
+ * require a separate API call.
+ */
+const sessionTitleCache = new Map();
+
+const cacheSessionTitle = (sessionId, title) => {
+  if (typeof sessionId === 'string' && sessionId.length > 0 &&
+      typeof title === 'string' && title.length > 0) {
+    sessionTitleCache.set(sessionId, title);
+  }
+};
+
+const getCachedSessionTitle = (sessionId) => {
+  return sessionTitleCache.get(sessionId) ?? null;
+};
+
+/**
+ * Extract and cache session title from session.updated / session.created SSE events.
+ * Called by the global event watcher to passively maintain the title cache.
+ */
+const maybeCacheSessionInfoFromEvent = (payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  const type = payload.type;
+  if (type !== 'session.updated' && type !== 'session.created') return;
+  const info = payload.properties?.info;
+  if (!info || typeof info !== 'object') return;
+  const sessionId = info.id;
+  const title = info.title;
+  cacheSessionTitle(sessionId, title);
+  // Also cache parentID from session events to ensure subtask detection works correctly
+  const parentID = info.parentID;
+  if (sessionId && parentID !== undefined) {
+    setCachedSessionParentId(sessionId, parentID);
+  }
+};
+
+/**
+ * Fetch session metadata (title, directory) from the OpenCode API.
+ * Cached for 60s per session to avoid repeated API calls.
+ */
+const sessionInfoCache = new Map();
+const SESSION_INFO_CACHE_TTL_MS = 60 * 1000;
+
+const fetchSessionInfo = async (sessionId) => {
+  if (!sessionId) return null;
+
+  const cached = sessionInfoCache.get(sessionId);
+  if (cached && Date.now() - cached.at < SESSION_INFO_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  try {
+    const url = buildOpenCodeUrl(`/session/${encodeURIComponent(sessionId)}`, '');
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!response.ok) {
+      console.warn(`[Notification] fetchSessionInfo: ${response.status} for session ${sessionId}`);
+      return null;
+    }
+    const data = await response.json().catch(() => null);
+    if (data && typeof data === 'object') {
+      sessionInfoCache.set(sessionId, { data, at: Date.now() });
+      return data;
+    }
+    return null;
+  } catch (err) {
+    console.warn(`[Notification] fetchSessionInfo failed for ${sessionId}:`, err?.message || err);
+    return null;
+  }
+};
+
+const buildTemplateVariables = async (payload, sessionId) => {
+  const info = payload?.properties?.info || {};
+
+  // Session title — try inline payload, then SSE cache, then API fetch
+  let sessionTitle = payload?.properties?.sessionTitle ||
+    payload?.properties?.session?.title ||
+    (typeof info.sessionTitle === 'string' ? info.sessionTitle : '') ||
+    '';
+
+  // Try the SSE-populated session title cache (filled from session.updated / session.created events)
+  if (!sessionTitle && sessionId) {
+    const cached = getCachedSessionTitle(sessionId);
+    if (cached) {
+      sessionTitle = cached;
+    }
+  }
+
+  // Last resort: fetch session info from the API
+  let sessionInfo = null;
+  if (!sessionTitle && sessionId) {
+    sessionInfo = await fetchSessionInfo(sessionId);
+    if (sessionInfo && typeof sessionInfo.title === 'string') {
+      sessionTitle = sessionInfo.title;
+      // Populate the SSE cache so future notifications don't need an API call
+      cacheSessionTitle(sessionId, sessionTitle);
+    }
+  }
+
+  // Agent name from mode or agent field (v2 has both mode and agent)
+  const agentName = (() => {
+    const mode = typeof info.agent === 'string' && info.agent.trim().length > 0
+      ? info.agent.trim()
+      : (typeof info.mode === 'string' ? info.mode.trim() : '');
+    if (!mode) return 'Agent';
+    return mode.split(/[-_\s]+/).filter(Boolean)
+      .map((t) => t.charAt(0).toUpperCase() + t.slice(1)).join(' ');
+  })();
+
+  // Model name — v2 has modelID directly on info, v1 user messages nest it under info.model.modelID
+  const modelName = (() => {
+    const raw = typeof info.modelID === 'string' ? info.modelID.trim()
+      : (typeof info.model?.modelID === 'string' ? info.model.modelID.trim() : '');
+    if (!raw) return 'Assistant';
+    return raw.split(/[-_]+/).filter(Boolean)
+      .map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
+  })();
+
+  // Project name, branch, worktree — derived from multiple sources with fallbacks
+  let projectName = '';
+  let branch = '';
+  let worktreeDir = '';
+
+  // 1. Primary source: the message payload's path (always accurate for the session)
+  const infoPath = info.path;
+  if (typeof infoPath?.root === 'string' && infoPath.root.length > 0) {
+    worktreeDir = infoPath.root;
+  } else if (typeof infoPath?.cwd === 'string' && infoPath.cwd.length > 0) {
+    worktreeDir = infoPath.cwd;
+  }
+
+  // 2. Look up the user-facing project label from stored settings
+  try {
+    const settings = await readSettingsFromDisk();
+    const projects = Array.isArray(settings.projects) ? settings.projects : [];
+
+    if (worktreeDir) {
+      // Match the session directory against stored projects to find the label
+      const normalizedDir = worktreeDir.replace(/\/+$/, '');
+      const matchedProject = projects.find((p) => {
+        if (!p || typeof p.path !== 'string') return false;
+        return p.path.replace(/\/+$/, '') === normalizedDir;
+      });
+      if (matchedProject && typeof matchedProject.label === 'string' && matchedProject.label.trim().length > 0) {
+        projectName = matchedProject.label.trim();
+      } else {
+        // No label stored — derive from directory name
+        projectName = normalizedDir.split('/').filter(Boolean).pop() || '';
+      }
+    } else {
+      // No directory from payload — fall back to active project
+      const activeId = typeof settings.activeProjectId === 'string' ? settings.activeProjectId : '';
+      const activeProject = activeId ? projects.find((p) => p && p.id === activeId) : projects[0];
+      if (activeProject) {
+        projectName = typeof activeProject.label === 'string' && activeProject.label.trim().length > 0
+          ? activeProject.label.trim()
+          : typeof activeProject.path === 'string'
+            ? activeProject.path.split('/').pop() || ''
+            : '';
+        worktreeDir = typeof activeProject.path === 'string' ? activeProject.path : '';
+      }
+    }
+  } catch {
+    // Settings read failed — derive from directory if available
+    if (worktreeDir && !projectName) {
+      projectName = worktreeDir.split('/').filter(Boolean).pop() || '';
+    }
+  }
+
+  // 3. Get branch from git
+  if (worktreeDir) {
+    try {
+      const { simpleGit } = await import('simple-git');
+      const git = simpleGit({
+        baseDir: worktreeDir,
+        spawnOptions: { windowsHide: true },
+        binary: resolveGitBinaryForSpawn(),
+      });
+      branch = await Promise.race([
+        git.revparse(['--abbrev-ref', 'HEAD']),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('git timeout')), 3000)),
+      ]).catch(() => '');
+    } catch {
+      // ignore — git may not be available
+    }
+  }
+
+  return {
+    project_name: formatProjectLabel(projectName),
+    worktree: worktreeDir,
+    branch: typeof branch === 'string' ? branch.trim() : '',
+    session_name: sessionTitle,
+    agent_name: agentName,
+    model_name: modelName,
+    last_message: '', // Populated by caller
+    session_id: sessionId || '',
+  };
+};
 
 const OPENCHAMBER_DATA_DIR = process.env.OPENCHAMBER_DATA_DIR
   ? path.resolve(process.env.OPENCHAMBER_DATA_DIR)
@@ -5693,6 +6810,11 @@ async function main(options = {}) {
   });
 
   app.use((req, res, next) => {
+    const isRawFileUploadRoute = req.path === '/api/fs/upload' && (req.method === 'PUT' || req.method === 'POST');
+    if (isRawFileUploadRoute) {
+      return next();
+    }
+
     if (
       req.path.startsWith('/api/config/agents') ||
       req.path.startsWith('/api/config/commands') ||
@@ -5725,6 +6847,16 @@ async function main(options = {}) {
     }
   });
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  app.use((error, req, res, next) => {
+    if (error && typeof error === 'object' && (error.type === 'entity.too.large' || error.status === 413)) {
+      return res.status(413).json({
+        error: 'Request payload is too large for the current upload route. Use streaming upload or reduce file size.',
+      });
+    }
+
+    return next(error);
+  });
 
   app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
@@ -11519,41 +12651,49 @@ async function main(options = {}) {
     }
   });
 
-  // ── Agent Loop: routes ───────────────────────────────────────────────
+  // Read file or directory metadata
+  app.get('/api/fs/stat', async (req, res) => {
+    const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+    if (!filePath) {
+      return res.status(400).json({ error: 'Path is required' });
+    }
 
-  // Always create the service — it doesn't connect at construction time;
-  // actual OpenCode API calls happen lazily when methods are invoked.
-  agentLoopService = new AgentLoopService({
-    buildOpenCodeUrl,
-    getOpenCodeAuthHeaders,
-    extractSessionStatusUpdate,
-    fsPromises,
-    resolveWorkspacePath,
-    isPathWithinRoot,
-    path,
-  });
-
-  // Register agent loop REST API routes.
-  // Pass a getter so routes always see the current service instance
-  // (survives HMR reloads and late initialization).
-  registerAgentLoopRoutes(app, () => agentLoopService, {
-    fsPromises,
-    resolveWorkspacePathFromContext,
-    isPathWithinRoot,
-    path,
-    validateWorkpackageFile: (data) => {
-      if (!data || typeof data !== 'object') return false;
-      if (typeof data.name !== 'string' || data.name.trim().length === 0) return false;
-      if (!Array.isArray(data.workpackages)) return false;
-      if (data.workpackages.length === 0) return false;
-      for (const wp of data.workpackages) {
-        if (!wp || typeof wp !== 'object') return false;
-        if (typeof wp.id !== 'string' || wp.id.trim().length === 0) return false;
-        if (typeof wp.title !== 'string' || wp.title.trim().length === 0) return false;
-        if (typeof wp.description !== 'string' || wp.description.trim().length === 0) return false;
+    try {
+      const resolved = await resolveWorkspacePathFromContext(req, filePath);
+      if (!resolved.ok) {
+        return res.status(400).json({ error: resolved.error });
       }
-      return true;
-    },
+
+      const [canonicalPath, canonicalBase] = await Promise.all([
+        fsPromises.realpath(resolved.resolved),
+        fsPromises.realpath(resolved.base).catch(() => path.resolve(resolved.base)),
+      ]);
+
+      if (!isPathWithinRoot(canonicalPath, canonicalBase)) {
+        return res.status(403).json({ error: 'Access to path denied' });
+      }
+
+      const stats = await fsPromises.stat(canonicalPath);
+      const modifiedTime = Number.isFinite(stats.mtimeMs) ? stats.mtimeMs : undefined;
+
+      res.json({
+        path: canonicalPath,
+        isDirectory: stats.isDirectory(),
+        isFile: stats.isFile(),
+        size: stats.isFile() ? stats.size : undefined,
+        modifiedTime,
+      });
+    } catch (error) {
+      const err = error;
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'Path not found' });
+      }
+      if (err && typeof err === 'object' && err.code === 'EACCES') {
+        return res.status(403).json({ error: 'Access to path denied' });
+      }
+      console.error('Failed to stat path:', error);
+      res.status(500).json({ error: (error && error.message) || 'Failed to stat path' });
+    }
   });
 
   // Read file contents
@@ -11627,6 +12767,7 @@ async function main(options = {}) {
 
       const ext = path.extname(canonicalPath).toLowerCase();
       const mimeMap = {
+        // Images
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
         '.jpeg': 'image/jpeg',
@@ -11636,12 +12777,95 @@ async function main(options = {}) {
         '.ico': 'image/x-icon',
         '.bmp': 'image/bmp',
         '.avif': 'image/avif',
+        // PDF
+        '.pdf': 'application/pdf',
+        // Audio
+        '.mp3': 'audio/mpeg',
+        '.wav': 'audio/wav',
+        '.ogg': 'audio/ogg',
+        '.m4a': 'audio/mp4',
+        '.aac': 'audio/aac',
+        '.flac': 'audio/flac',
+        '.opus': 'audio/opus',
+        // Video
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm',
+        '.ogv': 'video/ogg',
+        '.mov': 'video/quicktime',
+        '.avi': 'video/x-msvideo',
+        '.mkv': 'video/x-matroska',
+        '.m4v': 'video/x-m4v',
       };
       const mimeType = mimeMap[ext] || 'application/octet-stream';
+      const totalBytes = stats.size;
+      const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
 
-      const content = await fsPromises.readFile(canonicalPath);
       res.setHeader('Cache-Control', 'no-store');
-      res.type(mimeType).send(content);
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.type(mimeType);
+
+      if (rangeHeader) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+        if (!match) {
+          res.status(416);
+          res.setHeader('Content-Range', `bytes */${totalBytes}`);
+          return res.end();
+        }
+
+        const parsedStart = match[1] ? Number.parseInt(match[1], 10) : Number.NaN;
+        const parsedEnd = match[2] ? Number.parseInt(match[2], 10) : Number.NaN;
+
+        let start = parsedStart;
+        let end = parsedEnd;
+
+        if (Number.isNaN(start)) {
+          if (Number.isNaN(end) || end <= 0) {
+            res.status(416);
+            res.setHeader('Content-Range', `bytes */${totalBytes}`);
+            return res.end();
+          }
+
+          start = Math.max(totalBytes - end, 0);
+          end = totalBytes - 1;
+        } else {
+          if (Number.isNaN(end) || end >= totalBytes) {
+            end = totalBytes - 1;
+          }
+        }
+
+        if (start < 0 || start >= totalBytes || end < start) {
+          res.status(416);
+          res.setHeader('Content-Range', `bytes */${totalBytes}`);
+          return res.end();
+        }
+
+        const chunkLength = end - start + 1;
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${totalBytes}`);
+        res.setHeader('Content-Length', String(chunkLength));
+
+        const rangeStream = fs.createReadStream(canonicalPath, { start, end });
+        rangeStream.on('error', (streamError) => {
+          if (!res.headersSent) {
+            res.status(500).json({ error: streamError?.message || 'Failed to stream file' });
+          } else {
+            res.destroy(streamError);
+          }
+        });
+        rangeStream.pipe(res);
+        return;
+      }
+
+      res.setHeader('Content-Length', String(totalBytes));
+      const fullStream = fs.createReadStream(canonicalPath);
+      fullStream.on('error', (streamError) => {
+        if (!res.headersSent) {
+          res.status(500).json({ error: streamError?.message || 'Failed to stream file' });
+        } else {
+          res.destroy(streamError);
+        }
+      });
+      fullStream.pipe(res);
     } catch (error) {
       const err = error;
       if (err && typeof err === 'object' && err.code === 'ENOENT') {
@@ -11655,14 +12879,144 @@ async function main(options = {}) {
     }
   });
 
+  app.put('/api/fs/upload', async (req, res) => {
+    const filePath = typeof req.query.path === 'string' ? req.query.path.trim() : '';
+    if (!filePath) {
+      return res.status(400).json({ error: 'Path is required' });
+    }
+
+    const expectedSizeHeader = Array.isArray(req.headers['x-openchamber-expected-size'])
+      ? req.headers['x-openchamber-expected-size'][0]
+      : req.headers['x-openchamber-expected-size'];
+    const parsedExpectedSize = typeof expectedSizeHeader === 'string'
+      ? Number.parseInt(expectedSizeHeader, 10)
+      : Number.NaN;
+    const expectedSizeBytes = Number.isFinite(parsedExpectedSize) && parsedExpectedSize >= 0
+      ? parsedExpectedSize
+      : undefined;
+
+    if (typeof expectedSizeHeader === 'string' && expectedSizeBytes === undefined) {
+      return res.status(400).json({ error: 'Invalid expected upload size' });
+    }
+
+    const contentLengthHeader = Array.isArray(req.headers['content-length'])
+      ? req.headers['content-length'][0]
+      : req.headers['content-length'];
+    const parsedContentLength = typeof contentLengthHeader === 'string'
+      ? Number.parseInt(contentLengthHeader, 10)
+      : Number.NaN;
+    const contentLengthBytes = Number.isFinite(parsedContentLength) && parsedContentLength >= 0
+      ? parsedContentLength
+      : undefined;
+
+    if (contentLengthBytes !== undefined && contentLengthBytes > OPENCHAMBER_FS_UPLOAD_MAX_BYTES) {
+      return res.status(413).json({ error: FS_UPLOAD_TOO_LARGE_ERROR_MESSAGE });
+    }
+
+    if (typeof expectedSizeBytes === 'number' && expectedSizeBytes > OPENCHAMBER_FS_UPLOAD_MAX_BYTES) {
+      return res.status(413).json({ error: FS_UPLOAD_TOO_LARGE_ERROR_MESSAGE });
+    }
+
+    let tempFilePath = '';
+
+    try {
+      const resolved = await resolveWorkspacePathFromContext(req, filePath);
+      if (!resolved.ok) {
+        return res.status(400).json({ error: resolved.error });
+      }
+
+      const writableTarget = await resolveWritableTargetPath(resolved.resolved, resolved.base);
+      if (!writableTarget.ok) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      const targetWritePath = writableTarget.path;
+      tempFilePath = `${targetWritePath}.upload-${Date.now()}-${crypto.randomUUID()}.tmp`;
+
+      let receivedBytes = 0;
+      const uploadLimitStream = new Transform({
+        transform(chunk, _encoding, callback) {
+          if (chunk && typeof chunk.length === 'number') {
+            receivedBytes += chunk.length;
+          }
+
+          if (receivedBytes > OPENCHAMBER_FS_UPLOAD_MAX_BYTES) {
+            callback(createFsUploadTooLargeError());
+            return;
+          }
+
+          callback(null, chunk);
+        }
+      });
+
+      const writeStream = fs.createWriteStream(tempFilePath, { flags: 'w' });
+      await pipeline(req, uploadLimitStream, writeStream);
+
+      if (typeof expectedSizeBytes === 'number' && receivedBytes !== expectedSizeBytes) {
+        await fsPromises.rm(tempFilePath, { force: true });
+        tempFilePath = '';
+        return res.status(400).json({
+          error: `Uploaded size mismatch: expected ${expectedSizeBytes} bytes but received ${receivedBytes} bytes`,
+        });
+      }
+
+      await fsPromises.rename(tempFilePath, targetWritePath);
+      tempFilePath = '';
+
+      const stats = await fsPromises.stat(targetWritePath);
+      const sizeBytes = stats.size;
+
+      if (typeof expectedSizeBytes === 'number' && sizeBytes !== expectedSizeBytes) {
+        await fsPromises.rm(targetWritePath, { force: true });
+        return res.status(400).json({
+          error: `Uploaded size mismatch: expected ${expectedSizeBytes} bytes but wrote ${sizeBytes} bytes`,
+        });
+      }
+
+      return res.json({ success: true, path: resolved.resolved, sizeBytes });
+    } catch (error) {
+      if (tempFilePath) {
+        await fsPromises.rm(tempFilePath, { force: true }).catch(() => undefined);
+      }
+
+      const err = error;
+      if (err && typeof err === 'object' && err.code === FS_UPLOAD_TOO_LARGE_ERROR_CODE) {
+        return res.status(413).json({ error: FS_UPLOAD_TOO_LARGE_ERROR_MESSAGE });
+      }
+      if (err && typeof err === 'object' && err.code === 'EACCES') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        return res.status(404).json({ error: 'Upload target path not found' });
+      }
+      if (err && typeof err === 'object' && (err.code === 'ERR_STREAM_PREMATURE_CLOSE' || err.code === 'ECONNRESET')) {
+        return res.status(400).json({ error: 'Upload interrupted before completion' });
+      }
+
+      console.error('Failed to upload file:', error);
+      return res.status(500).json({ error: (error && error.message) || 'Failed to upload file' });
+    }
+  });
+
   // Write file contents
   app.post('/api/fs/write', async (req, res) => {
-    const { path: filePath, content } = req.body || {};
+    const { path: filePath, content, encoding, expectedSizeBytes } = req.body || {};
     if (!filePath || typeof filePath !== 'string') {
       return res.status(400).json({ error: 'Path is required' });
     }
     if (typeof content !== 'string') {
       return res.status(400).json({ error: 'Content is required' });
+    }
+
+    const normalizedExpectedSize = Number.isFinite(expectedSizeBytes)
+      ? Math.max(0, Math.trunc(Number(expectedSizeBytes)))
+      : undefined;
+
+    if (expectedSizeBytes !== undefined && normalizedExpectedSize === undefined) {
+      return res.status(400).json({ error: 'expectedSizeBytes must be a non-negative number' });
+    }
+    if (encoding !== undefined && encoding !== 'utf8' && encoding !== 'base64') {
+      return res.status(400).json({ error: 'encoding must be utf8 or base64' });
     }
 
     try {
@@ -11671,10 +13025,56 @@ async function main(options = {}) {
         return res.status(400).json({ error: resolved.error });
       }
 
-      // Ensure parent directory exists
-      await fsPromises.mkdir(path.dirname(resolved.resolved), { recursive: true });
-      await fsPromises.writeFile(resolved.resolved, content, 'utf8');
-      res.json({ success: true, path: resolved.resolved });
+      const writableTarget = await resolveWritableTargetPath(resolved.resolved, resolved.base);
+      if (!writableTarget.ok) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      const targetWritePath = writableTarget.path;
+
+      let actualContent = content;
+      const hasBase64DataUrlPrefix = /^data:[^;]*;base64,/.test(content);
+      const isBase64 = encoding === 'base64' || (encoding === undefined && hasBase64DataUrlPrefix);
+
+      if (isBase64 && hasBase64DataUrlPrefix) {
+        const commaIndex = content.indexOf(',');
+        actualContent = content.substring(commaIndex + 1);
+      }
+
+      let bytesWritten = 0;
+      if (isBase64) {
+        const buffer = Buffer.from(actualContent, 'base64');
+        bytesWritten = buffer.byteLength;
+
+        if (typeof normalizedExpectedSize === 'number' && bytesWritten !== normalizedExpectedSize) {
+          return res.status(400).json({
+            error: `Uploaded size mismatch: expected ${normalizedExpectedSize} bytes but received ${bytesWritten} bytes`,
+          });
+        }
+
+        await fsPromises.writeFile(targetWritePath, buffer);
+      } else {
+        const buffer = Buffer.from(actualContent, 'utf8');
+        bytesWritten = buffer.byteLength;
+
+        if (typeof normalizedExpectedSize === 'number' && bytesWritten !== normalizedExpectedSize) {
+          return res.status(400).json({
+            error: `Uploaded size mismatch: expected ${normalizedExpectedSize} bytes but received ${bytesWritten} bytes`,
+          });
+        }
+
+        await fsPromises.writeFile(targetWritePath, buffer);
+      }
+
+      const stats = await fsPromises.stat(targetWritePath);
+      const sizeBytes = stats.size;
+
+      if (typeof normalizedExpectedSize === 'number' && sizeBytes !== normalizedExpectedSize) {
+        return res.status(400).json({
+          error: `Uploaded size mismatch: expected ${normalizedExpectedSize} bytes but wrote ${sizeBytes} bytes`,
+        });
+      }
+
+      res.json({ success: true, path: resolved.resolved, sizeBytes });
     } catch (error) {
       const err = error;
       if (err && typeof err === 'object' && err.code === 'EACCES') {
@@ -12069,12 +13469,40 @@ async function main(options = {}) {
     }
   });
 
+  // Helper for limiting concurrency of async operations
+  const mapWithConcurrency = async (items, concurrency, mapper) => {
+    if (items.length === 0) {
+      return [];
+    }
+
+    const workerCount = Math.max(1, Math.min(concurrency, items.length));
+    const results = new Array(items.length);
+    let nextIndex = 0;
+
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+
+        if (currentIndex >= items.length) {
+          return;
+        }
+
+        results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+      }
+    });
+
+    await Promise.all(workers);
+    return results;
+  };
+
   app.get('/api/fs/list', async (req, res) => {
     const rawPath = typeof req.query.path === 'string' && req.query.path.trim().length > 0
       ? req.query.path.trim()
       : os.homedir();
     const respectGitignore = req.query.respectGitignore === 'true';
     let resolvedPath = '';
+    const DIRECTORY_STAT_CONCURRENCY_LIMIT = 32;
 
     const isPlansDirectory = (value) => {
       if (!value || typeof value !== 'string') return false;
@@ -12128,8 +13556,10 @@ async function main(options = {}) {
         }
       }
 
-      const entries = await Promise.all(
-        dirents.map(async (dirent) => {
+      const entries = await mapWithConcurrency(
+        dirents,
+        DIRECTORY_STAT_CONCURRENCY_LIMIT,
+        async (dirent) => {
           const entryPath = path.join(resolvedPath, dirent.name);
 
           // Skip gitignored entries
@@ -12138,14 +13568,29 @@ async function main(options = {}) {
           }
 
           let isDirectory = dirent.isDirectory();
+          let isFile = dirent.isFile();
           const isSymbolicLink = dirent.isSymbolicLink();
+          let size;
+          let modifiedTime;
 
-          if (!isDirectory && isSymbolicLink) {
-            try {
-              const linkStats = await fsPromises.stat(entryPath);
-              isDirectory = linkStats.isDirectory();
-            } catch {
+          try {
+            const entryStats = await fsPromises.lstat(entryPath);
+            if (isSymbolicLink) {
               isDirectory = false;
+              isFile = false;
+            } else {
+              isDirectory = entryStats.isDirectory();
+              isFile = entryStats.isFile();
+            }
+
+            if (isFile) {
+              size = entryStats.size;
+            }
+            modifiedTime = Number.isFinite(entryStats.mtimeMs) ? entryStats.mtimeMs : undefined;
+          } catch {
+            if (isSymbolicLink) {
+              isDirectory = false;
+              isFile = false;
             }
           }
 
@@ -12153,10 +13598,12 @@ async function main(options = {}) {
             name: dirent.name,
             path: entryPath,
             isDirectory,
-            isFile: dirent.isFile(),
-            isSymbolicLink
+            isFile,
+            isSymbolicLink,
+            size,
+            modifiedTime,
           };
-        })
+        }
       );
 
       res.json({
