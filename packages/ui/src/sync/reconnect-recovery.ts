@@ -1,12 +1,11 @@
-import type { SessionStatus } from "@opencode-ai/sdk/v2/client"
-import type { HarnessMessage, HarnessPart, HarnessSession } from "@openchamber/harness-contracts"
-import { getSessionMaterializationStatus } from "./materialization"
+import type { SessionStatus, Message, Part } from "@opencode-ai/sdk/v2/client"
+import type { Session } from "@opencode-ai/sdk/v2"
 
 type ReconnectMaterializationState = {
   session: HarnessSession[]
   session_status?: Record<string, SessionStatus>
-  message?: Record<string, HarnessMessage[]>
-  part?: Record<string, HarnessPart[]>
+  message?: Record<string, Message[]>
+  part?: Record<string, Part[]>
 }
 
 export type ViewedSessionMaterializationTarget = {
@@ -28,13 +27,16 @@ export function getReconnectCandidateSessionIds(state: ReconnectMaterializationS
 
   for (const [sessionId, messages] of Object.entries(state.message ?? {})) {
     const lastMessage = messages[messages.length - 1]
+    const lastAssistantComplete = lastMessage
+      && lastMessage.role === "assistant"
+      && typeof (lastMessage as { time?: { completed?: number } }).time?.completed === "number"
     if (
       lastMessage
       && lastMessage.role === "assistant"
       && typeof (lastMessage as { time?: { completed?: number } }).time?.completed !== "number"
     ) {
       ids.add(sessionId)
-    } else if (!getSessionMaterializationStatus({ message: state.message ?? {}, part: state.part ?? {} }, sessionId).renderable) {
+    } else if (lastAssistantComplete && state.part && (state.part[lastMessage.id]?.length ?? 0) === 0) {
       ids.add(sessionId)
     }
   }
