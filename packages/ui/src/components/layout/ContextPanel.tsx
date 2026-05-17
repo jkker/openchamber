@@ -1,11 +1,10 @@
 import React from 'react';
+import { RiArrowLeftRightLine, RiChat4Line, RiCloseLine, RiDonutChartFill, RiFileTextLine, RiFullscreenExitLine, RiFullscreenLine, RiLayoutGridLine } from '@remixicon/react';
 
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
 import { Button } from '@/components/ui/button';
 import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
-import { DiffView } from '@/components/views/DiffView';
-import { FilesView } from '@/components/views/FilesView';
-import { PlanView } from '@/components/views/PlanView';
+import { DiffView, FilesView, KanbanView, PlanView } from '@/components/views';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { openExternalUrl } from '@/lib/url';
 import { copyTextToClipboard } from '@/lib/clipboard';
@@ -232,17 +231,13 @@ const getRelativePathLabel = (filePath: string | null, directory: string): strin
   return normalizedFile;
 };
 
-const getModeLabel = (
-  mode: ContextPanelMode,
-  t: TranslateFn
-): string => {
-  if (mode === 'chat') return t('contextPanel.mode.chat');
-  if (mode === 'file') return t('contextPanel.mode.files');
-  if (mode === 'diff') return t('contextPanel.mode.diff');
-  if (mode === 'plan') return t('contextPanel.mode.plan');
-  if (mode === 'preview') return t('contextPanel.mode.preview');
-  if (mode === 'browser') return t('contextPanel.mode.browser');
-  return t('contextPanel.mode.context');
+const getModeLabel = (mode: 'diff' | 'file' | 'context' | 'plan' | 'chat' | 'board'): string => {
+  if (mode === 'chat') return 'Chat';
+  if (mode === 'file') return 'Files';
+  if (mode === 'diff') return 'Diff';
+  if (mode === 'plan') return 'Plan';
+  if (mode === 'board') return 'Board';
+  return 'Context';
 };
 
 const getFileNameFromPath = (path: string | null): string | null => {
@@ -263,10 +258,7 @@ const getFileNameFromPath = (path: string | null): string | null => {
   return segments[segments.length - 1] || null;
 };
 
-const getTabLabel = (
-  tab: { mode: ContextPanelMode; label: string | null; targetPath: string | null },
-  t: TranslateFn
-): string => {
+const getTabLabel = (tab: { mode: 'diff' | 'file' | 'context' | 'plan' | 'chat' | 'board'; label: string | null; targetPath: string | null }): string => {
   if (tab.label) {
     return tab.label;
   }
@@ -291,7 +283,7 @@ const getTabLabel = (
   return getModeLabel(tab.mode, t);
 };
 
-const getTabIcon = (tab: { mode: ContextPanelMode; targetPath: string | null }): React.ReactNode | undefined => {
+const getTabIcon = (tab: { mode: 'diff' | 'file' | 'context' | 'plan' | 'chat' | 'board'; targetPath: string | null }): React.ReactNode | undefined => {
   if (tab.mode === 'file') {
     return tab.targetPath
       ? <FileTypeIcon filePath={tab.targetPath} className="h-3.5 w-3.5" />
@@ -320,6 +312,10 @@ const getTabIcon = (tab: { mode: ContextPanelMode; targetPath: string | null }):
 
   if (tab.mode === 'browser') {
     return <Icon name="global" className="h-3.5 w-3.5" />;
+  }
+
+  if (tab.mode === 'board') {
+    return <RiLayoutGridLine className="h-3.5 w-3.5" />;
   }
 
   return undefined;
@@ -1801,16 +1797,10 @@ export const ContextPanel: React.FC = () => {
     : activeTab?.mode === 'context'
         ? <ContextPanelContent />
         : activeTab?.mode === 'plan'
-            ? <PlanView targetPath={activeTab.targetPath} />
-            : activeTab?.mode === 'preview'
-                ? <PreviewPane rawUrl={activeTab.targetPath ?? ''} onNavigate={(url) => openContextPreview(effectiveDirectory, url)} />
-                : (
-                  <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-                    <Icon name="global" className="h-12 w-12 text-muted-foreground/50" />
-                    <div className="typography-ui-header text-foreground">{t('contextPanel.preview.title')}</div>
-                    <div className="max-w-sm typography-micro text-muted-foreground">{t('contextPanel.preview.description')}</div>
-                  </div>
-                );
+          ? <PlanView />
+          : activeTab?.mode === 'board'
+            ? <KanbanView />
+            : null;
 
   const chatTabs = React.useMemo(
     () => tabs.filter((tab) => tab.mode === 'chat'),

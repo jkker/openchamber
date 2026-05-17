@@ -22,13 +22,7 @@ import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useGitAllBranches, useGitStore } from '@/stores/useGitStore';
 import { useFileSearchStore } from '@/stores/useFileSearchStore';
 import { useDeviceInfo } from '@/lib/device';
-import { useDebouncedValue } from '@/hooks/useDebouncedValue';
-import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
-import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
-import { getContextFileOpenFailureMessage, validateContextFileOpen } from '@/lib/contextFileOpenGuard';
-import { toast } from '@/components/ui';
-import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
-import type { Session } from '@opencode-ai/sdk/v2';
+import { RiAddLine, RiChatAi3Line, RiCheckLine, RiCodeLine, RiComputerLine, RiGitBranchLine, RiLayoutGridLine, RiLayoutLeftLine, RiLayoutRightLine, RiMoonLine, RiQuestionLine, RiSettings3Line, RiSunLine, RiTerminalBoxLine, RiTimeLine } from '@remixicon/react';
 import { createWorktreeSession } from '@/lib/worktreeSessionCreator';
 import { formatShortcutForDisplay, getEffectiveShortcutCombo } from '@/lib/shortcuts';
 import { canUseElectronDesktopIPC, invokeDesktop, isDesktopShell, isVSCodeRuntime, isWebRuntime } from '@/lib/desktop';
@@ -310,11 +304,19 @@ export const CommandPalette: React.FC = () => {
     [worktreeMetadata, allBranches],
   );
 
-  // ---------------------------------------------------------------------------
-  // File search
-  // ---------------------------------------------------------------------------
-  const [fileResults, setFileResults] = React.useState<FileHit[]>([]);
-  const [isSearchingFiles, setIsSearchingFiles] = React.useState(false);
+  const handleOpenRightSidebarBoard = () => {
+    if (isMobile) {
+      return;
+    }
+    setRightSidebarOpen(true);
+    setRightSidebarTab('board');
+    handleClose();
+  };
+
+  const handleToggleTerminalDock = () => {
+    toggleBottomTerminal();
+    handleClose();
+  };
 
   React.useEffect(() => {
     if (!isCommandPaletteOpen) {
@@ -455,88 +457,93 @@ export const CommandPalette: React.FC = () => {
           <CommandList>
             <CommandEmpty>{t('commandPalette.empty.noResults')}</CommandEmpty>
 
-            {groupOrder.map((groupKey) => {
-              if (groupKey === 'commands' && visibleCommands.length > 0) {
-                return (
-                  <CommandGroup key="commands">
-                    {visibleCommands.map((cmd) => (
-                      <CommandItem key={cmd.id} value={cmd.id} onSelect={cmd.onSelect}>
-                        {cmd.icon}
-                        <span>{cmd.title}</span>
-                        {cmd.shortcutId ? (
-                          <CommandShortcut>{shortcut(cmd.shortcutId)}</CommandShortcut>
-                        ) : null}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                );
-              }
-              if (groupKey === 'settings' && visibleSettings.length > 0) {
-                return (
-                  <CommandGroup key="settings">
-                    {visibleSettings.map((cmd) => (
-                      <CommandItem key={cmd.id} value={cmd.id} onSelect={cmd.onSelect}>
-                        {cmd.icon}
-                        <span>{cmd.title}</span>
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                );
-              }
-              if (groupKey === 'sessions' && visibleSessions.length > 0) {
-                return (
-                  <CommandGroup key="sessions">
-                    {visibleSessions.map((session) => {
-                      const title = session.title || t('commandPalette.session.untitled');
-                      const dir = resolveGlobalSessionDirectory(session);
-                      const branch = branchForSession(session.id, dir);
-                      return (
-                        <CommandItem
-                          key={session.id}
-                          value={`session:${session.id}`}
-                          onSelect={() => handleOpenSession(session)}
-                        >
-                          <Icon name="chat-ai-3" className="mr-2 h-4 w-4" />
-                          <span className="truncate">{title}</span>
-                          {branch ? (
-                            <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground typography-meta">
-                              <Icon name="git-branch" className="h-3 w-3" />
-                              <span className="truncate max-w-[160px]">{branch}</span>
-                            </span>
-                          ) : null}
-                        </CommandItem>
-                      );
-                    })}
-                  </CommandGroup>
-                );
-              }
-              if (groupKey === 'files' && visibleFiles.length > 0) {
-                return (
-                  <CommandGroup key="files">
-                    {visibleFiles.map((file) => {
-                      const display = truncatePathMiddle(file.relativePath || file.name, {
-                        maxLength: 80,
-                      });
-                      return (
-                        <CommandItem
-                          key={`file:${file.path}`}
-                          value={`file:${file.path}`}
-                          onSelect={() => {
-                            void handleOpenFile(file.path);
-                          }}
-                        >
-                          <FileTypeIcon filePath={file.path} className="mr-2 size-4 shrink-0" />
-                          <span className="truncate" aria-label={file.relativePath}>
-                            {display}
-                          </span>
-                        </CommandItem>
-                      );
-                    })}
-                  </CommandGroup>
-                );
-              }
-              return null;
-            })}
+        <CommandGroup heading="Actions">
+          <CommandItem onSelect={handleOpenSessionList}>
+            <RiLayoutLeftLine className="mr-2 h-4 w-4" />
+            <span>Open Session List</span>
+            <CommandShortcut>{shortcut('toggle_sidebar')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleCreateSession}>
+            <RiAddLine className="mr-2 h-4 w-4" />
+            <span>New Session</span>
+            <CommandShortcut>
+              {shortcut('new_chat')}
+            </CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleCreateWorktreeSession}>
+            <RiGitBranchLine className="mr-2 h-4 w-4" />
+            <span>New Session with Worktree</span>
+            <CommandShortcut>
+              {shortcut('new_chat_worktree')}
+            </CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleToggleRightSidebar}>
+            <RiLayoutRightLine className="mr-2 h-4 w-4" />
+            <span>Toggle Right Sidebar</span>
+            <CommandShortcut>{shortcut('toggle_right_sidebar')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleOpenRightSidebarGit}>
+            <RiGitBranchLine className="mr-2 h-4 w-4" />
+            <span>Open Right Sidebar Git</span>
+            <CommandShortcut>{shortcut('open_right_sidebar_git')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleOpenRightSidebarFiles}>
+            <RiLayoutRightLine className="mr-2 h-4 w-4" />
+            <span>Open Right Sidebar Files</span>
+            <CommandShortcut>{shortcut('open_right_sidebar_files')}</CommandShortcut>
+          </CommandItem>
+          {!isMobile && (
+            <CommandItem onSelect={handleOpenRightSidebarBoard}>
+              <RiLayoutGridLine className="mr-2 h-4 w-4" />
+              <span>Open Right Sidebar Board</span>
+              <CommandShortcut>{shortcut('open_right_sidebar_board')}</CommandShortcut>
+            </CommandItem>
+          )}
+          <CommandItem onSelect={handleToggleTerminalDock}>
+            <RiTerminalBoxLine className="mr-2 h-4 w-4" />
+            <span>Toggle Terminal Dock</span>
+            <CommandShortcut>{shortcut('toggle_terminal')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleToggleTerminalExpanded}>
+            <RiTerminalBoxLine className="mr-2 h-4 w-4" />
+            <span>Toggle Terminal Expanded</span>
+            <CommandShortcut>{shortcut('toggle_terminal_expanded')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleShowHelp}>
+            <RiQuestionLine className="mr-2 h-4 w-4" />
+            <span>Keyboard Shortcuts</span>
+            <CommandShortcut>{shortcut('open_help')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleOpenDiffPanel}>
+            <RiCodeLine className="mr-2 h-4 w-4" />
+            <span>Open Diff Panel</span>
+            <CommandShortcut>{shortcut('open_diff_panel')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleOpenTerminal}>
+            <RiTerminalBoxLine className="mr-2 h-4 w-4" />
+            <span>Open Terminal</span>
+            <CommandShortcut>{shortcut('open_terminal_panel')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleOpenGitPanel}>
+            <RiGitBranchLine className="mr-2 h-4 w-4" />
+            <span>Open Git Panel</span>
+            <CommandShortcut>{shortcut('open_git_panel')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleOpenTimeline}>
+            <RiTimeLine className="mr-2 h-4 w-4" />
+            <span>Open Timeline</span>
+            <CommandShortcut>{shortcut('open_timeline')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={handleOpenSettings}>
+            <RiSettings3Line className="mr-2 h-4 w-4" />
+            <span>Open Settings</span>
+            <CommandShortcut>{shortcut('open_settings')}</CommandShortcut>
+          </CommandItem>
+          <CommandItem onSelect={() => handleOpenSettingsPage('skills.catalog')}>
+            <RiSettings3Line className="mr-2 h-4 w-4" />
+            <span>Open Skills Catalog</span>
+          </CommandItem>
+        </CommandGroup>
 
             {hasQuery && isSearchingFiles && visibleFiles.length === 0 ? (
               <div className="px-3 py-2 typography-meta text-muted-foreground">

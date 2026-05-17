@@ -49,6 +49,7 @@ import { useLongPress } from '@/hooks/useLongPress';
 import { formatShortcutForDisplay, getEffectiveShortcutCombo } from '@/lib/shortcuts';
 import { sessionEvents } from '@/lib/sessionEvents';
 import type { ProjectEntry } from '@/lib/api/types';
+import { getProjectDirectories } from '@/lib/worktrees/projectDirectories';
 
 const normalize = (value: string): string => {
   if (!value) return '';
@@ -566,21 +567,7 @@ export const NavRail: React.FC<NavRailProps> = ({ className, mobile }) => {
         continue;
       }
 
-      const dirs: string[] = [projectRoot];
-      const worktrees = availableWorktreesByProject.get(projectRoot) ?? [];
-      for (const meta of worktrees) {
-        const p =
-          meta && typeof meta === 'object' && 'path' in meta
-            ? (meta as { path?: unknown }).path
-            : null;
-        if (typeof p === 'string' && p.trim()) {
-          const normalized = normalize(p);
-          if (normalized && normalized !== projectRoot) {
-            dirs.push(normalized);
-          }
-        }
-      }
-
+      const dirs = getProjectDirectories(projectRoot, availableWorktreesByProject);
       const seen = new Set<string>();
       let hasStreaming = false;
       let hasUnread = false;

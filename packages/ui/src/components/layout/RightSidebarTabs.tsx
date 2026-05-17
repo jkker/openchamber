@@ -1,4 +1,5 @@
 import React from 'react';
+import { RiFolder3Line, RiGitBranchLine, RiLayoutGridLine } from '@remixicon/react';
 
 import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
 import { ProjectNotesTodoPanel } from '@/components/session/ProjectNotesTodoPanel';
@@ -13,82 +14,9 @@ import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { formatDirectoryName } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
 import { SidebarFilesTree } from './SidebarFilesTree';
+import { BoardSidebarView } from './BoardSidebarView';
 
-type RightTab = 'git' | 'files' | 'context';
-
-/**
- * Keeps git status fresh while the right sidebar is open.
- * Replaces the GitPollingProvider removed in commit b2d5ccb4.
- * The previous polling ran globally; now we only refresh when the sidebar is open.
- */
-function useRightSidebarGitSync(directory: string | undefined, isSidebarOpen: boolean) {
-  const { git } = useRuntimeAPIs();
-  const ensureStatus = useGitStore((state) => state.ensureStatus);
-
-  React.useEffect(() => {
-    if (!directory || !git || !isSidebarOpen) return;
-
-    void ensureStatus(directory, git);
-
-    const POLL_INTERVAL = 10_000;
-    const id = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      void ensureStatus(directory, git);
-    }, POLL_INTERVAL);
-
-    return () => clearInterval(id);
-  }, [directory, git, isSidebarOpen, ensureStatus]);
-}
-
-const ContextSidebarPanel: React.FC = () => {
-  const activeProjectId = useProjectsStore((state) => state.activeProjectId);
-  const projects = useProjectsStore((state) => state.projects);
-  const homeDirectory = useDirectoryStore((state) => state.homeDirectory);
-  const gitDirectories = useGitStore((state) => state.directories);
-
-  const activeProject = React.useMemo(() => {
-    if (activeProjectId) {
-      return projects.find((project) => project.id === activeProjectId) ?? projects[0] ?? null;
-    }
-    return projects[0] ?? null;
-  }, [activeProjectId, projects]);
-
-  const projectRef = React.useMemo(() => {
-    if (!activeProject) {
-      return null;
-    }
-    return {
-      id: activeProject.id,
-      path: activeProject.path,
-    };
-  }, [activeProject]);
-
-  const projectLabel = React.useMemo(() => {
-    if (!activeProject) {
-      return null;
-    }
-    return activeProject.label?.trim()
-      || formatDirectoryName(activeProject.path, homeDirectory)
-      || activeProject.path;
-  }, [activeProject, homeDirectory]);
-
-  const canCreateWorktree = React.useMemo(() => {
-    if (!activeProject) {
-      return false;
-    }
-    return gitDirectories.get(activeProject.path)?.isGitRepo === true;
-  }, [activeProject, gitDirectories]);
-
-  return (
-    <div className="h-full min-h-0 overflow-auto bg-sidebar">
-      <ProjectNotesTodoPanel
-        projectRef={projectRef}
-        projectLabel={projectLabel}
-        canCreateWorktree={canCreateWorktree}
-      />
-    </div>
-  );
-};
+type RightTab = 'git' | 'files' | 'board';
 
 export const RightSidebarTabs: React.FC = () => {
   const { t } = useI18n();
@@ -111,11 +39,11 @@ export const RightSidebarTabs: React.FC = () => {
       icon: <Icon name="folder-3" className="h-3.5 w-3.5" />,
     },
     {
-      id: 'context',
-      label: t('layout.rightSidebar.context'),
-      icon: <Icon name="booklet" className="h-3.5 w-3.5" />,
+      id: 'board',
+      label: 'Board',
+      icon: <RiLayoutGridLine className="h-3.5 w-3.5" />,
     },
-  ], [t]);
+  ], []);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-sidebar">
@@ -131,9 +59,7 @@ export const RightSidebarTabs: React.FC = () => {
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {rightSidebarTab === 'git' && <GitView />}
-        {rightSidebarTab === 'files' && <SidebarFilesTree />}
-        {rightSidebarTab === 'context' && <ContextSidebarPanel />}
+        {rightSidebarTab === 'git' ? <GitView /> : rightSidebarTab === 'files' ? <SidebarFilesTree /> : <BoardSidebarView />}
       </div>
     </div>
   );
