@@ -898,6 +898,14 @@ export const GitView: React.FC = () => {
     });
   }, [status, changeEntries, hasUserAdjustedSelection]);
 
+  const getPushedRemoteName = (result?: Awaited<ReturnType<typeof git.gitPush>>) => {
+    return result?.pushed[0]?.remote
+      || status?.tracking?.split('/')[0]
+      || effectiveRemotes.find((remote) => remote.name === 'origin')?.name
+      || effectiveRemotes[0]?.name
+      || 'origin';
+  };
+
   const handleSyncAction = async (action: Exclude<SyncAction, null>, remote?: GitRemote) => {
     if (!currentDirectory) return;
     setSyncAction(action);
@@ -932,8 +940,8 @@ export const GitView: React.FC = () => {
             : t('gitView.toast.pulledFilesPlural', { count: result.files.length, name: remote.name })
         );
       } else if (action === 'push') {
-        await git.gitPush(currentDirectory);
-        toast.success(t('gitView.toast.pushedToUpstream'));
+        const result = await git.gitPush(currentDirectory);
+        toast.success(t('gitView.toast.pushedToUpstream', { name: getPushedRemoteName(result) }));
       } else if (action === 'sync') {
         if (!remote) {
           throw new Error('No remote available for sync');
@@ -970,7 +978,7 @@ export const GitView: React.FC = () => {
               : t('gitView.toast.pulledFilesPlural', { count: pulledFileCount, name: remote.name })
           );
         } else if (pushedChanges) {
-          toast.success(t('gitView.toast.pushedToUpstream'));
+          toast.success(t('gitView.toast.pushedToUpstream', { name: remote.name }));
         } else {
           toast.success(t('gitView.toast.alreadyUpToDate'));
         }
@@ -1047,56 +1055,8 @@ export const GitView: React.FC = () => {
       await refreshStatusAndBranches();
 
       if (options.pushAfter) {
-        setSyncAction('sync');
-        const trackingRemoteName = status?.tracking?.split('/')[0];
-        const syncRemote = effectiveRemotes.find((remote) => remote.name === trackingRemoteName) ?? effectiveRemotes[0];
-        if (!syncRemote) {
-          throw new Error('No remote available for sync');
-        }
-
-        const trackingPrefix = `${syncRemote.name}/`;
-        const trackedBranch = status?.tracking?.startsWith(trackingPrefix)
-          ? status.tracking.slice(trackingPrefix.length)
-          : undefined;
-        let pulledFileCount = 0;
-        let pushedChanges = false;
-
-        await git.gitFetch(currentDirectory, { remote: syncRemote.name });
-        const afterFetch = await git.getGitStatus(currentDirectory);
-
-        if ((afterFetch.behind ?? 0) > 0) {
-          const pullResult = await git.gitPull(currentDirectory, {
-            remote: syncRemote.name,
-            branch: trackedBranch,
-            rebase: true,
-          });
-          pulledFileCount = pullResult.files.length;
-        }
-
-        const afterPull = await git.getGitStatus(currentDirectory);
-        if ((afterPull.ahead ?? 0) > 0) {
-          await git.gitPush(currentDirectory);
-          pushedChanges = true;
-        }
-
-        if (pulledFileCount > 0 && pushedChanges) {
-          toast.success(
-            pulledFileCount === 1
-              ? t('gitView.toast.syncedPulledSingleAndPushed', { count: pulledFileCount, name: syncRemote.name })
-              : t('gitView.toast.syncedPulledPluralAndPushed', { count: pulledFileCount, name: syncRemote.name })
-          );
-        } else if (pulledFileCount > 0) {
-          toast.success(
-            pulledFileCount === 1
-              ? t('gitView.toast.pulledFilesSingle', { count: pulledFileCount, name: syncRemote.name })
-              : t('gitView.toast.pulledFilesPlural', { count: pulledFileCount, name: syncRemote.name })
-          );
-        } else if (pushedChanges) {
-          toast.success(t('gitView.toast.pushedToUpstream'));
-        } else {
-          toast.success(t('gitView.toast.alreadyUpToDate'));
-        }
-
+        const result = await git.gitPush(currentDirectory);
+        toast.success(t('gitView.toast.pushedToUpstream', { name: getPushedRemoteName(result) }));
         triggerFireworks();
         await refreshStatusAndBranches(false);
       } else {

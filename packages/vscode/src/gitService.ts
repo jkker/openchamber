@@ -2474,7 +2474,7 @@ export async function gitPull(
   const files = changedFiles.exitCode === 0
     ? changedFiles.stdout.split('\n').map((line) => line.trim()).filter(Boolean)
     : [];
-   
+
   return {
     success: result.exitCode === 0,
     summary: { changes: files.length, insertions: 0, deletions: 0 },

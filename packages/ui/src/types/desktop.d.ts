@@ -5,13 +5,9 @@ declare global {
     __OPENCHAMBER_HOME__?: string;
     __OPENCHAMBER_MACOS_MAJOR__?: number;
     __OPENCHAMBER_LOCAL_ORIGIN__?: string;
-    __OPENCHAMBER_RUNTIME_PLATFORM__?: 'desktop' | 'mobile' | 'web' | 'vscode';
-    __OPENCHAMBER_DESKTOP_SERVER__?: {
-      origin: string;
-      opencodePort: number | null;
-      apiPrefix: string;
-      cliAvailable: boolean;
-    };
+    __OPENCHAMBER_ELECTRON__?: { runtime?: string };
+    __OPENCHAMBER_PLATFORM__?: string;
+    __OPENCHAMBER_DESKTOP_BOOT_OUTCOME__?: DesktopBootOutcome;
   }
 }
 
