@@ -723,7 +723,12 @@ export const ProjectActionsButton = ({
     return null;
   }
 
-  const resolvedSelected = selectedAction ?? displayActions[0] ?? null;
+  if (actions.length === 0) {
+    // Don't show any button when there are no actions configured
+    return null;
+  }
+
+  const resolvedSelected = selectedAction ?? actions[0] ?? null;
   if (!resolvedSelected) {
     return null;
   }

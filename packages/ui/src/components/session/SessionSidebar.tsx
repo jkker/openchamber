@@ -136,13 +136,12 @@ import {
   type DeleteFolderConfirmState,
   type DeleteSessionConfirmState,
 } from './sidebar/ConfirmDialogs';
-import { BulkActionBar } from './sidebar/BulkActionBar';
-import { useSessionMultiSelectStore } from '@/stores/useSessionMultiSelectStore';
-import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
-import { type SessionGroup, type SessionNode } from './sidebar/types';
+import { type SessionGroup, type SessionNode, getSessionParentId } from './sidebar/types';
 import {
-  deriveActiveNowSessions,
-  deriveLiveActiveNowSessions,
+  addActiveNowSession,
+  persistActiveNowEntries,
+  pruneActiveNowEntries,
+  readActiveNowEntries,
 } from './sidebar/activitySections';
 import { useActiveNowStore } from '@/stores/useActiveNowStore';
 import { useSessionPinnedStore } from '@/stores/useSessionPinnedStore';
@@ -903,6 +902,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const notifyOnSubtasks = useUIStore((state) => state.notifyOnSubtasks);
   const showDeletionDialog = useUIStore((state) => state.showDeletionDialog);
   const setShowDeletionDialog = useUIStore((state) => state.setShowDeletionDialog);
+  const recentSessionHours = useUIStore((state) => state.recentSessionHours);
 
   const debouncedSessionSearchQuery = useDebouncedValue(sessionSearchQuery, 120);
   const normalizedSessionSearchQuery = React.useMemo(
@@ -1176,15 +1176,98 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return [...sessions].sort((a, b) => compareSessionsByPinnedAndTime(a, b, pinnedSessionIds));
   }, [sessions, pinnedSessionIds]);
 
-  const sessionOrderIndex = React.useMemo(
-    () => new Map(sortedSessions.map((session, index) => [session.id, index])),
-    [sortedSessions],
-  );
+  const allKnownSessionsById = React.useMemo(() => {
+    const next = new Map<string, Session>();
+    [...sessions, ...archivedSessions].forEach((session) => {
+      next.set(session.id, session);
+    });
+    return next;
+  }, [sessions, archivedSessions]);
+
+  React.useEffect(() => {
+    const pruned = pruneActiveNowEntries(activeNowEntries, allKnownSessionsById);
+    if (pruned.length === activeNowEntries.length && pruned.every((entry, index) => entry.sessionId === activeNowEntries[index]?.sessionId)) {
+      return;
+    }
+    setActiveNowEntries(pruned);
+    persistActiveNowEntries(safeStorage, pruned);
+  }, [activeNowEntries, allKnownSessionsById, safeStorage]);
+
+  const previousStreamingIdsRef = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    const nextStreamingIds = new Set<string>();
+    sessionStatus?.forEach((status, sessionId) => {
+      if (status?.type === 'busy' || status?.type === 'retry') {
+        nextStreamingIds.add(sessionId);
+      }
+    });
+
+    const previousStreamingIds = previousStreamingIdsRef.current;
+    const startedStreamingIds = Array.from(nextStreamingIds).filter((sessionId) => !previousStreamingIds.has(sessionId));
+    if (startedStreamingIds.length > 0) {
+      setActiveNowEntries((prev) => {
+        const next = startedStreamingIds.reduce((entries, sessionId) => addActiveNowSession(entries, sessionId), prev);
+        if (next === prev) {
+          return prev;
+        }
+        persistActiveNowEntries(safeStorage, next);
+        return next;
+      });
+    }
+
+    previousStreamingIdsRef.current = nextStreamingIds;
+  }, [sessionStatus, safeStorage]);
+
+  React.useEffect(() => {
+    const busyIds: string[] = [];
+    sessionStatus?.forEach((status, sessionId) => {
+      if (status?.type === 'busy' || status?.type === 'retry') {
+        busyIds.push(sessionId);
+      }
+    });
+
+    if (busyIds.length === 0) {
+      return;
+    }
+
+    setActiveNowEntries((prev) => {
+      const known = new Set(prev.map((entry) => entry.sessionId));
+      let next = prev;
+      let changed = false;
+
+      busyIds.forEach((sessionId) => {
+        if (known.has(sessionId)) {
+          return;
+        }
+
+        const session = allKnownSessionsById.get(sessionId);
+        if (!session || session.time?.archived) {
+          return;
+        }
+
+        const isSubtask = Boolean(getSessionParentId(session));
+        if (isSubtask) {
+          return;
+        }
+
+        next = addActiveNowSession(next, sessionId);
+        known.add(sessionId);
+        changed = true;
+      });
+
+      if (!changed) {
+        return prev;
+      }
+
+      persistActiveNowEntries(safeStorage, next);
+      return next;
+    });
+  }, [sessionStatus, allKnownSessionsById, safeStorage]);
 
   const childrenMap = React.useMemo(() => {
     const map = new Map<string, Session[]>();
     sortedSessions.forEach((session) => {
-      const parentID = (session as Session & { parentID?: string | null }).parentID;
+      const parentID = getSessionParentId(session);
       if (!parentID) {
         return;
       }
@@ -1507,7 +1590,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     projectSections,
     groupSearchDataByGroup,
     sectionsForRender,
-    searchMatchCount,
   } = useSessionSidebarSections({
     normalizedProjects,
     getSessionsForProject,
@@ -2224,47 +2306,31 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return meta;
   }, [projectSections, homeDirectory]);
 
-  const showRecentSection = useSessionDisplayStore((state) => state.showRecentSection);
-
-  const activeNowSessions = React.useMemo(() => {
-    if (!showRecentSection) {
-      return [];
-    }
-
-    return deriveActiveNowSessions(activeNowEntries, new Map(sessions.map((session) => [session.id, session])))
-      .sort((a, b) => compareSessionsByPinnedAndTime(a, b, pinnedSessionIds));
-  }, [activeNowEntries, pinnedSessionIds, sessions, showRecentSection]);
-
-  const liveActiveSessions = React.useMemo(() => {
-    if (!showRecentSection) {
-      return [];
-    }
-
-    return deriveLiveActiveNowSessions(sessions, liveSessionStatuses);
-  }, [liveSessionStatuses, sessions, showRecentSection]);
-
-  React.useEffect(() => {
-    if (!showRecentSection || liveActiveSessions.length === 0) {
-      return;
-    }
-
-    liveActiveSessions.forEach((session) => addActiveNowSessionToStore(session.id));
-  }, [addActiveNowSessionToStore, liveActiveSessions, showRecentSection]);
-
-  React.useEffect(() => {
-    if (!showRecentSection) {
-      return;
-    }
-
-    const allKnownSessionsById = new Map<string, Session>();
-    [...sessions, ...archivedSessions].forEach((session) => {
-      allKnownSessionsById.set(session.id, session);
-    });
-
-    pruneActiveNowEntriesInStore(allKnownSessionsById);
-  }, [archivedSessions, pruneActiveNowEntriesInStore, sessions, showRecentSection]);
-
   // Prefetch is wired below, after recentSessionIds is computed.
+
+  const projectColorById = React.useMemo(() => {
+    const map = new Map<string, string>();
+    normalizedProjects.forEach((p) => {
+      if (p.color) {
+        map.set(p.id, p.color);
+      }
+    });
+    return map;
+  }, [normalizedProjects]);
+
+  // Recently updated: non-archived, non-subtask sessions from the configured time window sorted by updated_at desc
+  const recentSessions = React.useMemo(() => {
+    const cutoff = Date.now() - recentSessionHours * 60 * 60 * 1000;
+    return sortedSessions.filter((session) => {
+      if (session.time?.archived) return false;
+      // Kiểm tra tất cả các khả năng tên trường để xác định session con (sub-session)
+      const parentID = getSessionParentId(session);
+      if (parentID) return false;
+      const sessionTimestamp = session.time?.updated || session.time?.created || 0;
+      if (sessionTimestamp < cutoff) return false;
+      return true;
+    });
+  }, [sortedSessions, recentSessionHours]);
 
   const activitySections = React.useMemo(() => {
     if (!showRecentSection) {
@@ -2274,19 +2340,20 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     const toItem = (session: Session) => {
       const existing = sessionSidebarMetaById.get(session.id);
       const sessionDirectory = normalizePath((session as Session & { directory?: string | null }).directory ?? null);
+      const projectId = existing?.projectId ?? null;
       return {
         node: existing?.node ?? { session, children: [], worktree: null },
-        projectId: existing?.projectId ?? null,
+        projectId,
+        projectColor: projectId ? (projectColorById.get(projectId) ?? null) : null,
         groupDirectory: existing?.groupDirectory ?? sessionDirectory,
         secondaryMeta: existing?.secondaryMeta ?? null,
       };
     };
 
     return [
-      { key: 'active-now' as const, title: t('sessions.sidebar.activity.recentTitle'), items: activeNowSessions.map(toItem) },
+      { key: 'active-now' as const, title: 'RECENT', items: recentSessions.map(toItem) },
     ];
-  }, [activeNowSessions, sessionSidebarMetaById, showRecentSection, t]);
-
+  }, [recentSessions, sessionSidebarMetaById, projectColorById]);
 
   const recentSessionIds = React.useMemo(() => {
     return new Set(activeNowSessions.map((session) => session.id));
@@ -2457,6 +2524,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       archivedBucket = false,
       secondaryMeta?: { projectLabel?: string | null; branchLabel?: string | null } | null,
       renderContext: 'project' | 'recent' = 'project',
+      projectColor?: string | null,
     ): React.ReactNode => (
       <SessionNodeItem
         node={node}
@@ -2500,6 +2568,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         renderSessionNode={renderSessionNode}
         secondaryMeta={secondaryMeta}
         renderContext={renderContext}
+        projectColor={projectColor}
       />
     ),
     [
@@ -3169,6 +3238,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         hideDirectoryControls={hideDirectoryControls}
         handleOpenDirectoryDialog={handleOpenDirectoryDialog}
         handleNewSession={handleSidebarNewSession}
+        useMobileNotesPanel={useMobileNotesPanel}
+        projectNotesPanelOpen={projectNotesPanelOpen}
+        setProjectNotesPanelOpen={setProjectNotesPanelOpen}
+        activeProjectRefForHeader={activeProjectRefForHeader}
         canOpenMultiRun={projects.length > 0}
         openMultiRunLauncher={handleOpenMultiRunFromHeader}
         headerActionIconClass={headerActionIconClass}
@@ -3180,7 +3253,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         sessionSearchQuery={sessionSearchQuery}
         setSessionSearchQuery={setSessionSearchQuery}
         hasSessionSearchQuery={hasSessionSearchQuery}
-        searchMatchCount={searchMatchCount}
         collapseAllProjects={collapseAllProjects}
         expandAllProjects={expandAllProjects}
         openScheduledTasksDialog={() => setScheduledTasksDialogOpen(true)}
@@ -3339,13 +3411,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         onConfirm={confirmDeleteFolder}
       />
 
-      <BulkSessionDeleteConfirmDialog
-        value={bulkDeleteConfirm}
-        setValue={setBulkDeleteConfirm}
-        showDeletionDialog={showDeletionDialog}
-        setShowDeletionDialog={setShowDeletionDialog}
-        onConfirm={confirmBulkDelete}
-      />
     </div>
   );
 };
