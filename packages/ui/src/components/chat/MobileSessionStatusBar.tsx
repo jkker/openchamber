@@ -1478,6 +1478,12 @@ export const MobileSessionStatusBar: React.FC<MobileSessionStatusBarProps> = ({
 
   const [isExpanded, setIsExpanded] = React.useState(false);
 
+  React.useEffect(() => {
+    if (isMobileSessionStatusBarCollapsed) {
+      setIsExpanded(false);
+    }
+  }, [isMobileSessionStatusBarCollapsed]);
+
   if (!isMobile || !showMobileSessionStatusBar || totalCount === 0) {
     return null;
   }
@@ -1486,6 +1492,7 @@ export const MobileSessionStatusBar: React.FC<MobileSessionStatusBarProps> = ({
     setCurrentSession(sessionId);
     onSessionSwitch?.(sessionId);
     setIsExpanded(false);
+    setIsMobileSessionStatusBarCollapsed(true);
   };
 
   const handleSessionDoubleClick = () => {
