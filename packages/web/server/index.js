@@ -77,6 +77,10 @@ import { createNotificationTriggerRuntime } from './lib/notifications/runtime.js
 import { createPushRuntime } from './lib/notifications/push-runtime.js';
 import { createNotificationTemplateRuntime } from './lib/notifications/template-runtime.js';
 import { createGracefulShutdownRuntime } from './lib/opencode/shutdown-runtime.js';
+import { createBackendRegistry, DEFAULT_BACKEND_ID } from './lib/harness/backends.js';
+import { createSessionBindingsRuntime } from './lib/harness/session-bindings.js';
+import { createOpenCodeBackendRuntime } from './lib/harness/opencode-backend.js';
+import { createCodexBackendRuntime } from './lib/harness/codex-backend.js';
 import { createProjectConfigRuntime } from './lib/projects/project-config.js';
 import { createPreviewProxyRuntime } from './lib/preview/proxy-runtime.js';
 import { createProxyMiddleware, responseInterceptor } from 'http-proxy-middleware';
@@ -1379,6 +1383,8 @@ const OPENCHAMBER_DATA_DIR = process.env.OPENCHAMBER_DATA_DIR
   ? path.resolve(process.env.OPENCHAMBER_DATA_DIR)
   : path.join(os.homedir(), '.config', 'openchamber');
 const SETTINGS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'settings.json');
+const SESSION_BINDINGS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'session-bindings.json');
+const CODEX_SESSIONS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'codex-sessions.json');
 const PUSH_SUBSCRIPTIONS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'push-subscriptions.json');
 const CLOUDFLARE_NAMED_TUNNELS_FILE_PATH = path.join(OPENCHAMBER_DATA_DIR, 'cloudflare-named-tunnels.json');
 const CLOUDFLARE_NAMED_TUNNELS_VERSION = 1;
@@ -1457,10 +1463,23 @@ const parseProjectIconDataUrl = (value) => {
     return { ok: false, error: 'Invalid dataUrl format' };
   }
 
-  const mime = normalizeProjectIconMime(match[1]);
-  if (!mime || !['image/png', 'image/jpeg', 'image/svg+xml'].includes(mime)) {
-    return { ok: false, error: 'Icon must be PNG, JPEG, or SVG' };
-  }
+const backendRegistry = createBackendRegistry({
+  readSettingsFromDiskMigrated,
+});
+
+const sessionBindingsRuntime = createSessionBindingsRuntime({
+  fsPromises,
+  path,
+  bindingsFilePath: SESSION_BINDINGS_FILE_PATH,
+  defaultBackendId: DEFAULT_BACKEND_ID,
+  getDefaultBackendId: () => backendRegistry.getDefaultBackendId(),
+});
+
+await sessionBindingsRuntime.ensureLoaded();
+
+const requestSecurityRuntime = createRequestSecurityRuntime({
+  readSettingsFromDiskMigrated,
+});
 
   try {
     const base64 = match[2].replace(/\s+/g, '');
@@ -4125,6 +4144,23 @@ const buildOpenCodeUrl = (...args) => openCodeNetworkRuntime.buildOpenCodeUrl(..
 const ensureOpenCodeApiPrefix = (...args) => openCodeNetworkRuntime.ensureOpenCodeApiPrefix(...args);
 const scheduleOpenCodeApiDetection = (...args) => openCodeNetworkRuntime.scheduleOpenCodeApiDetection(...args);
 
+const openCodeBackendRuntime = createOpenCodeBackendRuntime({
+  buildOpenCodeUrl,
+  getOpenCodeAuthHeaders,
+});
+
+let publishCodexEventToGlobalStream = null;
+
+const codexBackendRuntime = createCodexBackendRuntime({
+  crypto,
+  fsPromises,
+  sessionsFilePath: CODEX_SESSIONS_FILE_PATH,
+  publishEvent: (event) => publishCodexEventToGlobalStream?.(event),
+});
+
+backendRegistry.registerRuntime('opencode', openCodeBackendRuntime);
+backendRegistry.registerRuntime('codex', codexBackendRuntime);
+
 const ENV_CONFIGURED_API_PREFIX = normalizeApiPrefix(
   process.env.OPENCODE_API_PREFIX || process.env.OPENCHAMBER_API_PREFIX || ''
 );
@@ -4235,6 +4271,7 @@ const globalMessageStreamHub = createGlobalMessageStreamHub({
   getOpenCodeAuthHeaders,
   upstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
 });
+publishCodexEventToGlobalStream = (event) => globalMessageStreamHub.publishLocalEvent(event);
 
 const openCodeWatcherRuntime = createOpenCodeWatcherRuntime({
   waitForOpenCodePort: (...args) => waitForOpenCodePort(...args),
@@ -6039,6 +6076,9 @@ const serverUtilsRuntime = createServerUtilsRuntime({
   buildOpenCodeUrl,
   ensureOpenCodeApiPrefix,
   getUiNotificationClients: () => uiNotificationClients,
+  backendRegistry,
+  sessionBindingsRuntime,
+  readSettingsFromDiskMigrated,
   getOpenCodePort: () => openCodePort,
   setOpenCodePortState: (value) => {
     openCodePort = value;
@@ -6086,390 +6126,22 @@ async function waitForOpenCodeReady(timeoutMs = 20000, intervalMs = 400) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
 
-  while (Date.now() < deadline) {
-    try {
-      const [configResult, agentResult] = await Promise.all([
-        fetch(buildOpenCodeUrl('/config', ''), {
-          method: 'GET',
-          headers: { Accept: 'application/json',  ...getOpenCodeAuthHeaders()  }
-        }).catch((error) => error),
-        fetch(buildOpenCodeUrl('/agent', ''), {
-          method: 'GET',
-          headers: { Accept: 'application/json',  ...getOpenCodeAuthHeaders()  }
-        }).catch((error) => error)
-      ]);
-
-      if (configResult instanceof Error) {
-        lastError = configResult;
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
-        continue;
-      }
-
-      if (!configResult.ok) {
-        lastError = new Error(`OpenCode config endpoint responded with status ${configResult.status}`);
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
-        continue;
-      }
-
-      await configResult.json().catch(() => null);
-
-      if (agentResult instanceof Error) {
-        lastError = agentResult;
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
-        continue;
-      }
-
-      if (!agentResult.ok) {
-        lastError = new Error(`Agent endpoint responded with status ${agentResult.status}`);
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
-        continue;
-      }
-
-      await agentResult.json().catch(() => []);
-
-      isOpenCodeReady = true;
-      lastOpenCodeError = null;
-      return;
-    } catch (error) {
-      lastError = error;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-
-  if (lastError) {
-    lastOpenCodeError = lastError.message || String(lastError);
-    throw lastError;
-  }
-
-  const timeoutError = new Error('Timed out waiting for OpenCode to become ready');
-  lastOpenCodeError = timeoutError.message;
-  throw timeoutError;
-}
-
-async function waitForAgentPresence(agentName, timeoutMs = 15000, intervalMs = 300) {
-  if (!openCodePort) {
-    throw new Error('OpenCode port is not available');
-  }
-
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(buildOpenCodeUrl('/agent'), {
-        method: 'GET',
-        headers: { Accept: 'application/json',  ...getOpenCodeAuthHeaders()  }
-      });
-
-      if (response.ok) {
-        const agents = await response.json();
-        if (Array.isArray(agents) && agents.some((agent) => agent?.name === agentName)) {
-          return;
-        }
-      }
-    } catch (error) {
-
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-
-  throw new Error(`Agent "${agentName}" not available after OpenCode restart`);
-}
-
-async function fetchAgentsSnapshot() {
-  if (!openCodePort) {
-    throw new Error('OpenCode port is not available');
-  }
-
-  const response = await fetch(buildOpenCodeUrl('/agent'), {
-    method: 'GET',
-    headers: { Accept: 'application/json',  ...getOpenCodeAuthHeaders()  }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch agents snapshot (status ${response.status})`);
-  }
-
-  const agents = await response.json().catch(() => null);
-  if (!Array.isArray(agents)) {
-    throw new Error('Invalid agents payload from OpenCode');
-  }
-  return agents;
-}
-
-async function fetchProvidersSnapshot() {
-  if (!openCodePort) {
-    throw new Error('OpenCode port is not available');
-  }
-
-  const response = await fetch(buildOpenCodeUrl('/provider'), {
-    method: 'GET',
-    headers: { Accept: 'application/json',  ...getOpenCodeAuthHeaders()  }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch providers snapshot (status ${response.status})`);
-  }
-
-  const providers = await response.json().catch(() => null);
-  if (!Array.isArray(providers)) {
-    throw new Error('Invalid providers payload from OpenCode');
-  }
-  return providers;
-}
-
-async function fetchModelsSnapshot() {
-  if (!openCodePort) {
-    throw new Error('OpenCode port is not available');
-  }
-
-  const response = await fetch(buildOpenCodeUrl('/model'), {
-    method: 'GET',
-    headers: { Accept: 'application/json',  ...getOpenCodeAuthHeaders()  }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch models snapshot (status ${response.status})`);
-  }
-
-  const models = await response.json().catch(() => null);
-  if (!Array.isArray(models)) {
-    throw new Error('Invalid models payload from OpenCode');
-  }
-  return models;
-}
-
-async function refreshOpenCodeAfterConfigChange(reason, options = {}) {
-  const { agentName } = options;
-
-  console.log(`Refreshing OpenCode after ${reason}`);
-
-  // Settings might include a new opencodeBinary; drop cache before restart.
-  resolvedOpencodeBinary = null;
-  await applyOpencodeBinaryFromSettings();
-
-  await restartOpenCode();
-
-  try {
-    await waitForOpenCodeReady();
-    isOpenCodeReady = true;
-    openCodeNotReadySince = 0;
-
-    if (agentName) {
-      await waitForAgentPresence(agentName);
-    }
-
-    isOpenCodeReady = true;
-    openCodeNotReadySince = 0;
-  } catch (error) {
-
-    isOpenCodeReady = false;
-    openCodeNotReadySince = Date.now();
-    console.error(`Failed to refresh OpenCode after ${reason}:`, error.message);
-    throw error;
-  }
-}
-
-function setupProxy(app) {
-  if (app.get('opencodeProxyConfigured')) {
-    return;
-  }
-
-  if (openCodePort) {
-    console.log(`Setting up proxy to OpenCode on port ${openCodePort}`);
-  } else {
-    console.log('Setting up OpenCode API gate (OpenCode not started yet)');
-  }
-  app.set('opencodeProxyConfigured', true);
-
-  const stripApiPrefix = (rawUrl) => {
-    if (typeof rawUrl !== 'string' || !rawUrl) {
-      return '/';
-    }
-    if (rawUrl === '/api') {
-      return '/';
-    }
-    if (rawUrl.startsWith('/api/')) {
-      return rawUrl.slice(4);
-    }
-    return rawUrl;
-  };
-
-  // Keep route matching stable; only rewrite the proxied upstream path.
-  const rewriteWindowsDirectoryParam = (upstreamPath) => {
-    if (process.platform !== 'win32') {
-      return upstreamPath;
-    }
-    try {
-      const parsed = new URL(upstreamPath, 'http://openchamber.local');
-      const pathname = parsed.pathname || '/';
-      if (pathname === '/session' || pathname.startsWith('/session/')) {
-        return upstreamPath;
-      }
-      const directory = parsed.searchParams.get('directory');
-      if (!directory || !directory.includes('/')) {
-        return upstreamPath;
-      }
-      const fixed = directory.replace(/\//g, '\\');
-      parsed.searchParams.set('directory', fixed);
-      const rewritten = `${parsed.pathname}${parsed.search}${parsed.hash}`;
-      if (rewritten !== upstreamPath) {
-        console.log(`[Win32PathFix] Rewrote directory: "${directory}" → "${fixed}"`);
-        console.log(`[Win32PathFix] URL: "${upstreamPath}" → "${rewritten}"`);
-      }
-      return rewritten;
-    } catch {
-      return upstreamPath;
-    }
-  };
-
-  const getUpstreamPathForRequest = (req) => {
-    const rawUrl = (typeof req.originalUrl === 'string' && req.originalUrl)
-      ? req.originalUrl
-      : (typeof req.url === 'string' ? req.url : '/');
-    return rewriteWindowsDirectoryParam(stripApiPrefix(rawUrl));
-  };
-
-  app.use('/api', (req, res, next) => {
-    if (
-      req.path.startsWith('/themes/custom') ||
-      req.path.startsWith('/push') ||
-      req.path.startsWith('/auth/device') ||
-      req.path.startsWith('/auth/devices') ||
-      req.path.startsWith('/config/agents') ||
-      req.path.startsWith('/config/opencode-resolution') ||
-      req.path.startsWith('/config/settings') ||
-      req.path.startsWith('/config/skills') ||
-      req.path === '/config/reload' ||
-      req.path === '/health'
-    ) {
-      return next();
-    }
-
-    const waitElapsed = openCodeNotReadySince === 0 ? 0 : Date.now() - openCodeNotReadySince;
-    const stillWaiting =
-      (!isOpenCodeReady && (openCodeNotReadySince === 0 || waitElapsed < OPEN_CODE_READY_GRACE_MS)) ||
-      isRestartingOpenCode ||
-      !openCodePort;
-
-    if (stillWaiting) {
-      return res.status(503).json({
-        error: 'OpenCode is restarting',
-        restarting: true,
-      });
-    }
-
-    next();
-  });
-
-  const isSseApiPath = (path) => path === '/event' || path === '/global/event';
-
-  const forwardSseRequest = async (req, res) => {
-    const startedAt = Date.now();
-    const upstreamPath = getUpstreamPathForRequest(req);
-    const targetUrl = buildOpenCodeUrl(upstreamPath, '');
-    const authHeaders = getOpenCodeAuthHeaders();
-
-    const requestHeaders = {
-      ...(typeof req.headers.accept === 'string' ? { accept: req.headers.accept } : { accept: 'text/event-stream' }),
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-      ...(authHeaders.Authorization ? { Authorization: authHeaders.Authorization } : {}),
-    };
-
-    const controller = new AbortController();
-    let connectTimer = null;
-    let idleTimer = null;
-    let heartbeatTimer = null;
-    let endedBy = 'upstream-end';
-
-    const cleanup = () => {
-      if (connectTimer) {
-        clearTimeout(connectTimer);
-        connectTimer = null;
-      }
-      if (idleTimer) {
-        clearTimeout(idleTimer);
-        idleTimer = null;
-      }
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
-      }
-      req.off('close', onClientClose);
-    };
-
-    const resetIdleTimeout = () => {
-      if (idleTimer) {
-        clearTimeout(idleTimer);
-      }
-      idleTimer = setTimeout(() => {
-        endedBy = 'idle-timeout';
-        controller.abort();
-      }, 5 * 60 * 1000);
-    };
-
-    const onClientClose = () => {
-      endedBy = 'client-disconnect';
-      controller.abort();
-    };
-
-    req.on('close', onClientClose);
-
-    try {
-      connectTimer = setTimeout(() => {
-        endedBy = 'connect-timeout';
-        controller.abort();
-      }, 10 * 1000);
-
-      const upstreamResponse = await fetch(targetUrl, {
-        method: 'GET',
-        headers: requestHeaders,
-        signal: controller.signal,
-      });
-
-      if (connectTimer) {
-        clearTimeout(connectTimer);
-        connectTimer = null;
-      }
-
-      if (!upstreamResponse.ok || !upstreamResponse.body) {
-        const body = await upstreamResponse.text().catch(() => '');
-        cleanup();
-        if (!res.headersSent) {
-          if (upstreamResponse.headers.has('content-type')) {
-            res.setHeader('content-type', upstreamResponse.headers.get('content-type'));
-          }
-          res.status(upstreamResponse.status).send(body);
-        }
-        return;
-      }
-
-      const upstreamContentType = upstreamResponse.headers.get('content-type') || 'text/event-stream';
-      res.status(upstreamResponse.status);
-      res.setHeader('content-type', upstreamContentType);
-      res.setHeader('cache-control', 'no-cache');
-      res.setHeader('connection', 'keep-alive');
-      res.setHeader('x-accel-buffering', 'no');
-      res.setHeader('x-content-type-options', 'nosniff');
-      if (typeof res.flushHeaders === 'function') {
-        res.flushHeaders();
-      }
-
-      resetIdleTimeout();
-      heartbeatTimer = setInterval(() => {
-        if (res.writableEnded || controller.signal.aborted) {
-          return;
-        }
-        try {
-          res.write(': ping\n\n');
-          resetIdleTimeout();
-        } catch {
-        }
-      }, 30 * 1000);
-
-      const reader = upstreamResponse.body.getReader();
+const restartOpenCode = (...args) => openCodeLifecycleRuntime.restartOpenCode(...args);
+const waitForOpenCodeReady = (...args) => openCodeLifecycleRuntime.waitForOpenCodeReady(...args);
+const waitForAgentPresence = (...args) => openCodeLifecycleRuntime.waitForAgentPresence(...args);
+const refreshOpenCodeAfterConfigChange = (...args) => openCodeLifecycleRuntime.refreshOpenCodeAfterConfigChange(...args);
+const startHealthMonitoring = () => openCodeLifecycleRuntime.startHealthMonitoring(HEALTH_CHECK_INTERVAL);
+const triggerHealthCheck = () => openCodeLifecycleRuntime.triggerHealthCheck();
+const scheduledTasksRuntime = createScheduledTasksRuntime({
+  projectConfigRuntime,
+  listProjects: async () => {
+    const settings = await readSettingsFromDiskMigrated();
+    return sanitizeProjects(settings?.projects || []);
+  },
+  backendRegistry,
+  sessionBindingsRuntime,
+  emitTaskRunEvent: (event) => {
+    for (const client of uiOpenChamberEventClients) {
       try {
         writeSseEvent(client, {
           type: 'openchamber:scheduled-task-ran',
@@ -14317,6 +13989,8 @@ async function main(options = {}) {
     modelsMetadataCacheTtl: MODELS_METADATA_CACHE_TTL,
     fetchFreeZenModels,
     getCachedZenModels,
+    backendRegistry,
+    sessionBindingsRuntime,
     setAutoAcceptSession,
   });
   uiAuthController = bootstrapResult.uiAuthController;
@@ -14373,381 +14047,56 @@ async function main(options = {}) {
     rejectWebSocketUpgrade,
   });
 
-  server.on('upgrade', (req, socket, head) => {
-    const pathname = parseRequestPathname(req.url);
-    if (pathname !== TERMINAL_INPUT_WS_PATH) {
-      return;
-    }
-
-    const handleUpgrade = async () => {
-      try {
-        const requestScope = tunnelAuthController.classifyRequestScope(req);
-        if (requestScope === 'tunnel' || requestScope === 'unknown-public') {
-          const tunnelSession = tunnelAuthController.getTunnelSessionFromRequest(req);
-          if (!tunnelSession) {
-            rejectWebSocketUpgrade(socket, 401, 'Tunnel authentication required');
-            return;
-          }
-        }
-
-        const authenticatedDevice = await authenticateBearerDevice(req);
-        if (authenticatedDevice) {
-          req.openchamberDevice = authenticatedDevice;
-        }
-
-        if (uiAuthController?.enabled) {
-          if (!authenticatedDevice) {
-            const sessionToken = uiAuthController?.ensureSessionToken?.(req, null);
-            if (!sessionToken) {
-              rejectWebSocketUpgrade(socket, 401, 'UI authentication required');
-              return;
-            }
-
-            const originAllowed = await isRequestOriginAllowed(req);
-            if (!originAllowed) {
-              rejectWebSocketUpgrade(socket, 403, 'Invalid origin');
-              return;
-            }
-          }
-        }
-
-        if (!terminalInputWsServer) {
-          rejectWebSocketUpgrade(socket, 500, 'Terminal WebSocket unavailable');
-          return;
-        }
-
-        terminalInputWsServer.handleUpgrade(req, socket, head, (ws) => {
-          terminalInputWsServer.emit('connection', ws, req);
-        });
-      } catch {
-        rejectWebSocketUpgrade(socket, 500, 'Upgrade failed');
-      }
-    };
-
-    void handleUpgrade();
-  });
-
-  setInterval(() => {
-    const now = Date.now();
-    for (const [sessionId, session] of terminalSessions.entries()) {
-      if (now - session.lastActivity > TERMINAL_IDLE_TIMEOUT) {
-        console.log(`Cleaning up idle terminal session: ${sessionId}`);
-        try {
-          session.ptyProcess.kill();
-        } catch (error) {
-
-        }
-        terminalSessions.delete(sessionId);
-      }
-    }
-  }, 5 * 60 * 1000);
-
-  app.post('/api/terminal/create', async (req, res) => {
-    try {
-      if (terminalSessions.size >= MAX_TERMINAL_SESSIONS) {
-        return res.status(429).json({ error: 'Maximum terminal sessions reached' });
-      }
-
-      const { cwd, cols, rows } = req.body;
-      if (!cwd) {
-        return res.status(400).json({ error: 'cwd is required' });
-      }
-
-      try {
-        await fs.promises.access(cwd);
-      } catch {
-        return res.status(400).json({ error: 'Invalid working directory' });
-      }
-
-      const sessionId = Math.random().toString(36).substring(2, 15) +
-                        Math.random().toString(36).substring(2, 15);
-
-      const envPath = buildAugmentedPath();
-      const resolvedEnv = sanitizeTerminalEnv({ ...process.env, PATH: envPath });
-
-      const pty = await getPtyProvider();
-      const { ptyProcess, shell } = spawnTerminalPtyWithFallback(pty, {
-        cols,
-        rows,
-        cwd,
-        env: resolvedEnv,
-      });
-
-      const session = {
-        ptyProcess,
-        ptyBackend: pty.backend,
-        cwd,
-        lastActivity: Date.now(),
-        clients: new Set(),
-      };
-
-      terminalSessions.set(sessionId, session);
-
-      ptyProcess.onExit(({ exitCode, signal }) => {
-        console.log(`Terminal session ${sessionId} exited with code ${exitCode}, signal ${signal}`);
-        terminalSessions.delete(sessionId);
-      });
-
-      console.log(`Created terminal session: ${sessionId} in ${cwd} using shell ${shell}`);
-      res.json({ sessionId, cols: cols || 80, rows: rows || 24, capabilities: terminalInputCapabilities });
-    } catch (error) {
-      console.error('Failed to create terminal session:', error);
-      res.status(500).json({ error: error.message || 'Failed to create terminal session' });
-    }
-  });
-
-  app.get('/api/terminal/:sessionId/stream', (req, res) => {
-    const { sessionId } = req.params;
-    const session = terminalSessions.get(sessionId);
-
-    if (!session) {
-      return res.status(404).json({ error: 'Terminal session not found' });
-    }
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-
-    const clientId = Math.random().toString(36).substring(7);
-    session.clients.add(clientId);
-    session.lastActivity = Date.now();
-
-    const runtime = typeof globalThis.Bun === 'undefined' ? 'node' : 'bun';
-    const ptyBackend = session.ptyBackend || 'unknown';
-    res.write(`data: ${JSON.stringify({ type: 'connected', runtime, ptyBackend })}\n\n`);
-
-    const heartbeatInterval = setInterval(() => {
-      try {
-
-        res.write(': heartbeat\n\n');
-      } catch (error) {
-        console.error(`Heartbeat failed for client ${clientId}:`, error);
-        clearInterval(heartbeatInterval);
-      }
-    }, 15000);
-
-    const dataHandler = (data) => {
-      try {
-        session.lastActivity = Date.now();
-        const ok = res.write(`data: ${JSON.stringify({ type: 'data', data })}\n\n`);
-        if (!ok && session.ptyProcess && typeof session.ptyProcess.pause === 'function') {
-          session.ptyProcess.pause();
-          res.once('drain', () => {
-            if (session.ptyProcess && typeof session.ptyProcess.resume === 'function') {
-              session.ptyProcess.resume();
-            }
-          });
-        }
-      } catch (error) {
-        console.error(`Error sending data to client ${clientId}:`, error);
-        cleanup();
-      }
-    };
-
-    const exitHandler = ({ exitCode, signal }) => {
-      try {
-        res.write(`data: ${JSON.stringify({ type: 'exit', exitCode, signal })}\n\n`);
-        res.end();
-      } catch (error) {
-
-      }
-      cleanup();
-    };
-
-    const dataDisposable = session.ptyProcess.onData(dataHandler);
-    const exitDisposable = session.ptyProcess.onExit(exitHandler);
-
-    const cleanup = () => {
-      clearInterval(heartbeatInterval);
-      session.clients.delete(clientId);
-
-      if (dataDisposable && typeof dataDisposable.dispose === 'function') {
-        dataDisposable.dispose();
-      }
-      if (exitDisposable && typeof exitDisposable.dispose === 'function') {
-        exitDisposable.dispose();
-      }
-
-      try {
-        res.end();
-      } catch (error) {
-
-      }
-
-      console.log(`Client ${clientId} disconnected from terminal session ${sessionId}`);
-    };
-
-    req.on('close', cleanup);
-    req.on('error', cleanup);
-
-    console.log(`Terminal connected: session=${sessionId} client=${clientId} runtime=${runtime} pty=${ptyBackend}`);
-  });
-
-  app.post('/api/terminal/:sessionId/input', express.text({ type: '*/*' }), (req, res) => {
-    const { sessionId } = req.params;
-    const session = terminalSessions.get(sessionId);
-
-    if (!session) {
-      return res.status(404).json({ error: 'Terminal session not found' });
-    }
-
-    const data = typeof req.body === 'string' ? req.body : '';
-
-    try {
-      session.ptyProcess.write(data);
-      session.lastActivity = Date.now();
-      res.json({ success: true });
-    } catch (error) {
-      console.error('Failed to write to terminal:', error);
-      res.status(500).json({ error: error.message || 'Failed to write to terminal' });
-    }
-  });
-
-  app.post('/api/terminal/:sessionId/resize', (req, res) => {
-    const { sessionId } = req.params;
-    const session = terminalSessions.get(sessionId);
-
-    if (!session) {
-      return res.status(404).json({ error: 'Terminal session not found' });
-    }
-
-    const { cols, rows } = req.body;
-    if (!cols || !rows) {
-      return res.status(400).json({ error: 'cols and rows are required' });
-    }
-
-    try {
-      session.ptyProcess.resize(cols, rows);
-      session.lastActivity = Date.now();
-      res.json({ success: true, cols, rows });
-    } catch (error) {
-      console.error('Failed to resize terminal:', error);
-      res.status(500).json({ error: error.message || 'Failed to resize terminal' });
-    }
-  });
-
-  app.delete('/api/terminal/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const session = terminalSessions.get(sessionId);
-
-    if (!session) {
-      return res.status(404).json({ error: 'Terminal session not found' });
-    }
-
-    try {
-      session.ptyProcess.kill();
-      terminalSessions.delete(sessionId);
-      console.log(`Closed terminal session: ${sessionId}`);
-      res.json({ success: true });
-    } catch (error) {
-      console.error('Failed to close terminal:', error);
-      res.status(500).json({ error: error.message || 'Failed to close terminal' });
-    }
-  });
-
-  app.post('/api/terminal/:sessionId/restart', async (req, res) => {
-    const { sessionId } = req.params;
-    const { cwd, cols, rows } = req.body;
-
-    if (!cwd) {
-      return res.status(400).json({ error: 'cwd is required' });
-    }
-
-    const existingSession = terminalSessions.get(sessionId);
-    if (existingSession) {
-      try {
-        existingSession.ptyProcess.kill();
-      } catch (error) {
-      }
-      terminalSessions.delete(sessionId);
-    }
-
-    try {
-      try {
-        const stats = await fs.promises.stat(cwd);
-        if (!stats.isDirectory()) {
-          return res.status(400).json({ error: 'Invalid working directory: not a directory' });
-        }
-      } catch (error) {
-        return res.status(400).json({ error: 'Invalid working directory: not accessible' });
-      }
-
-      const newSessionId = Math.random().toString(36).substring(2, 15) +
-                          Math.random().toString(36).substring(2, 15);
-
-      const envPath = buildAugmentedPath();
-      const resolvedEnv = sanitizeTerminalEnv({ ...process.env, PATH: envPath });
-
-      const pty = await getPtyProvider();
-      const { ptyProcess, shell } = spawnTerminalPtyWithFallback(pty, {
-        cols,
-        rows,
-        cwd,
-        env: resolvedEnv,
-      });
-
-      const session = {
-        ptyProcess,
-        ptyBackend: pty.backend,
-        cwd,
-        lastActivity: Date.now(),
-        clients: new Set(),
-      };
-
-      terminalSessions.set(newSessionId, session);
-
-      ptyProcess.onExit(({ exitCode, signal }) => {
-        console.log(`Terminal session ${newSessionId} exited with code ${exitCode}, signal ${signal}`);
-        terminalSessions.delete(newSessionId);
-      });
-
-      console.log(`Restarted terminal session: ${sessionId} -> ${newSessionId} in ${cwd} using shell ${shell}`);
-      res.json({ sessionId: newSessionId, cols: cols || 80, rows: rows || 24, capabilities: terminalInputCapabilities });
-    } catch (error) {
-      console.error('Failed to restart terminal session:', error);
-      res.status(500).json({ error: error.message || 'Failed to restart terminal session' });
-    }
-  });
-
-  app.post('/api/terminal/force-kill', (req, res) => {
-    const { sessionId, cwd } = req.body;
-    let killedCount = 0;
-
-    if (sessionId) {
-      const session = terminalSessions.get(sessionId);
-      if (session) {
-        try {
-          session.ptyProcess.kill();
-        } catch (error) {
-        }
-        terminalSessions.delete(sessionId);
-        killedCount++;
-      }
-    } else if (cwd) {
-      for (const [id, session] of terminalSessions) {
-        if (session.cwd === cwd) {
-          try {
-            session.ptyProcess.kill();
-          } catch (error) {
-          }
-          terminalSessions.delete(id);
-          killedCount++;
-        }
-      }
-    } else {
-      for (const [id, session] of terminalSessions) {
-        try {
-          session.ptyProcess.kill();
-        } catch (error) {
-        }
-        terminalSessions.delete(id);
-        killedCount++;
-      }
-    }
-
-    console.log(`Force killed ${killedCount} terminal session(s)`);
-    res.json({ success: true, killedCount });
+  const startupPipelineResult = await startupPipelineRuntime.run({
+    app,
+    server,
+    express,
+    fs,
+    path,
+    uiAuthController,
+    buildAugmentedPath,
+    searchPathFor,
+    isExecutable,
+    isRequestOriginAllowed,
+    rejectWebSocketUpgrade,
+    buildOpenCodeUrl,
+    getOpenCodeAuthHeaders,
+    globalEventHub: globalMessageStreamHub,
+    processForwardedEventPayload,
+    messageStreamWsClients: uiNotificationWsClients,
+    upstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
+    terminalHeartbeatIntervalMs: TERMINAL_INPUT_WS_HEARTBEAT_INTERVAL_MS,
+    terminalRebindWindowMs: TERMINAL_INPUT_WS_REBIND_WINDOW_MS,
+    terminalMaxRebindsPerWindow: TERMINAL_INPUT_WS_MAX_REBINDS_PER_WINDOW,
+    setupProxy,
+    scheduleOpenCodeApiDetection,
+    bootstrapOpenCodeAtStartup,
+    backendRegistry,
+    getOpenCodeLifecycleState: () => openCodeLifecycleState,
+    triggerHealthCheck,
+    triggerHealthCheck,
+    staticRoutesRuntime,
+    process,
+    crypto,
+    normalizeTunnelBootstrapTtlMs,
+    readSettingsFromDiskMigrated,
+    tunnelAuthController,
+    startTunnelWithNormalizedRequest,
+    gracefulShutdown,
+    getSignalsAttached: () => signalsAttached,
+    setSignalsAttached: (value) => {
+      signalsAttached = value;
+    },
+    syncToHmrState,
+    TUNNEL_MODE_QUICK,
+    TUNNEL_MODE_MANAGED_LOCAL,
+    TUNNEL_MODE_MANAGED_REMOTE,
+    host,
+    port,
+    startupTunnelRequest,
+    onTunnelReady,
+    tunnelRuntimeContext,
+    attachSignals,
   });
   terminalRuntime = startupPipelineResult.terminalRuntime;
   messageStreamRuntime = startupPipelineResult.messageStreamRuntime;

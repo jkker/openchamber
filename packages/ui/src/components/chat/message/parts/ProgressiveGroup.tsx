@@ -1,11 +1,11 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
 import type { TurnActivityRecord as TurnActivityPart } from '../../lib/turns/types';
-import type { ToolPart as ToolPartType } from '@opencode-ai/sdk/v2';
 import type { StreamPhase } from '../types';
 import type { ContentChangeReason } from '@/hooks/useChatAutoFollow';
 import type { ToolPopupContent } from '../types';
 import ToolPart from './ToolPart';
+import { toRenderableToolActivity, type RenderableToolPart } from '../renderable';
 import { MinDurationShineText } from './MinDurationShineText';
 import { ToolRevealOnMount } from './ToolRevealOnMount';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
@@ -43,7 +43,7 @@ interface ProgressiveGroupProps {
 
 const isActivityRunning = (activity: TurnActivityPart): boolean => {
     if (activity.kind !== 'tool') return false;
-    const part = activity.part as ToolPartType;
+    const part = activity.part as RenderableToolPart;
     const status = (part.state?.status as string) || undefined;
     const isFinalized = status === 'completed' || status === 'error' || status === 'aborted' || status === 'failed' || status === 'timeout' || status === 'cancelled';
     if (isFinalized) {
@@ -68,7 +68,7 @@ const sortPartsByTime = (parts: TurnActivityPart[]): TurnActivityPart[] => parts
  * Extract a short filename from a tool part's input (for aggregation display).
  */
 const getToolFileName = (activity: TurnActivityPart): string | null => {
-    const part = activity.part as ToolPartType;
+    const part = activity.part as RenderableToolPart;
     const state = part.state as { input?: Record<string, unknown>; metadata?: Record<string, unknown> } | undefined;
     const input = state?.input;
     const metadata = state?.metadata;
@@ -90,7 +90,7 @@ const getToolFileName = (activity: TurnActivityPart): string | null => {
 };
 
 const getToolFilePath = (activity: TurnActivityPart): string | null => {
-    const part = activity.part as ToolPartType;
+    const part = activity.part as RenderableToolPart;
     const state = part.state as { input?: Record<string, unknown>; metadata?: Record<string, unknown> } | undefined;
     const input = state?.input;
     const metadata = state?.metadata;
@@ -146,7 +146,7 @@ const formatTodoSummary = (todos: unknown[]): string | null => {
 };
 
 const getTodoSummaryFromActivity = (activity: TurnActivityPart): string | null => {
-    const part = activity.part as ToolPartType;
+    const part = activity.part as RenderableToolPart;
     const state = part.state as { input?: Record<string, unknown>; output?: unknown } | undefined;
     const input = state?.input;
     const output = state?.output;
@@ -186,7 +186,7 @@ const getTodoSummaryFromActivity = (activity: TurnActivityPart): string | null =
 };
 
 const getToolReadOffset = (activity: TurnActivityPart): number | undefined => {
-    const part = activity.part as ToolPartType;
+    const part = activity.part as RenderableToolPart;
     const state = part.state as { input?: Record<string, unknown>; metadata?: Record<string, unknown> } | undefined;
     const input = state?.input;
     const metadata = state?.metadata;
@@ -323,7 +323,7 @@ const getContextDirectoryForPath = (currentDirectory: string, absolutePath: stri
  * Get a short description for a static tool (for aggregation display).
  */
 const getToolShortDescription = (activity: TurnActivityPart): string | null => {
-    const part = activity.part as ToolPartType;
+    const part = activity.part as RenderableToolPart;
     const toolName = part.tool?.toLowerCase() ?? '';
     const state = part.state as { input?: Record<string, unknown>; metadata?: Record<string, unknown> } | undefined;
     const input = state?.input;
@@ -420,7 +420,8 @@ const ExpandableToolRow: React.FC<ExpandableToolRowProps> = ({
 
     const content = (
         <ToolPart
-            part={activity.part as ToolPartType}
+            part={activity.part as RenderableToolPart}
+            activity={toRenderableToolActivity(activity.part as RenderableToolPart)}
             isExpanded={isExpanded}
             onToggle={handleToggle}
             syntaxTheme={syntaxTheme}
@@ -527,7 +528,7 @@ const aggregateRows = (parts: TurnActivityPart[]): AggregatedRow[] => {
         }
 
         // Tool part
-        const toolPart = activity.part as ToolPartType;
+        const toolPart = activity.part as RenderableToolPart;
         const toolName = toolPart.tool?.toLowerCase() ?? '';
 
         if (isStandaloneTool(toolName)) {

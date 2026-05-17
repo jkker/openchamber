@@ -289,7 +289,9 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
         return res.status(400).json({ error: 'Provider ID is required' });
       }
 
-      const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
+      const headerDirectory = typeof req.get === 'function'
+        ? (req.get('x-openchamber-directory') || req.get('x-opencode-directory'))
+        : null;
       const queryDirectory = Array.isArray(req.query?.directory)
         ? req.query.directory[0]
         : req.query?.directory;
@@ -326,7 +328,9 @@ export const registerOpenCodeRoutes = (app, dependencies) => {
       }
 
       const scope = typeof req.query?.scope === 'string' ? req.query.scope : 'auth';
-      const headerDirectory = typeof req.get === 'function' ? req.get('x-opencode-directory') : null;
+      const headerDirectory = typeof req.get === 'function'
+        ? (req.get('x-openchamber-directory') || req.get('x-opencode-directory'))
+        : null;
       const queryDirectory = Array.isArray(req.query?.directory)
         ? req.query.directory[0]
         : req.query?.directory;

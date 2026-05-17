@@ -21,6 +21,7 @@ export interface ModelSelectionWithId {
   modelID: string;
   displayName?: string;
   variant?: string;
+  backendId?: string;
   instanceId: string;
 }
 
@@ -30,6 +31,7 @@ export interface ModelSelection {
   modelID: string;
   displayName?: string;
   variant?: string;
+  backendId?: string;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components -- Utility is tightly coupled with ModelMultiSelect
@@ -100,14 +102,8 @@ export interface ModelMultiSelectProps {
   maxModels?: number;
   /** Optional className for add model trigger button */
   addButtonClassName?: string;
-  /** Direction for the model picker popup. Multi-run launcher opens upward near the footer. */
-  dropdownSide?: 'top' | 'bottom';
-  /** Optional className for the picker popup. */
-  dropdownClassName?: string;
-  /** Optional className for the trigger/dropdown positioning container. */
-  containerClassName?: string;
-  /** Optional trigger icon override. */
-  triggerIcon?: React.ReactNode;
+  /** Backend currently being browsed in the parent UI */
+  activeBackendId?: string;
 }
 
 /**
@@ -123,10 +119,7 @@ export const ModelMultiSelect: React.FC<ModelMultiSelectProps> = ({
   showChips = true,
   maxModels,
   addButtonClassName,
-  dropdownSide = 'top',
-  dropdownClassName,
-  containerClassName,
-  triggerIcon,
+  activeBackendId,
 }) => {
   const { t } = useI18n();
   const providers = useConfigStore((state) => state.providers);
@@ -318,6 +311,7 @@ export const ModelMultiSelect: React.FC<ModelMultiSelectProps> = ({
             providerID,
             modelID,
             displayName: (model.name as string) || modelID,
+            backendId: activeBackendId,
             instanceId: generateInstanceId(),
           };
           if (isSingleSelect && selectedModels.length > 0 && onUpdate) {

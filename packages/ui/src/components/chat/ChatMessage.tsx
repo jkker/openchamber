@@ -1,6 +1,6 @@
 import React from 'react';
-import type { Message, Part } from '@opencode-ai/sdk/v2';
 import { useShallow } from 'zustand/react/shallow';
+import type { HarnessMessageRecord } from '@openchamber/harness-contracts';
 
 import { defaultCodeDark, defaultCodeLight } from '@/lib/codeTheme';
 import { MessageFreshnessDetector } from '@/lib/messageFreshness';
@@ -25,12 +25,21 @@ import { filterVisibleParts, normalizeParts } from './message/partUtils';
 import { normalizeUserDisplayParts } from './message/normalizeUserDisplayParts';
 import { flattenAssistantTextParts } from '@/lib/messages/messageText';
 import { isLikelyProviderAuthFailure, PROVIDER_AUTH_FAILURE_MESSAGE } from '@/lib/messages/providerAuthError';
+import { formatModelDisplayName } from '@/lib/modelDisplayName';
 import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 import type { TurnGroupingContext } from './lib/turns/types';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { FadeInOnReveal } from './message/FadeInOnReveal';
 import { streamPerfCount } from '@/stores/utils/streamDebug';
 import { areOptionalRenderRelevantMessagesEqual, areRenderRelevantMessagesEqual, areRelevantTurnGroupingContextsEqual } from './message/renderCompare';
+import {
+    getRenderableMessageProp,
+    resolveMessageAttribution,
+    resolveUserHeaderAttribution,
+    toRenderableMessageRecord,
+    type RenderableMessageRecord,
+    type RenderablePart,
+} from './message/renderable';
 
 const ToolOutputDialog = lazyWithChunkRecovery(() => import('./message/ToolOutputDialog'));
 
@@ -104,26 +113,10 @@ function useStickyDisplayValue<T>(value: T | null | undefined): T | null | undef
     return value ?? stickyValue;
 }
 
-const getMessageInfoProp = (info: unknown, key: string): unknown => {
-    if (typeof info === 'object' && info !== null) {
-        return (info as Record<string, unknown>)[key];
-    }
-    return undefined;
-};
-
 interface ChatMessageProps {
-    message: {
-        info: Message;
-        parts: Part[];
-    };
-    previousMessage?: {
-        info: Message;
-        parts: Part[];
-    };
-    nextMessage?: {
-        info: Message;
-        parts: Part[];
-    };
+    message: RenderableMessageRecord | HarnessMessageRecord;
+    previousMessage?: RenderableMessageRecord | HarnessMessageRecord;
+    nextMessage?: RenderableMessageRecord | HarnessMessageRecord;
     onContentChange?: (reason?: ContentChangeReason) => void;
     animationHandlers?: AnimationHandlers;
     scrollToBottom?: () => void;
@@ -136,9 +129,9 @@ interface ChatMessageProps {
 }
 
 const ChatMessage: React.FC<ChatMessageProps> = ({
-    message,
-    previousMessage,
-    nextMessage,
+    message: inputMessage,
+    previousMessage: inputPreviousMessage,
+    nextMessage: inputNextMessage,
     onContentChange,
     animationHandlers,
     turnGroupingContext,
@@ -148,6 +141,10 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     animateUserOnMount = false,
     onUserAnimationConsumed,
 }) => {
+    const message = React.useMemo(() => toRenderableMessageRecord(inputMessage), [inputMessage]);
+    const previousMessage = React.useMemo(() => inputPreviousMessage ? toRenderableMessageRecord(inputPreviousMessage) : undefined, [inputPreviousMessage]);
+    const nextMessage = React.useMemo(() => inputNextMessage ? toRenderableMessageRecord(inputNextMessage) : undefined, [inputNextMessage]);
+
     const { isMobile, isTablet, hasTouchInput } = useDeviceInfo();
     const alwaysShowMessageActions = isMobile || isTablet;
     const { currentTheme } = useThemeSystem();
@@ -165,7 +162,19 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
         streamPerfCount('ui.chat_message.render.streaming');
     }
 
-    const providers = useConfigStore.getState().providers;
+    const providers = useConfigStore(
+        useShallow((state) => {
+            if (!Array.isArray(state.virtualProviders) || state.virtualProviders.length === 0) {
+                return state.providers;
+            }
+
+            const virtualProviderIds = new Set(state.virtualProviders.map((provider) => provider.id));
+            return [
+                ...state.virtualProviders,
+                ...state.providers.filter((provider) => !virtualProviderIds.has(provider.id)),
+            ];
+        })
+    );
     const { showReasoningTraces, stickyUserHeader, chatRenderMode, showExpandedBashTools, showExpandedEditTools } = useUIStore(
         useShallow((state) => ({
             showReasoningTraces: state.showReasoningTraces,
@@ -229,36 +238,14 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             return null;
         }
 
-        const clientRole = getMessageInfoProp(previousMessage.info, 'clientRole');
-        const role = getMessageInfoProp(previousMessage.info, 'role');
+        const clientRole = getRenderableMessageProp(previousMessage.info, 'clientRole');
+        const role = getRenderableMessageProp(previousMessage.info, 'role');
         const previousRole = typeof clientRole === 'string' ? clientRole : (typeof role === 'string' ? role : undefined);
         if (previousRole !== 'user') {
             return null;
         }
 
-        const mode = getMessageInfoProp(previousMessage.info, 'mode');
-        const agent = getMessageInfoProp(previousMessage.info, 'agent');
-        const providerID = getMessageInfoProp(previousMessage.info, 'providerID');
-        const modelID = getMessageInfoProp(previousMessage.info, 'modelID');
-        const variant = getMessageInfoProp(previousMessage.info, 'variant');
-        const resolvedAgent =
-            typeof mode === 'string' && mode.trim().length > 0
-                ? mode
-                : (typeof agent === 'string' && agent.trim().length > 0 ? agent : undefined);
-        const resolvedProvider = typeof providerID === 'string' && providerID.trim().length > 0 ? providerID : undefined;
-        const resolvedModel = typeof modelID === 'string' && modelID.trim().length > 0 ? modelID : undefined;
-        const resolvedVariant = typeof variant === 'string' && variant.trim().length > 0 ? variant : undefined;
-
-        if (!resolvedAgent && !resolvedProvider && !resolvedModel && !resolvedVariant) {
-            return null;
-        }
-
-        return {
-            agentName: resolvedAgent,
-            providerId: resolvedProvider,
-            modelId: resolvedModel,
-            variant: resolvedVariant,
-        };
+        return resolveUserHeaderAttribution(previousMessage.info);
     }, [isUser, previousMessage]);
 
     const previousIsModeSwitchMessage = React.useMemo(() => {
@@ -288,14 +275,9 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             return previousUserMetadata.agentName;
         }
 
-        const messageMode = getMessageInfoProp(message.info, 'mode');
-        if (typeof messageMode === 'string' && messageMode.trim().length > 0) {
-            return messageMode;
-        }
-
-        const messageAgent = getMessageInfoProp(message.info, 'agent');
-        if (typeof messageAgent === 'string' && messageAgent.trim().length > 0) {
-            return messageAgent;
+        const messageAttribution = resolveMessageAttribution(message.info);
+        if (messageAttribution.agentName) {
+            return messageAttribution.agentName;
         }
 
         if (previousUserMetadata?.agentName) {
@@ -313,8 +295,9 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
         return savedSessionAgentSelection ?? undefined;
     }, [isUser, message.info, previousIsModeSwitchMessage, previousUserMetadata, sessionId, currentContextAgent, savedSessionAgentSelection]);
 
-    const messageProviderID = !isUser ? getMessageInfoProp(message.info, 'providerID') : null;
-    const messageModelID = !isUser ? getMessageInfoProp(message.info, 'modelID') : null;
+    const currentMessageAttribution = React.useMemo(() => resolveMessageAttribution(message.info), [message.info]);
+    const messageProviderID = !isUser ? currentMessageAttribution.providerId : null;
+    const messageModelID = !isUser ? currentMessageAttribution.modelId : null;
 
     const contextModelSelection = React.useMemo(() => {
         if (isUser || !sessionId) return null;
@@ -370,8 +353,16 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             }
         }
 
+        if (currentMessageAttribution.modelName) {
+            return currentMessageAttribution.modelName;
+        }
+
+        if (modelID) {
+            return formatModelDisplayName(modelID) ?? modelID;
+        }
+
         return undefined;
-    }, [isUser, providerID, modelID, providers]);
+    }, [currentMessageAttribution.modelName, isUser, providerID, modelID, providers]);
 
     const modelHasVariants = React.useMemo(() => {
         if (isUser) return false;
@@ -456,13 +447,13 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
     const turnActivityToolParts = React.useMemo(() => {
         if (isUser) {
-            return [] as Part[];
+            return [] as RenderablePart[];
         }
         const records = turnGroupingContext?.activityParts ?? [];
         return records
             .filter((record) => record.kind === 'tool')
             .map((record) => record.part)
-            .filter((part): part is Part => part.type === 'tool');
+            .filter((part): part is RenderablePart => part.type === 'tool');
     }, [isUser, turnGroupingContext?.activityParts]);
 
     const defaultOpenToolIds = React.useMemo(() => {
@@ -656,7 +647,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
     const headerVariantRaw = !isUser ? (turnGroupingContext?.userMessageVariant ?? previousUserMetadata?.variant) : undefined;
 
-    const headerVariant = !isUser && modelHasVariants ? (headerVariantRaw ?? 'Default') : undefined;
+    const headerVariant = !isUser ? (headerVariantRaw ?? (modelHasVariants ? 'Default' : undefined)) : undefined;
 
     // Summary body removed — flat rendering means text is always inline.
 
@@ -707,7 +698,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     const messageTextContent = React.useMemo(() => {
         if (isUser) {
             const shellOutputs = displayParts
-                .filter((part): part is Part & { type: 'text'; shellAction?: { output?: unknown } } => part.type === 'text')
+                .filter((part): part is RenderablePart & { type: 'text'; shellAction?: { output?: unknown } } => part.type === 'text')
                 .map((part) => {
                     const output = part.shellAction?.output;
                     return typeof output === 'string' ? output.trim() : '';
@@ -719,7 +710,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             }
 
             const shellCommands = displayParts
-                .filter((part): part is Part & { type: 'text'; shellAction?: { command?: unknown } } => part.type === 'text')
+                .filter((part): part is RenderablePart & { type: 'text'; shellAction?: { command?: unknown } } => part.type === 'text')
                 .map((part) => {
                     const command = part.shellAction?.command;
                     return typeof command === 'string' ? command.trim() : '';
@@ -731,7 +722,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
             }
 
             const textParts = displayParts
-                .filter((part): part is Part & { type: 'text'; text?: string; content?: string } => part.type === 'text')
+                .filter((part): part is RenderablePart & { type: 'text'; text?: string; content?: string } => part.type === 'text')
                 .map((part) => {
                     const text = part.text || part.content || '';
                     return text.trim();
@@ -867,7 +858,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
         setImagePreviewOpen(open);
     }, [setImagePreviewOpen]);
 
-    const isAnimationSettled = Boolean(getMessageInfoProp(message.info, 'animationSettled'));
+    const isAnimationSettled = Boolean(getRenderableMessageProp(message.info, 'animationSettled'));
     const isStreamingPhase = streamPhase === 'streaming' || streamPhase === 'cooldown';
 
     if (isStreamingPhase) {
@@ -1091,7 +1082,8 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                             />
                                         ) : null}
                                     </div>
-                                 </div>
+                                    {showStickyInlineHoverRow ? <div aria-hidden="true" className="pointer-events-none absolute left-0 right-0 top-full h-11" /> : null}
+                                </div>
                             </FadeInOnReveal>
                         )
                     ) : (
@@ -1158,16 +1150,16 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
 
 export default React.memo(ChatMessage, (prev, next) => {
     return areRenderRelevantMessagesEqual(
-        { info: prev.message.info, parts: prev.message.parts },
-        { info: next.message.info, parts: next.message.parts }
+        toRenderableMessageRecord(prev.message),
+        toRenderableMessageRecord(next.message)
     )
         && areOptionalRenderRelevantMessagesEqual(
-            prev.previousMessage ? { info: prev.previousMessage.info, parts: prev.previousMessage.parts } : undefined,
-            next.previousMessage ? { info: next.previousMessage.info, parts: next.previousMessage.parts } : undefined
+            prev.previousMessage ? toRenderableMessageRecord(prev.previousMessage) : undefined,
+            next.previousMessage ? toRenderableMessageRecord(next.previousMessage) : undefined
         )
         && areOptionalRenderRelevantMessagesEqual(
-            prev.nextMessage ? { info: prev.nextMessage.info, parts: prev.nextMessage.parts } : undefined,
-            next.nextMessage ? { info: next.nextMessage.info, parts: next.nextMessage.parts } : undefined
+            prev.nextMessage ? toRenderableMessageRecord(prev.nextMessage) : undefined,
+            next.nextMessage ? toRenderableMessageRecord(next.nextMessage) : undefined
         )
         && prev.isInActiveTurn === next.isInActiveTurn
         && prev.activeStreamingPhase === next.activeStreamingPhase
@@ -1177,7 +1169,7 @@ export default React.memo(ChatMessage, (prev, next) => {
         && areRelevantTurnGroupingContextsEqual(
             prev.turnGroupingContext,
             next.turnGroupingContext,
-            prev.message.info.id,
-            deriveMessageRole(prev.message.info).isUser
+            toRenderableMessageRecord(prev.message).info.id,
+            deriveMessageRole(toRenderableMessageRecord(prev.message).info).isUser
         );
 });

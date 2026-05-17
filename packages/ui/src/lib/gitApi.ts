@@ -402,9 +402,14 @@ const runStructuredGenerationInActiveSession = async ({
 
   requestChatForceScrollBottom(generationSession.sessionId);
 
-  const response = await opencodeClient.withDirectory(directory, async () => {
-    return opencodeClient.getApiClient().session.prompt({
-      sessionID: generationSession.sessionId,
+  const baseUrl = opencodeClient.getBaseUrl().replace(/\/+$/, '');
+  const response = await fetch(`${baseUrl}/openchamber/harness/session/${encodeURIComponent(generationSession.sessionId)}/prompt`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+    },
+    body: JSON.stringify({
       ...(trimmedDirectory.length > 0 ? { directory: trimmedDirectory } : {}),
       model: {
         providerID: generationSession.providerID,
@@ -412,26 +417,33 @@ const runStructuredGenerationInActiveSession = async ({
       },
       ...(generationSession.agent ? { agent: generationSession.agent } : {}),
       parts: promptParts,
-    });
+    }),
   });
 
-  const responseError = response?.error as { message?: string } | undefined;
-  if (!response?.data) {
-    throw new Error(responseError?.message || `Failed to generate ${kind} output`);
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(() => null) as { error?: string } | null;
+    throw new Error(errorPayload?.error || `Failed to generate ${kind} output`);
   }
 
-  const info = response.data.info as { finish?: string; error?: unknown };
-  const assistantText = extractAssistantText(response);
-  const parsedOutput = extractJsonObject(assistantText);
-  if (!parsedOutput) {
-    console.error('[git-generation][browser] invalid JSON output', {
+  const data = await response.json().catch(() => null) as {
+    info?: { finish?: string; structured_output?: unknown; structured?: unknown; error?: unknown };
+    parts?: unknown[];
+  } | null;
+
+  if (!data) {
+    throw new Error(`Failed to generate ${kind} output`);
+  }
+
+  const info = data.info;
+  const structuredOutput = info?.structured_output || info?.structured;
+  if (!structuredOutput || typeof structuredOutput !== 'object' || Array.isArray(structuredOutput)) {
+    console.error('[git-generation][browser] invalid structured output', {
       kind,
       sessionId: generationSession.sessionId,
       elapsedMs: Date.now() - requestStartedAt,
       finish: info?.finish,
-      assistantText,
-      messageInfo: response.data.info,
-      messageParts: response.data.parts,
+      messageInfo: data.info,
+      messageParts: data.parts,
     });
     throw new Error('No JSON output returned by session');
   }

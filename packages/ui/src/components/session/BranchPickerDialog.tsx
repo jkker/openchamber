@@ -19,7 +19,8 @@ import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
 import { getWorktreeSetupCommands } from '@/lib/openchamberConfig';
 import { sessionEvents } from '@/lib/sessionEvents';
 import { useSessions } from '@/sync/sync-context';
-import { getSessionParentId } from './sidebar/types';
+import { getCompatibleSessionParentId } from '@/sync/compat';
+import { useI18n } from '@/lib/i18n';
 
 export interface BranchPickerProject {
   id: string;
@@ -237,7 +238,7 @@ export function BranchPickerDialog({ open, onOpenChange, project }: BranchPicker
 
     const findSubsessions = (parentIds: Set<string>): typeof sessions => {
       const subsessions = sessions.filter((session) => {
-        const parentID = getSessionParentId(session);
+        const parentID = getCompatibleSessionParentId(session);
         if (!parentID) {
           return false;
         }

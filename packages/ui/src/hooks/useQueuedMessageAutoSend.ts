@@ -1,5 +1,6 @@
 import React from 'react';
 import { useMessageQueueStore, type QueuedMessage } from '@/stores/messageQueueStore';
+import { toOpenCodeHarnessRunConfig } from '@/lib/harness/client';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import { useConfigStore } from '@/stores/useConfigStore';
@@ -117,7 +118,8 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
       }
 
       // Use send config captured at queue time; fall back to current config
-      const captured = payload.sendConfig;
+      const captured = queueSnapshot[0]?.sendConfig;
+      const capturedRunConfig = queueSnapshot[0]?.runConfig;
       const resolved = captured?.providerID && captured?.modelID
         ? captured
         : resolveSessionSendConfig(sessionId);
@@ -130,13 +132,15 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
       try {
         await useSessionUIStore.getState().sendMessage(
           payload.primaryText,
-          resolved.providerID,
-          resolved.modelID,
-          resolved.agent,
+          capturedRunConfig ?? toOpenCodeHarnessRunConfig({
+            providerID: resolved.providerID,
+            modelID: resolved.modelID,
+            agent: resolved.agent,
+            variant: resolved.variant,
+          }),
           payload.primaryAttachments,
           payload.agentMentionName,
-          undefined,
-          resolved.variant,
+          payload.additionalParts,
           'normal'
         );
 

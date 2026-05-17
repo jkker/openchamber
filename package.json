@@ -116,6 +116,7 @@
     "@heroui/scroll-shadow": "^2.3.18",
     "@heroui/system": "^2.4.23",
     "@heroui/theme": "^2.4.23",
+    "@iarna/toml": "^2.2.5",
     "@ibm/plex": "^6.4.1",
     "@lezer/highlight": "^1.2.3",
     "@octokit/rest": "^22.0.1",

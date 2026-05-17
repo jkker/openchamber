@@ -24,15 +24,26 @@ import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
 import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
 import { useWindowTitle } from '@/hooks/useWindowTitle';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { useBackendsStore } from '@/stores/useBackendsStore';
 import { hasModifier } from '@/lib/utils';
-import { authenticateWithBiometrics, getBiometricStatus, isDesktopLocalOriginActive, isDesktopShell, isMobileRuntime, isNativeMobileApp, isTauriShell } from '@/lib/desktop';
-import { OnboardingScreen } from '@/components/onboarding/OnboardingScreen';
-import { useSessionStore } from '@/stores/useSessionStore';
+import { isDesktopLocalOriginActive, isDesktopShell, isTauriShell, restartDesktopApp } from '@/lib/desktop';
+import {
+  getInjectedBootOutcome,
+  getBootInjectionStatus,
+  resolveDesktopBootView,
+  canDismissInitialLoading,
+  shouldRestartDesktopBootFlow,
+  type BootInjectionStatus,
+  type DesktopBootView,
+} from '@/lib/desktopBoot';
+import type { RecoveryVariant } from '@/components/onboarding/DesktopConnectionRecovery';
+import { useSessionUIStore } from '@/sync/session-ui-store';
+import { useSelectionStore } from '@/sync/selection-store';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useInstancesStore } from '@/stores/useInstancesStore';
 import { opencodeClient } from '@/lib/opencode/client';
-import { SyncProvider } from '@/sync/sync-context';
-import { useSync } from '@/sync/use-sync';
+import { SyncProvider, useSessions } from '@/sync/sync-context';
+import { getAllSyncSessions } from '@/sync/sync-refs';
 import { ConfigUpdateOverlay } from '@/components/ui/ConfigUpdateOverlay';
 import { AboutDialog } from '@/components/ui/AboutDialog';
 import { RuntimeAPIProvider } from '@/contexts/RuntimeAPIProvider';
@@ -175,6 +186,11 @@ function App({ apis }: AppProps) {
   const agentsCount = useConfigStore((state) => state.agents.length);
   const loadProviders = useConfigStore((state) => state.loadProviders);
   const loadAgents = useConfigStore((state) => state.loadAgents);
+  const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
+  const draftBackendId = useSelectionStore((state) => state.draftBackendId);
+  const lastUsedBackendId = useSelectionStore((state) => state.lastUsedBackendId);
+  const sessionBackendSelections = useSelectionStore((state) => state.sessionBackendSelections);
+  const defaultBackendId = useBackendsStore((state) => state.defaultBackendId);
   const error = useSessionUIStore((s) => s.error);
   const clearError = useSessionUIStore((s) => s.clearError);
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
@@ -196,11 +212,29 @@ function App({ apis }: AppProps) {
   const biometricLockEnabled = useUIStore((state) => state.biometricLockEnabled);
   const setBiometricLockEnabled = useUIStore((state) => state.setBiometricLockEnabled);
   const appReadyDispatchedRef = React.useRef(false);
-  const pendingGrantToastIdsRef = React.useRef<Map<string, string | number>>(new Map());
-  const pendingGrantActionBusyRef = React.useRef<Set<string>>(new Set());
-  const pendingGrantPollingErrorShownRef = React.useRef(false);
-  const [biometricRequired, setBiometricRequired] = React.useState(false);
-  const [biometricBusy, setBiometricBusy] = React.useState(false);
+  const embeddedSessionChat = React.useMemo<EmbeddedSessionChatConfig | null>(() => readEmbeddedSessionChatConfig(), []);
+  const embeddedBackgroundWorkEnabled = !embeddedSessionChat || isEmbeddedVisible;
+  const activeBackendId = React.useMemo(() => {
+    if (currentSessionId) {
+      const selectedBackendId = sessionBackendSelections.get(currentSessionId);
+      const liveSession = getAllSyncSessions().find((session) => session.id === currentSessionId) as { backendId?: string | null } | undefined;
+      return selectedBackendId || liveSession?.backendId?.trim() || defaultBackendId || 'opencode';
+    }
+    return draftBackendId || lastUsedBackendId || defaultBackendId || 'opencode';
+  }, [currentSessionId, defaultBackendId, draftBackendId, lastUsedBackendId, sessionBackendSelections]);
+  const requiresOpenCodeConfig = activeBackendId === 'opencode';
+  const isMcpOAuthCallback = React.useMemo(() => isMcpOAuthCallbackPath(), []);
+
+  React.useEffect(() => {
+    setStreamPerfEnabled(showMemoryDebug);
+    return () => {
+      setStreamPerfEnabled(false);
+    };
+  }, [showMemoryDebug]);
+
+  React.useEffect(() => {
+    applyMobileKeyboardMode(mobileKeyboardMode);
+  }, [mobileKeyboardMode]);
 
   React.useEffect(() => {
     setIsVSCodeRuntime(apis.runtime.isVSCode);
@@ -380,9 +414,12 @@ function App({ apis }: AppProps) {
         return;
       }
 
-      if (!cancelled) {
-        setConnectionCheckCompleted(false);
-      }
+  // Startup recovery: poll until providers AND agents are loaded.
+  // loadProviders/loadAgents resolve normally even on failure (errors swallowed),
+  // so a reactive effect can't detect failure — we need an interval.
+  React.useEffect(() => {
+    if (isVSCodeRuntime || !isConnected || !requiresOpenCodeConfig) return;
+    if (providersCount > 0 && agentsCount > 0) return;
 
       await initializeApp();
 
@@ -391,12 +428,14 @@ function App({ apis }: AppProps) {
       }
     };
 
-    void init();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [initializeApp, isVSCodeRuntime]);
+    void attempt();
+    const id = setInterval(() => {
+      if (!active) return;
+      if (++retries >= MAX_RETRIES) { clearInterval(id); return; }
+      void attempt();
+    }, 2000);
+    return () => { active = false; clearInterval(id); };
+  }, [agentsCount, isConnected, isVSCodeRuntime, loadAgents, loadProviders, providersCount, requiresOpenCodeConfig]);
 
   React.useEffect(() => {
     if (isSwitchingDirectory) {

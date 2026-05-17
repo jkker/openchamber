@@ -19,10 +19,11 @@ const cleanReasoningText = (text: string): string => {
         return '';
     }
 
+    // Strip leading blockquote markers ("> ") but preserve blank lines
+    // so markdown paragraph breaks and structure are kept intact.
     return text
         .split('\n')
         .map((line: string) => line.replace(/^>\s?/, '').trimEnd())
-        .filter((line: string) => line.trim().length > 0)
         .join('\n')
         .trim();
 };
@@ -229,19 +230,22 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                     )}
                 </div>
 
-                <div className="flex items-center gap-1 flex-1 min-w-0 typography-meta" style={{ color: 'var(--tools-description)' }}>
-                    {!isStreaming && !isExpanded && summary ? (
-                        <span
-                            className="min-w-0 truncate typography-meta"
-                            style={{ color: 'var(--tools-description)', opacity: 0.8 }}
-                            title={summary}
-                        >
-                            {summary}
-                        </span>
-                    ) : (
-                        <span className="min-w-0 flex-1" />
-                    )}
-                </div>
+                {(summary || (showDuration && typeof timeStart === 'number')) ? (
+                    <div className="flex items-center gap-1 flex-1 min-w-0 typography-meta text-muted-foreground/70">
+                        {summary ? <span className="flex-1 min-w-0 truncate [&_p]:inline [&_*]:inline"><MarkdownRenderer content={summary} messageId={blockId} isAnimated={false} isStreaming={false} variant="reasoning" /></span> : null}
+                        {showDuration && typeof timeStart === 'number' ? (
+                            <span className="relative flex-shrink-0 tabular-nums text-right">
+                                <span className="text-muted-foreground/80 transition-opacity duration-150">
+                                    <LiveDuration
+                                        start={timeStart}
+                                        end={timeEnd}
+                                        active={typeof timeEnd !== 'number'}
+                                    />
+                                </span>
+                            </span>
+                        ) : null}
+                    </div>
+                ) : null}
             </div>
 
             {/* Expanded content — keep mounted so auto-collapse can animate smoothly. */}

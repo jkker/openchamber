@@ -1,10 +1,27 @@
 import React from 'react';
 import { Textarea } from '@/components/ui/textarea';
+import {
+    RiAddCircleLine,
+    RiAiAgentLine,
+    RiAttachment2,
+    RiCloseLine,
+    RiCommandLine,
+    RiExternalLinkLine,
+    RiFolderLine,
+    RiFullscreenLine,
+    RiGitPullRequestLine,
+    RiShieldCheckLine,
+    RiShieldFlashLine,
+    RiShieldUserLine,
+    RiGithubLine,
+    RiSendPlane2Line,
+} from '@remixicon/react';
 import { BrowserVoiceButton } from '@/components/voice';
 // sessionStore removed — currentSessionId comes from useSessionUIStore
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useMessageQueueStore, type QueuedMessage } from '@/stores/messageQueueStore';
+import { toOpenCodeHarnessRunConfig } from '@/lib/harness/client';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import { useInputStore } from '@/sync/input-store';
@@ -60,11 +77,13 @@ import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { createWorktreeDraft } from '@/lib/worktreeSessionCreator';
 import { buildSessionTargetOptions } from '@/sync/session-worktree-contract';
 import { usePermissionStore } from '@/stores/permissionStore';
-import {
-    collectDesktopDroppedPaths,
-    normalizeDesktopDroppedPath,
-    readDesktopDroppedFile,
-} from '@/lib/desktopDroppedFiles';
+import type { PermissionLevel } from '@/stores/utils/permissionAutoAccept';
+import { getAllSyncSessions } from '@/sync/sync-refs';
+import { extractGitChangedFiles } from './changedFiles';
+import { useI18n } from '@/lib/i18n';
+import { fetchResponseStyleInstruction } from '@/lib/responseStyle';
+import { wrapSystemReminder } from '@/lib/systemReminder';
+import { getSyncMessages } from '@/sync/sync-refs';
 
 const MAX_VISIBLE_TEXTAREA_LINES = 8;
 const EMPTY_QUEUE: QueuedMessage[] = [];
@@ -128,6 +147,8 @@ const getRevertedPreview = (parts: Part[], fallback: string): string => {
 };
 
 const FILE_URI_PREFIX = 'file://';
+const OPENCODE_PERMISSION_CYCLE: PermissionLevel[] = ['manual', 'auto-accept'];
+const CODEX_PERMISSION_CYCLE: PermissionLevel[] = ['manual', 'auto-accept', 'full-access'];
 
 const encodeFilePath = (filepath: string): string => {
     let normalized = filepath.replace(/\\/g, '/');
@@ -548,37 +569,53 @@ const ComposerAttachmentControls = React.memo(function ComposerAttachmentControl
     && prev.onOpenSettings === next.onOpenSettings
 ));
 
+const PERMISSION_STATE_CONFIG = {
+    manual: {
+        icon: RiShieldUserLine,
+        color: undefined as string | undefined,
+        label: 'Manual approval',
+        tooltip: 'Permissions: manual',
+    },
+    'auto-accept': {
+        icon: RiShieldCheckLine,
+        color: 'var(--status-info)',
+        label: 'Auto-accept permissions',
+        tooltip: 'Permissions: auto-accept',
+    },
+    'full-access': {
+        icon: RiShieldFlashLine,
+        color: 'var(--status-warning)',
+        label: 'Full access (no sandbox)',
+        tooltip: 'Permissions: full access',
+    },
+} as const;
+
 type PermissionAutoAcceptButtonProps = {
     footerIconButtonClass: string;
     iconSizeClass: string;
     permissionScopeSessionId: string | null;
-    permissionAutoAcceptEnabled: boolean;
-    handlePermissionAutoAcceptToggle: () => void;
+    permissionLevel: PermissionLevel;
+    handlePermissionLevelCycle: () => void;
     withTooltip?: boolean;
 };
 
 const PermissionAutoAcceptButton = React.memo(function PermissionAutoAcceptButton(props: PermissionAutoAcceptButtonProps) {
-    const { t } = useI18n();
     const {
         footerIconButtonClass,
         iconSizeClass,
         permissionScopeSessionId,
-        permissionAutoAcceptEnabled,
-        handlePermissionAutoAcceptToggle,
+        permissionLevel,
+        handlePermissionLevelCycle,
         withTooltip = false,
     } = props;
 
-    const ariaLabel = permissionAutoAcceptEnabled
-        ? t('chat.chatInput.permissionAutoAccept.disable')
-        : t('chat.chatInput.permissionAutoAccept.enable');
-    const tooltipLabel = permissionAutoAcceptEnabled
-        ? t('chat.chatInput.permissionAutoAccept.on')
-        : t('chat.chatInput.permissionAutoAccept.off');
+    const config = PERMISSION_STATE_CONFIG[permissionLevel];
+    const Icon = config.icon;
 
     const button = (
         <button
             type="button"
-            onClick={handlePermissionAutoAcceptToggle}
+            onClick={handlePermissionLevelCycle}
             className={cn(
                 footerIconButtonClass,
                 'rounded-md hover:bg-transparent',
@@ -593,15 +630,11 @@ const PermissionAutoAcceptButton = React.memo(function PermissionAutoAcceptButto
                     event.stopPropagation();
                 }
             }}
-            aria-pressed={permissionAutoAcceptEnabled}
-            aria-label={ariaLabel}
-            title={ariaLabel}
+            aria-pressed={permissionLevel !== 'manual'}
+            aria-label={config.label}
+            title={config.label}
         >
-            {permissionAutoAcceptEnabled ? (
-                <Icon name="shield-check" className={cn(iconSizeClass)} style={{ color: 'var(--status-info)' }} />
-            ) : (
-                <Icon name="shield-user" className={cn(iconSizeClass)} />
-            )}
+            <Icon className={cn(iconSizeClass)} style={config.color ? { color: config.color } : undefined} />
         </button>
     );
 
@@ -615,7 +648,7 @@ const PermissionAutoAcceptButton = React.memo(function PermissionAutoAcceptButto
                 {button}
             </TooltipTrigger>
             <TooltipContent side="top" sideOffset={8}>
-                {tooltipLabel}
+                {config.tooltip}
             </TooltipContent>
         </Tooltip>
     );
@@ -982,7 +1015,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
         currentDirectory ? state.directories.get(currentDirectory)?.status ?? null : null,
     );
     const [showAbortStatus, setShowAbortStatus] = React.useState(false);
-    const setSessionAutoAccept = usePermissionStore((state) => state.setSessionAutoAccept);
+    const setSessionPermissionLevel = usePermissionStore((state) => state.setSessionPermissionLevel);
     const composerHighlightRef = React.useRef<HTMLDivElement | null>(null);
 
     const isDesktopExpanded = isExpandedInput && !isMobile;
@@ -1462,6 +1495,13 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
                 agent: currentAgentName ?? undefined,
                 variant: currentVariant ?? undefined,
             } : undefined,
+            runConfig: currentProviderId && currentModelId ? toOpenCodeHarnessRunConfig({
+                backendId: useSelectionStore.getState().getSessionBackendSelection(currentSessionId) ?? undefined,
+                providerID: currentProviderId,
+                modelID: currentModelId,
+                agent: currentAgentName ?? undefined,
+                variant: currentVariant ?? undefined,
+            }) : undefined,
         });
 
         // Clear input and attachments
@@ -3450,24 +3490,33 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
     const iconButtonBaseClass = 'flex cursor-pointer items-center justify-center text-foreground transition-none outline-none focus:outline-none flex-shrink-0 disabled:cursor-not-allowed';
     const footerIconButtonClass = cn(iconButtonBaseClass, buttonSizeClass);
     const permissionScopeSessionId = currentSessionId ?? currentManagementSessionId;
-    const permissionAutoAcceptEnabled = usePermissionStore((state) => {
+    const permissionLevel = usePermissionStore((state) => {
         if (!permissionScopeSessionId) {
-            return false;
+            return 'manual' as PermissionLevel;
         }
-        return state.isSessionAutoAccepting(permissionScopeSessionId);
+        return state.getSessionPermissionLevel(permissionScopeSessionId);
     });
 
-    const handlePermissionAutoAcceptToggle = React.useCallback(() => {
+    const isCodexSession = React.useMemo(() => {
+        if (!permissionScopeSessionId) return false;
+        const sessions = getAllSyncSessions();
+        const session = sessions.find((s) => s.id === permissionScopeSessionId);
+        return (session as { backendId?: string | null } | undefined)?.backendId === 'codex';
+    }, [permissionScopeSessionId]);
+
+    const handlePermissionLevelCycle = React.useCallback(() => {
         if (!permissionScopeSessionId) {
             toast.error(t('chat.chatInput.toast.openSessionFirst'));
             return;
         }
 
-        const nextEnabled = !permissionAutoAcceptEnabled;
-        setSessionAutoAccept(permissionScopeSessionId, nextEnabled).catch(() => {
-            toast.error(t('chat.chatInput.toast.togglePermissionAutoAcceptFailed'));
+        const cycle = isCodexSession ? CODEX_PERMISSION_CYCLE : OPENCODE_PERMISSION_CYCLE;
+        const currentIndex = cycle.indexOf(permissionLevel);
+        const nextLevel = cycle[(currentIndex + 1) % cycle.length];
+        setSessionPermissionLevel(permissionScopeSessionId, nextLevel).catch(() => {
+            toast.error('Failed to update permission level');
         });
-    }, [permissionAutoAcceptEnabled, permissionScopeSessionId, setSessionAutoAccept, t]);
+    }, [permissionLevel, isCodexSession, permissionScopeSessionId, setSessionPermissionLevel, t]);
 
     React.useEffect(() => {
         const pendingAbortBanner = Boolean(abortPromptSessionId) && abortPromptSessionId === currentSessionId;
@@ -3976,9 +4025,36 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
                         {isMobile ? (
                             <>
                                 <div className="flex w-full items-center justify-between gap-x-1.5">
-                                    {showMobileKeyboardTools && (
-                                        <div className="flex items-center gap-x-1">
-                                            {attachmentsControls}
+                                    <div className="flex items-center gap-x-1.5">
+                                        <ComposerAttachmentControls
+                                            isMobile={isMobile}
+                                            isVSCode={isVSCode}
+                                            footerIconButtonClass={footerIconButtonClass}
+                                            iconSizeClass={iconSizeClass}
+                                            fileInputRef={fileInputRef}
+                                            handleLocalFileSelect={handleLocalFileSelect}
+                                            handlePickLocalFiles={handlePickLocalFiles}
+                                            handleOpenCommandMenu={handleOpenCommandMenu}
+                                            openIssuePicker={openIssuePicker}
+                                            openPrPicker={openPrPicker}
+                                            onOpenSettings={onOpenSettings}
+                                        />
+                                        <PermissionAutoAcceptButton
+                                            footerIconButtonClass={footerIconButtonClass}
+                                            iconSizeClass={iconSizeClass}
+                                            permissionScopeSessionId={permissionScopeSessionId}
+                                            permissionLevel={permissionLevel}
+                                            handlePermissionLevelCycle={handlePermissionLevelCycle}
+                                        />
+                                    </div>
+                                    <div className="flex items-center min-w-0 gap-x-1 justify-end">
+                                        <div className="flex items-center gap-x-1 min-w-0 max-w-[60vw] flex-shrink">
+                                            <MemoMobileModelButton onOpenModel={() => handleOpenMobilePanel('model')} className="min-w-0 flex-shrink" />
+                                            <MemoMobileAgentButton
+                                                onOpenAgentPanel={handleOpenAgentPanel}
+                                                onCycleAgent={handleCycleAgent}
+                                                className="min-w-0 flex-shrink"
+                                            />
                                         </div>
                                     )}
                                     <div className={cn("flex items-center min-w-0 gap-x-1 justify-end", !showMobileKeyboardTools && "w-full")}>
@@ -4043,8 +4119,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
                                         footerIconButtonClass={footerIconButtonClass}
                                         iconSizeClass={iconSizeClass}
                                         permissionScopeSessionId={permissionScopeSessionId}
-                                        permissionAutoAcceptEnabled={permissionAutoAcceptEnabled}
-                                        handlePermissionAutoAcceptToggle={handlePermissionAutoAcceptToggle}
+                                        permissionLevel={permissionLevel}
+                                        handlePermissionLevelCycle={handlePermissionLevelCycle}
                                         withTooltip
                                     />
                                 </div>
