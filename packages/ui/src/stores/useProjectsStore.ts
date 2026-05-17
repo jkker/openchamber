@@ -5,6 +5,7 @@ import type { ProjectEntry } from '@/lib/api/types';
 import type { DesktopSettings } from '@/lib/desktop';
 import { updateDesktopSettings } from '@/lib/persistence';
 import { pathsEqual, resolveTildePath, normalizePath } from '@/lib/pathUtils';
+import { createProjectIdFromPath } from '@/lib/projectId';
 import { getSafeStorage } from './utils/safeStorage';
 import { useDirectoryStore } from './useDirectoryStore';
 import { streamDebugEnabled } from '@/stores/utils/streamDebug';

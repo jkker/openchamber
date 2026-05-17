@@ -31,8 +31,8 @@ import { flattenAssistantTextParts } from "@/lib/messages/messageText"
 import { EXECUTION_FORK_META_TEXT } from "@/lib/messages/executionMeta"
 import { waitForWorktreeBootstrap } from "@/lib/worktrees/worktreeBootstrap"
 import { waitForPendingDraftWorktreeRequest } from "@/lib/worktrees/pendingDraftWorktree"
-import { isSubpath, normalizePath, pathsEqual } from "@/lib/pathUtils"
-import type { ProjectEntry } from "@/lib/api/types"
+import { normalizePath } from "@/lib/pathUtils"
+import { resolveProjectForSessionDirectory } from "@/lib/projectResolution"
 import {
   getSyncSessions,
   getAllSyncSessions,
@@ -252,7 +252,7 @@ export type SessionUIState = {
   setCurrentSession: (id: string | null, directoryHint?: string | null) => void
   openNewSessionDraft: (options?: Partial<NewSessionDraftState>) => void
   closeNewSessionDraft: () => void
-  setNewSessionDraftTarget: (target: { projectId?: string | null; selectedProjectId?: string | null; directoryOverride?: string | null }, options?: { force?: boolean }) => void
+  setNewSessionDraftTarget: (target: { projectId?: string | null; directoryOverride?: string | null }, options?: { force?: boolean }) => void
   setDraftPreserveDirectoryOverride: (value: boolean) => void
   acknowledgeSessionAbort: (sessionId: string) => void
   clearAbortPrompt: () => void
@@ -340,50 +340,11 @@ const persistDraftTarget = (target: PersistedDraftTarget): void => {
   } catch { /* ignored */ }
 }
 
-const resolveProjectForDirectory = (projects: ProjectEntry[], directory: string | null): ProjectEntry | null => {
-  const nd = normalizePath(directory)
-  if (!nd) return null
-  let best: ProjectEntry | null = null
-  for (const p of projects) {
-    const pp = normalizePath(p.path)
-    if (!pp) continue
-    if (!isSubpath(nd, pp)) continue
-    if (!best || pp.length > (normalizePath(best.path)?.length ?? 0)) best = p
-  }
-  return best
-}
+const resolveDraftProjectForDirectory = resolveProjectForSessionDirectory
 
-const resolveProjectFromWorktreeDirectory = (
-  projects: ProjectEntry[],
-  availableWorktreesByProject: Map<string, WorktreeMetadata[]>,
-  directory: string | null,
-): ProjectEntry | null => {
-  const nd = normalizePath(directory)
-  if (!nd) return null
-  let matchedWorktree: WorktreeMetadata | null = null
-  let matchedProjectPath: string | null = null
-  let bestLen = -1
-  for (const [projectPath, worktrees] of availableWorktreesByProject.entries()) {
-    for (const wt of worktrees) {
-      const wp = normalizePath(wt.path)
-      if (!wp) continue
-      if (!isSubpath(nd, wp)) continue
-      if (wp.length > bestLen) {
-        bestLen = wp.length
-        matchedWorktree = wt
-        matchedProjectPath = normalizePath(projectPath)
-      }
-    }
-  }
-  if (!matchedWorktree) return null
-  const candidates = [normalizePath(matchedWorktree.projectDirectory), matchedProjectPath].filter((v): v is string => Boolean(v))
-  for (const c of candidates) {
-    const exact = projects.find((p) => pathsEqual(p.path, c)) ?? null
-    if (exact) return exact
-    const nested = resolveProjectForDirectory(projects, c)
-    if (nested) return nested
-  }
-  return null
+const getAttachmentForSession = (sessionId: string | null | undefined): SessionWorktreeAttachment | undefined => {
+  if (!sessionId) return undefined
+  return useSessionWorktreeStore.getState().getAttachment(sessionId)
 }
 
 const resolveSessionDirectory = (
@@ -493,7 +454,10 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     const projectsState = useProjectsStore.getState()
     const projects = projectsState.projects
     const availableWorktreesByProject = get().availableWorktreesByProject
-    const activeProject = projectsState.getActiveProject()
+    const activeProject = projectsState.activeProjectId
+      ? projects.find((p) => p.id === projectsState.activeProjectId) ?? null
+      : null
+
     const currentDirectory = normalizePath(useDirectoryStore.getState().currentDirectory ?? null)
     const persistedTarget = readPersistedDraftTarget()
 
@@ -507,7 +471,6 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     const inferredProjectFromDir = resolveDraftProjectForDirectory(projects, availableWorktreesByProject, explicitDirectory)
     const fallbackProject = (() => {
       if (activeProject) return activeProject
-      if (projectsState.activeProjectId) return projects.find((p) => p.id === projectsState.activeProjectId) ?? null
       return projects[0] ?? null
     })()
 
@@ -597,8 +560,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       return {
         newSessionDraft: {
           ...s.newSessionDraft,
-          selectedProjectId: target.projectId ?? target.selectedProjectId ?? s.newSessionDraft.selectedProjectId,
-          directoryOverride: target.directoryOverride ?? s.newSessionDraft.directoryOverride,
+          selectedProjectId: target.projectId ?? s.newSessionDraft.selectedProjectId,
+          directoryOverride: nextDirectory,
         },
       }
     })
@@ -701,7 +664,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         worktreeRoot: metadata.worktreeRoot ?? metadata.path ?? null,
         cwd: metadata.path ?? null,
         branch: metadata.branch ?? null,
-        headState: metadata.headState ?? (metadata.branch ? 'branch' : 'detached'),
+        headState: metadata.branch ? 'branch' : 'detached',
         worktreeStatus: metadata.worktreeStatus ?? 'ready',
         worktreeSource: metadata.worktreeSource ?? null,
         legacy: false,

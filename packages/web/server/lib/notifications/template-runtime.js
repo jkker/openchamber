@@ -1,4 +1,5 @@
 import { canonicalPath, pathsEqual } from '../PathUtils.js';
+import { summarizeText as summarizeSharedText } from '../text/summarization.js';
 
 export const createNotificationTemplateRuntime = (deps) => {
   const {

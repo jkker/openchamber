@@ -3,11 +3,90 @@ import { launchDetached, spawnOnce } from '../SpawnUtils.js';
 import { IS_MAC, IS_WIN } from '../platform.js';
 
 const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
+const WINDOWS_DRIVE_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 
 const createCommandTimeoutMs = () => {
   const raw = Number(process.env.OPENCHAMBER_FS_EXEC_TIMEOUT_MS);
   if (Number.isFinite(raw) && raw > 0) return raw;
   return 5 * 60 * 1000;
+};
+
+const driveEntryFromPath = (value) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const match = trimmed.replace(/\\/g, '/').match(/^(?:\/([A-Za-z])(?=\/|$)|([A-Za-z]):)/);
+  const driveLetter = match?.[1] || match?.[2];
+  if (!driveLetter) {
+    return null;
+  }
+
+  const drive = driveLetter.toUpperCase();
+  return { name: `${drive}:`, path: `${drive}:/` };
+};
+
+const mergeDriveEntries = (...groups) => {
+  const seen = new Set();
+  const merged = [];
+
+  for (const group of groups) {
+    if (!Array.isArray(group)) {
+      continue;
+    }
+
+    for (const entry of group) {
+      if (!entry || typeof entry.name !== 'string' || typeof entry.path !== 'string') {
+        continue;
+      }
+
+      const key = entry.name.toUpperCase();
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      merged.push(entry);
+    }
+  }
+
+  return merged.sort((left, right) => left.name.localeCompare(right.name));
+};
+
+const listMountedWindowsDrives = async ({ fsPromises, path, os, openchamberUserConfigRoot }) => {
+  if (!IS_WIN) {
+    return [];
+  }
+
+  const probed = await Promise.allSettled(
+    WINDOWS_DRIVE_LETTERS.map(async (driveLetter) => {
+      const nativeRoot = path.win32.normalize(`${driveLetter}:\\`);
+      const stats = await fsPromises.stat(nativeRoot);
+      if (!stats.isDirectory()) {
+        return null;
+      }
+
+      return { name: `${driveLetter}:`, path: `${driveLetter}:/` };
+    })
+  );
+
+  const mountedFromProbe = probed
+    .map((result) => result.status === 'fulfilled' ? result.value : null)
+    .filter((entry) => entry !== null);
+
+  const fallbackEntries = [
+    driveEntryFromPath(process.env.SystemDrive),
+    driveEntryFromPath(os.homedir()),
+    driveEntryFromPath(process.cwd()),
+    driveEntryFromPath(openchamberUserConfigRoot),
+  ].filter((entry) => entry !== null);
+
+  return mergeDriveEntries(mountedFromProbe, fallbackEntries);
 };
 
 const isPathWithinRoot = (resolvedPath, rootPath, _path, os) => {
@@ -216,6 +295,21 @@ export const registerFsRoutes = (app, dependencies) => {
     } catch (error) {
       console.error('Failed to resolve home directory:', error);
       return res.status(500).json({ error: (error && error.message) || 'Failed to resolve home directory' });
+    }
+  });
+
+  app.get('/api/fs/mounted-drives', async (_req, res) => {
+    try {
+      const drives = await listMountedWindowsDrives({
+        fsPromises,
+        path,
+        os,
+        openchamberUserConfigRoot,
+      });
+      return res.json({ drives });
+    } catch (error) {
+      console.error('Failed to list mounted drives:', error);
+      return res.status(500).json({ error: (error && error.message) || 'Failed to list mounted drives' });
     }
   });
 
@@ -515,6 +609,12 @@ export const registerFsRoutes = (app, dependencies) => {
       };
       const mimeType = mimeMap[ext] || 'application/octet-stream';
 
+      const download = req.query.download === 'true';
+      if (download) {
+        const fileName = path.basename(canonicalPath);
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      }
+
       const content = await fsPromises.readFile(toNativePath(resolvedCanonicalPath));
       res.setHeader('Cache-Control', 'no-store');
       return res.type(mimeType).send(content);
@@ -675,7 +775,24 @@ export const registerFsRoutes = (app, dependencies) => {
           launchDetached('open', ['-R', resolved]);
         }
       } else if (IS_WIN) {
-        launchDetached('explorer', ['/select,', resolved]);
+        const stat = await fsPromises.stat(resolved);
+        const escapedPath = resolved.replace(/'/g, "''");
+        const explorerArg = stat.isDirectory() ? escapedPath : `/select,${escapedPath}`;
+        const command = `Start-Process -FilePath explorer.exe -ArgumentList '${explorerArg}'`;
+        await new Promise((resolve, reject) => {
+          const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+            windowsHide: true,
+            stdio: 'ignore',
+          });
+          child.once('error', reject);
+          child.once('exit', (code) => {
+            if (code === 0) {
+              resolve();
+              return;
+            }
+            reject(new Error(`Explorer launch failed with code ${code ?? 'unknown'}`));
+          });
+        });
       } else {
         const stat = await fsPromises.stat(resolved);
         const dir = stat.isDirectory() ? resolved : path.dirname(resolved);

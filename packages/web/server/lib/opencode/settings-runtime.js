@@ -1,4 +1,5 @@
 import { toNativePath } from '../PathUtils.js';
+import { createProjectIdFromPath } from '../projects/project-id.js';
 
 const DEFAULT_NOTIFICATION_TEMPLATES = {
   completion: { title: '{agent_name} is ready', message: '{model_name} completed the task' },
@@ -761,8 +762,9 @@ export const createSettingsRuntime = (deps) => {
     const migration4 = await migrateSettingsNotificationDefaults(migration3.settings);
     const migration5 = await migrateSettingsFromLegacyNamedTunnelKeys(migration4.settings);
     const migration6 = await migrateSettingsPathKeys(migration5.settings);
-    if (migration1.changed || migration2.changed || migration3.changed || migration4.changed || migration5.changed || migration6.changed) {
-      await writeSettingsToDisk(migration6.settings);
+    const migration7 = await migrateSettingsToDeterministicProjectIds(migration6.settings);
+    if (migration1.changed || migration2.changed || migration3.changed || migration4.changed || migration5.changed || migration6.changed || migration7.changed) {
+      await writeSettingsToDisk(migration7.settings);
     }
     return migration7.settings;
   };

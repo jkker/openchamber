@@ -17,6 +17,7 @@ import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui';
 import { IdentityDropdown } from '@/components/views/git/GitHeader';
 import { useDeviceInfo } from '@/lib/device';
+import { isVSCodeRuntime } from '@/lib/desktop';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { Icon } from "@/components/icon/Icon";
 import { opencodeClient } from '@/lib/opencode/client';
@@ -24,7 +25,7 @@ import {
   setDirectoryShowHidden,
   useDirectoryShowHidden,
 } from '@/lib/directoryShowHidden';
-import { useI18n } from '@/lib/i18n';
+import { normalizePath } from '@/lib/pathUtils';
 
 interface DirectoryExplorerDialogProps {
   open: boolean;
@@ -141,16 +142,17 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
   open,
   onOpenChange,
 }) => {
-  const { t } = useI18n();
-  const homeDirectory = useDirectoryStore((s) => s.homeDirectory);
-  const projects = useProjectsStore((s) => s.projects);
-  const addProject = useProjectsStore((s) => s.addProject);
-  const gitIdentityProfiles = useGitIdentitiesStore((s) => s.profiles);
-  const globalGitIdentity = useGitIdentitiesStore((s) => s.globalIdentity);
-  const defaultGitIdentityId = useGitIdentitiesStore((s) => s.defaultGitIdentityId);
-  const loadGitIdentityProfiles = useGitIdentitiesStore((s) => s.loadProfiles);
-  const loadGlobalGitIdentity = useGitIdentitiesStore((s) => s.loadGlobalIdentity);
-  const loadDefaultGitIdentityId = useGitIdentitiesStore((s) => s.loadDefaultGitIdentityId);
+  const { currentDirectory, homeDirectory, isHomeReady } = useDirectoryStore();
+  const { addProject, getActiveProject } = useProjectsStore();
+  const isVSCode = React.useMemo(() => isVSCodeRuntime(), []);
+  const isWindowsRuntime = React.useMemo(
+    () => typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent),
+    []
+  );
+  const [pendingPath, setPendingPath] = React.useState<string | null>(null);
+  const [pathInputValue, setPathInputValue] = React.useState('');
+  const [hasUserSelection, setHasUserSelection] = React.useState(false);
+  const [isConfirming, setIsConfirming] = React.useState(false);
   const showHidden = useDirectoryShowHidden();
   const { isDesktop, requestAccess, startAccessing } = useFileSystemAccess();
   const { isMobile } = useDeviceInfo();
@@ -170,57 +172,141 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
   const [cloneRemoteUrl, setCloneRemoteUrl] = React.useState('');
   const [selectedGitIdentityId, setSelectedGitIdentityId] = React.useState<string | null>(null);
 
-  const explorerRootDirectory = dialogHomeDirectory || homeDirectory;
+  const normalizeDirectoryPath = React.useCallback((value: string | null | undefined) => {
+    if (typeof value !== 'string') {
+      return null;
+    }
 
-  const addedProjectPaths = React.useMemo(() => new Set(
-    projects
-      .map((project) => normalizeDirectoryPath(project.path))
-      .filter((path): path is string => Boolean(path))
-  ), [projects]);
+    const normalized = normalizePath(value);
+    if (normalized) {
+      return normalized;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed.replace(/\\/g, '/') : null;
+  }, []);
+
+  const toDirectoryRequestPath = React.useCallback((value: string) => {
+    const normalized = normalizeDirectoryPath(value) ?? value.trim().replace(/\\/g, '/');
+    const converted = normalized.replace(/^\/([A-Za-z])(?=\/|$)/, (_, drive: string) => `${drive.toUpperCase()}:`);
+    return /^[A-Za-z]:$/.test(converted) ? `${converted}/` : converted;
+  }, [normalizeDirectoryPath]);
+
+  const workspaceBoundary = React.useMemo(() => {
+    if (!isVSCode || typeof window === 'undefined') {
+      return null;
+    }
+
+    const workspaceFolder = (window as unknown as { __VSCODE_CONFIG__?: { workspaceFolder?: unknown } })
+      .__VSCODE_CONFIG__?.workspaceFolder;
+    return typeof workspaceFolder === 'string'
+      ? normalizeDirectoryPath(workspaceFolder)
+      : null;
+  }, [isVSCode, normalizeDirectoryPath]);
+
+  const defaultPickerPath = isVSCode ? workspaceBoundary : homeDirectory;
+  const isDefaultPickerPathReady = isVSCode ? Boolean(workspaceBoundary) : isHomeReady;
+
+  const isWindowsPathLike = React.useCallback((value: string | null | undefined) => {
+    if (typeof value !== 'string') {
+      return false;
+    }
+
+    const trimmed = value.trim();
+    return /^\/[A-Za-z](?:\/|$)?/.test(trimmed) || /^[A-Za-z]:(?:[\\/]|$)?/.test(trimmed);
+  }, []);
+
+  const isWindowsPathContext = React.useMemo(() => {
+    if (!isWindowsRuntime) {
+      return false;
+    }
+
+    return [currentDirectory, homeDirectory, workspaceBoundary, pathInputValue].some((value) => isWindowsPathLike(value));
+  }, [currentDirectory, homeDirectory, isWindowsPathLike, isWindowsRuntime, pathInputValue, workspaceBoundary]);
+
+  const supportsPathAutocomplete = React.useCallback((value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return false;
+    }
+
+    if (trimmed.startsWith('/') || trimmed.startsWith('\\') || trimmed.startsWith('~')) {
+      return true;
+    }
+
+    if (/^[A-Za-z]:(?:[\\/]|$)/.test(trimmed)) {
+      return true;
+    }
+
+    return /^%userprofile%(?:[\\/]|$)/i.test(trimmed);
+  }, []);
+
+  const expandTypedPath = React.useCallback((value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return '';
+    }
+
+    let expanded = trimmed.replace(/\\/g, '/');
+    if (/^[A-Za-z]:$/.test(expanded)) {
+      expanded = `${expanded}/`;
+    }
+
+    if (/^%userprofile%(?:[\\/]|$)/i.test(trimmed) && homeDirectory) {
+      expanded = expanded.replace(/^%userprofile%/i, homeDirectory);
+    } else if (expanded.startsWith('~') && homeDirectory) {
+      expanded = expanded.replace(/^~/, homeDirectory);
+    }
+
+    return normalizeDirectoryPath(expanded) ?? expanded;
+  }, [homeDirectory, normalizeDirectoryPath]);
+
+  const formatInputPath = React.useCallback((
+    path: string | null | undefined,
+    options?: { preserveTrailingSeparator?: boolean }
+  ) => {
+    const normalizedPath = normalizeDirectoryPath(path);
+    if (!normalizedPath) {
+      return '';
+    }
+
+    if (isWindowsPathContext || isWindowsPathLike(normalizedPath)) {
+      const windowsPath = toDirectoryRequestPath(normalizedPath);
+      let formatted = windowsPath === '/'
+        ? '\\'
+        : windowsPath.replace(/\//g, '\\');
+
+      if (options?.preserveTrailingSeparator && !formatted.endsWith('\\')) {
+        formatted = `${formatted}\\`;
+      }
+
+      return formatted;
+    }
+
+    if (options?.preserveTrailingSeparator) {
+      if (!normalizedPath.endsWith('/')) {
+        return `${normalizedPath}/`;
+      }
+    }
+
+    return normalizedPath;
+  }, [isWindowsPathContext, isWindowsPathLike, normalizeDirectoryPath, toDirectoryRequestPath]);
 
   React.useEffect(() => {
-    if (!open) return;
-    setQuery('~/');
-    setEntries([]);
-    setHighlightedIndex(0);
-    setIsConfirming(false);
-    setIsOpeningFinder(false);
-    setIsCloneMode(false);
-    setCloneRemoteUrl('');
-    setSelectedGitIdentityId(null);
-    requestAnimationFrame(() => focusPathInput(inputRef.current));
-
-    let cancelled = false;
-    const resolveHome = async () => {
-      const resolved = await resolveFreshFilesystemHome();
-      if (cancelled) return;
-      setDialogHomeDirectory(resolved || homeDirectory || '');
-      requestAnimationFrame(() => focusPathInput(inputRef.current));
-    };
-    void resolveHome();
-    return () => {
-      cancelled = true;
-    };
-  }, [homeDirectory, open]);
-
-  React.useEffect(() => {
-    if (!open) return;
-    void loadGitIdentityProfiles();
-    void loadGlobalGitIdentity();
-    void loadDefaultGitIdentityId();
-  }, [loadDefaultGitIdentityId, loadGitIdentityProfiles, loadGlobalGitIdentity, open]);
-
-  const availableGitIdentities = React.useMemo(() => {
-    const unique = new Map<string, NonNullable<typeof globalGitIdentity>>();
-    if (globalGitIdentity) {
-      unique.set(globalGitIdentity.id, globalGitIdentity);
+    if (open) {
+      setHasUserSelection(false);
+      setIsConfirming(false);
+      setAutocompleteVisible(false);
+      // Initialize with active project or current directory
+      const activeProject = getActiveProject();
+      const initialPath = activeProject?.path || currentDirectory || defaultPickerPath || '';
+      const initialInputValue = formatInputPath(initialPath);
+      setPendingPath(initialPath);
+      setPathInputValue(initialInputValue);
     }
-    for (const profile of gitIdentityProfiles) {
-      unique.set(profile.id, profile);
-    }
-    return Array.from(unique.values());
-  }, [gitIdentityProfiles, globalGitIdentity]);
+  }, [open, currentDirectory, defaultPickerPath, formatInputPath, getActiveProject]);
 
+  // Fill the input once the default picker path is ready and nothing has been selected yet.
   React.useEffect(() => {
     if (!open || !isCloneMode || selectedGitIdentityId !== null) return;
     const defaultId = typeof defaultGitIdentityId === 'string' ? defaultGitIdentityId.trim() : '';
@@ -228,11 +314,13 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
       setSelectedGitIdentityId(defaultId);
       return;
     }
-    const firstSshIdentity = availableGitIdentities.find((identity) => identity.authType === 'ssh' || identity.sshKey);
-    if (firstSshIdentity) {
-      setSelectedGitIdentityId(firstSshIdentity.id);
+    if (defaultPickerPath && isDefaultPickerPathReady) {
+      const initialInputValue = formatInputPath(defaultPickerPath);
+      setPendingPath(defaultPickerPath);
+      setHasUserSelection(true);
+      setPathInputValue(initialInputValue);
     }
-  }, [availableGitIdentities, defaultGitIdentityId, isCloneMode, open, selectedGitIdentityId]);
+  }, [defaultPickerPath, formatInputPath, hasUserSelection, isDefaultPickerPathReady, open, pendingPath]);
 
   const selectedGitIdentity = React.useMemo(
     () => availableGitIdentities.find((identity) => identity.id === selectedGitIdentityId) ?? null,
@@ -389,19 +477,66 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
     onOpenChange(false);
   }, [onOpenChange]);
 
-  const finalizeSelection = React.useCallback(async (target: string) => {
-    if (!target || isConfirming) return;
-    const normalized = normalizeDirectoryPath(target);
-    if (normalized && addedProjectPaths.has(normalized)) return;
-    let selectedTarget = target;
+  const isWindowsDrivePickerPath = React.useCallback((path: string | null | undefined) => {
+    const normalized = normalizeDirectoryPath(path);
+    return Boolean(!workspaceBoundary && isWindowsPathContext && normalized === '/');
+  }, [isWindowsPathContext, normalizeDirectoryPath, workspaceBoundary]);
+
+  const isPathWithinWorkspaceBoundary = React.useCallback((path: string) => {
+    if (!workspaceBoundary) {
+      return true;
+    }
+
+    const normalizedTarget = normalizeDirectoryPath(path);
+    if (!normalizedTarget) {
+      return false;
+    }
+
+    if (workspaceBoundary === '/') {
+      return normalizedTarget.startsWith('/');
+    }
+
+    return normalizedTarget === workspaceBoundary || normalizedTarget.startsWith(`${workspaceBoundary}/`);
+  }, [workspaceBoundary, normalizeDirectoryPath]);
+
+  const finalizeSelection = React.useCallback(async (targetPath: string) => {
+    const normalizedTargetPath = expandTypedPath(targetPath);
+    if (!normalizedTargetPath || isConfirming) {
+      return;
+    }
 
     setIsConfirming(true);
     try {
-      const shouldCreateSelection = !isCloneMode && shouldCreateTarget && normalizeDirectoryPath(target) === normalizeDirectoryPath(targetPath);
-      if (isCloneMode) {
-        const remoteUrl = cloneRemoteUrl.trim();
-        if (!remoteUrl) {
-          toast.error(t('directoryExplorerDialog.toast.cloneUrlRequired'));
+      if (isWindowsDrivePickerPath(normalizedTargetPath)) {
+        return;
+      }
+
+      if (isVSCode && workspaceBoundary && !isPathWithinWorkspaceBoundary(normalizedTargetPath)) {
+        toast.error('Directory must stay inside the workspace', {
+          description: 'VS Code can only browse within the current workspace folder.',
+        });
+        return;
+      }
+
+      let resolvedPath = normalizedTargetPath;
+      let projectId: string | undefined;
+
+      if (isDesktop) {
+        const accessResult = await requestAccess(toDirectoryRequestPath(normalizedTargetPath));
+        if (!accessResult.success) {
+          toast.error('Unable to access directory', {
+            description: accessResult.error || 'Desktop denied directory access.',
+          });
+          return;
+        }
+        resolvedPath = normalizeDirectoryPath(accessResult.path ?? normalizedTargetPath) ?? normalizedTargetPath;
+        projectId = accessResult.projectId;
+
+        const startResult = await startAccessing(toDirectoryRequestPath(resolvedPath));
+        if (!startResult.success) {
+          toast.error('Failed to open directory', {
+            description: startResult.error || 'Desktop could not grant file access.',
+          });
           return;
         }
         const result = await opencodeClient.cloneRepository({
@@ -428,10 +563,77 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
     } finally {
       setIsConfirming(false);
     }
-  }, [addProject, addedProjectPaths, cloneRemoteUrl, handleClose, isCloneMode, isConfirming, selectedGitIdentity?.id, shouldCreateTarget, targetPath, t]);
+  }, [
+    addProject,
+    handleClose,
+    isDesktop,
+    requestAccess,
+    startAccessing,
+    isConfirming,
+    expandTypedPath,
+    isPathWithinWorkspaceBoundary,
+    isVSCode,
+    isWindowsDrivePickerPath,
+    normalizeDirectoryPath,
+    toDirectoryRequestPath,
+    workspaceBoundary,
+  ]);
 
-  const browseToDisplayPath = React.useCallback((displayPath: string) => {
-    setQuery(ensureBrowseDirectoryPath(displayPath));
+  const handleConfirm = React.useCallback(async () => {
+    const typedPath = pathInputValue.trim();
+    const pathToUse = typedPath ? expandTypedPath(typedPath) : pendingPath;
+    if (!pathToUse) {
+      return;
+    }
+    await finalizeSelection(pathToUse);
+  }, [expandTypedPath, finalizeSelection, pathInputValue, pendingPath]);
+
+  const handleSelectPath = React.useCallback((path: string) => {
+    setPendingPath(path);
+    setHasUserSelection(true);
+    setPathInputValue(formatInputPath(path));
+  }, [formatInputPath]);
+
+  const handleDoubleClickPath = React.useCallback(async (path: string) => {
+    setPendingPath(path);
+    setHasUserSelection(true);
+    setPathInputValue(formatInputPath(path));
+    await finalizeSelection(path);
+  }, [finalizeSelection, formatInputPath]);
+
+  const handlePathInputChange = React.useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setPathInputValue(value);
+    setHasUserSelection(true);
+    // Show autocomplete when typing a path
+    const supportsAutocomplete = supportsPathAutocomplete(value);
+    setAutocompleteVisible(supportsAutocomplete);
+    // Update pending path if it looks like a valid path
+    if (supportsAutocomplete) {
+      setPendingPath(expandTypedPath(value));
+    }
+  }, [expandTypedPath, supportsPathAutocomplete]);
+
+  const handlePathInputKeyDown = React.useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Let autocomplete handle the key first if visible
+    if (autocompleteRef.current?.handleKeyDown(e)) {
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleConfirm();
+    }
+  }, [handleConfirm]);
+
+  const handleAutocompleteSuggestion = React.useCallback((path: string) => {
+    setPendingPath(normalizeDirectoryPath(path));
+    setHasUserSelection(true);
+    setPathInputValue(formatInputPath(path, { preserveTrailingSeparator: true }));
+    // Keep autocomplete open to allow further drilling down
+  }, [formatInputPath, normalizeDirectoryPath]);
+
+  const handleAutocompleteClose = React.useCallback(() => {
+    setAutocompleteVisible(false);
   }, []);
 
   const browseToEntry = React.useCallback((entry: BrowseEntry) => {
@@ -538,16 +740,17 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
         onChange={handlePathInputChange}
         onKeyDown={handlePathInputKeyDown}
         placeholder="Enter path or select from tree..."
-        className="font-mono typography-meta"
         spellCheck={false}
         autoComplete="off"
         autoCorrect="off"
         autoCapitalize="off"
+        className="font-mono typography-meta"
       />
       <DirectoryAutocomplete
         ref={autocompleteRef}
         inputValue={pathInputValue}
         homeDirectory={homeDirectory}
+        scopeBoundary={workspaceBoundary}
         onSelectSuggestion={handleAutocompleteSuggestion}
         visible={autocompleteVisible}
         onClose={handleAutocompleteClose}
@@ -566,8 +769,8 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
         className="flex-1 min-h-0 sm:min-h-[280px] sm:max-h-[380px]"
         selectionBehavior="deferred"
         showHidden={showHidden}
-        rootDirectory="/"
-        isRootReady={true}
+        rootDirectory={isVSCode ? workspaceBoundary : null}
+        isRootReady={isVSCode ? Boolean(workspaceBoundary) : true}
       />
     </div>
   );
@@ -588,8 +791,8 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
           className="flex-1 min-h-0"
           selectionBehavior="deferred"
           showHidden={showHidden}
-          rootDirectory={isHomeReady ? homeDirectory : null}
-          isRootReady={isHomeReady}
+          rootDirectory={isVSCode ? workspaceBoundary : null}
+          isRootReady={isVSCode ? Boolean(workspaceBoundary) : true}
           alwaysShowActions
         />
         {!isMobile ? (
@@ -701,22 +904,26 @@ export const DirectoryExplorerDialog: React.FC<DirectoryExplorerDialogProps> = (
 
   const renderFooter = () => (
     <>
-      {!isMobile ? footerHints : null}
-      <div className={cn('flex w-full flex-row justify-end gap-2 sm:w-auto', isMobile && 'justify-stretch')}>
-        {isDesktop ? (
-          <Button variant="ghost" size="xs" onClick={handleOpenInFinder} disabled={isConfirming || isOpeningFinder || isCloneMode}>
-            {isOpeningFinder ? t('directoryExplorerDialog.actions.openingFinder') : t('directoryExplorerDialog.actions.openInFinder')}
-          </Button>
-        ) : null}
-        <Button variant="ghost" size="xs" onClick={() => setIsCloneMode((value) => !value)} disabled={isConfirming || isOpeningFinder} className={cn(isMobile && 'flex-1')}>
-          {isCloneMode ? t('directoryExplorerDialog.actions.addLocalProject') : t('directoryExplorerDialog.actions.cloneRepository')}
-        </Button>
-        {isMobile ? (
-          <Button size="xs" onClick={() => void finalizeSelection(targetPath)} disabled={isCloneMode ? !canSubmitClone : !canAddProject} className="flex-1">
-            {submitActionLabel}
-          </Button>
-        ) : null}
-      </div>
+      <Button
+        variant="ghost"
+        onClick={handleClose}
+        disabled={isConfirming}
+        className="flex-1 sm:flex-none sm:w-auto"
+      >
+        Cancel
+      </Button>
+      <Button
+        onClick={handleConfirm}
+        disabled={
+          isConfirming
+          || !hasUserSelection
+          || (!pendingPath && !pathInputValue.trim())
+          || isWindowsDrivePickerPath(pathInputValue.trim() || pendingPath)
+        }
+        className="flex-1 sm:flex-none sm:w-auto sm:min-w-[140px]"
+      >
+        {isConfirming ? 'Adding...' : 'Add Project'}
+      </Button>
     </>
   );
 

@@ -149,6 +149,7 @@ export type DirectorySwitchResult = {
 
 const normalizeFsPath = (path: string): string => normalizePath(path) ?? path.replace(/\\/g, "/");
 const FS_LIST_CACHE_TTL_MS = 400;
+const FS_MOUNTED_DRIVES_CACHE_TTL_MS = 5000;
 
 const getDesktopFilesApi = (): FilesAPI | null => {
   if (typeof window === "undefined") {
@@ -173,6 +174,8 @@ class OpencodeService {
   private directoryContextQueue: Promise<void> = Promise.resolve();
   private listDirectoryInFlight: Map<string, Promise<FilesystemEntry[]>> = new Map();
   private listDirectoryCache: Map<string, { entries: FilesystemEntry[]; expiresAt: number }> = new Map();
+  private mountedDrivesInFlight: Promise<FilesystemEntry[]> | null = null;
+  private mountedDrivesCache: { entries: FilesystemEntry[]; expiresAt: number } | null = null;
 
   private getAuthorizationHeader(): string | null {
     const selectedInstance = resolveSelectedInstance();
@@ -2717,6 +2720,70 @@ class OpencodeService {
       console.warn('Failed to resolve filesystem home directory:', error);
       return null;
     }
+  }
+
+  async listMountedDrives(): Promise<FilesystemEntry[]> {
+    const now = Date.now();
+    if (this.mountedDrivesCache && this.mountedDrivesCache.expiresAt > now) {
+      return this.mountedDrivesCache.entries;
+    }
+
+    if (this.mountedDrivesInFlight) {
+      return this.mountedDrivesInFlight;
+    }
+
+    const task = (async () => {
+      try {
+        const response = await fetch(`${this.baseUrl}/fs/mounted-drives`, {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          const message = typeof error.error === 'string' ? error.error : 'Failed to list mounted drives';
+          throw new Error(message);
+        }
+
+        const payload = await response.json().catch(() => null) as {
+          drives?: Array<{ name?: unknown; path?: unknown }>;
+        } | null;
+
+        const entries = Array.isArray(payload?.drives)
+          ? payload.drives
+              .filter((drive): drive is { name: string; path: string } =>
+                typeof drive?.name === 'string' && drive.name.length > 0
+                && typeof drive?.path === 'string' && drive.path.length > 0
+              )
+              .map<FilesystemEntry>((drive) => ({
+                name: drive.name,
+                path: normalizeFsPath(drive.path),
+                isDirectory: true,
+                isFile: false,
+                isSymbolicLink: false,
+              }))
+          : [];
+
+        this.mountedDrivesCache = {
+          entries,
+          expiresAt: Date.now() + FS_MOUNTED_DRIVES_CACHE_TTL_MS,
+        };
+        return entries;
+      } catch (error) {
+        console.warn('Failed to list mounted drives:', error);
+        return [];
+      }
+    })();
+
+    const trackedTask = task.finally(() => {
+      if (this.mountedDrivesInFlight === trackedTask) {
+        this.mountedDrivesInFlight = null;
+      }
+    });
+    this.mountedDrivesInFlight = trackedTask;
+    return trackedTask;
   }
 
   async setOpenCodeWorkingDirectory(directoryPath: string | null | undefined): Promise<DirectorySwitchResult | null> {
