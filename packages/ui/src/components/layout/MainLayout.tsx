@@ -1,19 +1,9 @@
-import { MultiRunLauncher } from '@/components/multirun';
-import { SessionDialogs } from '@/components/session/SessionDialogs';
-import { SessionSidebar } from '@/components/session/SessionSidebar';
-import { DiffWorkerProvider } from '@/contexts/DiffWorkerProvider';
-import { DrawerProvider } from '@/contexts/DrawerContext';
-import { animate, motion, useMotionValue } from 'motion/react';
-import React, { useEffect, useRef } from 'react';
-import { CommandPalette } from '../ui/CommandPalette';
-import { ErrorBoundary } from '../ui/ErrorBoundary';
-import { HelpDialog } from '../ui/HelpDialog';
-import { OpenCodeStatusDialog } from '../ui/OpenCodeStatusDialog';
-import { BottomTerminalDock } from './BottomTerminalDock';
-import { ContextPanel } from './ContextPanel';
+import React, { useRef, useEffect } from 'react';
+import { motion, useMotionValue, animate } from 'motion/react';
 import { Header } from './Header';
-import { NavRail } from './NavRail';
-import { RightSidebar } from './RightSidebar';
+import { BottomTerminalDock } from './BottomTerminalDock';
+import { Sidebar, SIDEBAR_CONTENT_WIDTH } from './Sidebar';
+import { RightSidebar, RIGHT_SIDEBAR_CONTENT_WIDTH } from './RightSidebar';
 import { RightSidebarTabs } from './RightSidebarTabs';
 import { ContextPanel } from './ContextPanel';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
@@ -24,20 +14,16 @@ import { SessionSidebar } from '@/components/session/SessionSidebar';
 import { SessionDialogs } from '@/components/session/SessionDialogs';
 import { DiffWorkerProvider } from '@/contexts/DiffWorkerProvider';
 import { MultiRunLauncher } from '@/components/multirun';
-import { AgentLoopLauncher } from '@/components/agentloop';
 import { DrawerProvider } from '@/contexts/DrawerContext';
 
-import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
-import { useDeviceInfo } from '@/lib/device';
-import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 import { useUpdateStore } from '@/stores/useUpdateStore';
 import { useDeviceInfo } from '@/lib/device';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
-import { useAgentLoopPolling } from '@/hooks/useAgentLoopPolling';
-import { usePlanningSessionWatcher } from '@/hooks/usePlanningSessionWatcher';
-import { usePlanningSessionDetector } from '@/hooks/usePlanningSessionDetector';
+import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { isDesktopShell } from '@/lib/desktop';
+import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 
 import { ChatView } from '@/components/views/ChatView';
 import { DiffView } from '@/components/views/DiffView';
@@ -83,31 +69,25 @@ export const MainLayout: React.FC = () => {
     const RIGHT_SIDEBAR_AUTO_OPEN_WIDTH = 1220;
     const BOTTOM_TERMINAL_AUTO_CLOSE_HEIGHT = 640;
     const BOTTOM_TERMINAL_AUTO_OPEN_HEIGHT = 700;
-    const {
-        isSidebarOpen,
-        isRightSidebarOpen,
-        isBottomTerminalOpen,
-        setRightSidebarOpen,
-        setBottomTerminalOpen,
-        activeMainTab,
-        setIsMobile,
-        isSessionSwitcherOpen,
-        isSettingsDialogOpen,
-        setSettingsDialogOpen,
-        isMultiRunLauncherOpen,
-        setMultiRunLauncherOpen,
-        multiRunLauncherPrefillPrompt,
-        isAgentLoopLauncherOpen,
-        setAgentLoopLauncherOpen,
-        agentLoopLauncherPrefill,
-    } = useUIStore();
+    const isSidebarOpen = useUIStore((state) => state.isSidebarOpen);
+    const isRightSidebarOpen = useUIStore((state) => state.isRightSidebarOpen);
+    const isBottomTerminalOpen = useUIStore((state) => state.isBottomTerminalOpen);
+    const setRightSidebarOpen = useUIStore((state) => state.setRightSidebarOpen);
+    const setBottomTerminalOpen = useUIStore((state) => state.setBottomTerminalOpen);
+    const activeMainTab = useUIStore((state) => state.activeMainTab);
+    const setIsMobile = useUIStore((state) => state.setIsMobile);
+    const isSessionSwitcherOpen = useUIStore((state) => state.isSessionSwitcherOpen);
+    const isSettingsDialogOpen = useUIStore((state) => state.isSettingsDialogOpen);
+    const setSettingsDialogOpen = useUIStore((state) => state.setSettingsDialogOpen);
+    const isMultiRunLauncherOpen = useUIStore((state) => state.isMultiRunLauncherOpen);
+    const setMultiRunLauncherOpen = useUIStore((state) => state.setMultiRunLauncherOpen);
+    const multiRunLauncherPrefillPrompt = useUIStore((state) => state.multiRunLauncherPrefillPrompt);
 
-    // Poll backend for agent loop state and watch planning session completions
-    useAgentLoopPolling();
-    usePlanningSessionWatcher();
-    usePlanningSessionDetector();
-
-    const { isMobile } = useDeviceInfo();
+    const { isMobile, isTablet } = useDeviceInfo();
+    const isDesktopShellRuntime = React.useMemo(() => isDesktopShell(), []);
+    const sidebarWidth = useUIStore((state) => state.sidebarWidth);
+    const rightSidebarWidth = useUIStore((state) => state.rightSidebarWidth);
+    const [desktopRightSidebarActionsHost, setDesktopRightSidebarActionsHost] = React.useState<HTMLDivElement | null>(null);
     const effectiveDirectory = useEffectiveDirectory() ?? '';
     const directoryKey = React.useMemo(() => normalizeDirectoryKey(effectiveDirectory), [effectiveDirectory]);
     const isContextPanelOpen = useUIStore((state) => {
@@ -376,303 +356,7 @@ export const MainLayout: React.FC = () => {
         return () => {
             unsubscribe();
         };
-    }, []);
-
-    React.useEffect(() => {
-        if (typeof window === 'undefined' || typeof document === 'undefined') {
-            return;
-        }
-
-        const root = document.documentElement;
-        const isTauriMobileRuntime = root.classList.contains('tauri-mobile-runtime');
-        const isTauriIOSRuntime = isTauriMobileRuntime && root.classList.contains('runtime-ios');
-        const isTauriAndroidRuntime = isTauriMobileRuntime && root.classList.contains('runtime-android');
-
-        type VirtualKeyboardLike = {
-            overlaysContent?: boolean;
-            boundingRect?: { height?: number };
-            addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
-            removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
-        };
-        const vkNavigator = navigator as Navigator & { virtualKeyboard?: VirtualKeyboardLike };
-        const virtualKeyboard = vkNavigator.virtualKeyboard;
-
-        let stickyKeyboardInset = 0;
-        let ignoreOpenUntilZero = false;
-        let previousHeight = 0;
-        let layoutViewportBaseline = 0;
-        let windowViewportBaseline = 0;
-        let keyboardAvoidTarget: HTMLElement | null = null;
-
-        const setKeyboardOpen = useUIStore.getState().setKeyboardOpen;
-
-        const clearKeyboardAvoidTarget = () => {
-            if (!keyboardAvoidTarget) {
-                return;
-            }
-            keyboardAvoidTarget.style.setProperty('--oc-keyboard-avoid-offset', '0px');
-            keyboardAvoidTarget.removeAttribute('data-keyboard-avoid-active');
-            keyboardAvoidTarget = null;
-        };
-
-        const resolveKeyboardAvoidTarget = (active: HTMLElement | null) => {
-            if (!active) {
-                return null;
-            }
-            const explicitTargetId = active.getAttribute('data-keyboard-avoid-target-id');
-            if (explicitTargetId) {
-                const explicitTarget = document.getElementById(explicitTargetId);
-                if (explicitTarget instanceof HTMLElement) {
-                    return explicitTarget;
-                }
-            }
-            const markedTarget = active.closest('[data-keyboard-avoid]') as HTMLElement | null;
-            if (markedTarget) {
-                // data-keyboard-avoid="none" opts out of translateY avoidance entirely.
-                // Used by components with their own scroll (e.g. CodeMirror).
-                if (markedTarget.getAttribute('data-keyboard-avoid') === 'none') {
-                    return null;
-                }
-                return markedTarget;
-            }
-            if (active.classList.contains('overlay-scrollbar-container')) {
-                const parent = active.parentElement;
-                if (parent instanceof HTMLElement) {
-                    return parent;
-                }
-            }
-            return active;
-        };
-
-        const forceKeyboardClosed = () => {
-            stickyKeyboardInset = 0;
-            ignoreOpenUntilZero = true;
-            root.style.setProperty('--oc-keyboard-inset', '0px');
-            setKeyboardOpen(false);
-        };
-
-        const updateVisualViewport = () => {
-            const viewport = window.visualViewport;
-
-            const height = viewport ? Math.round(viewport.height) : window.innerHeight;
-            const measuredOffsetTop = viewport ? Math.max(0, Math.round(viewport.offsetTop)) : 0;
-            const offsetTop = isTauriIOSRuntime ? 0 : measuredOffsetTop;
-
-            root.style.setProperty('--oc-visual-viewport-offset-top', `${offsetTop}px`);
-
-            const active = document.activeElement as HTMLElement | null;
-            const tagName = active?.tagName;
-            const isInput = tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT';
-            const isTextTarget = isInput || Boolean(active?.isContentEditable);
-
-            const layoutHeight = Math.round(root.clientHeight || window.innerHeight);
-            const windowHeight = Math.round(window.innerHeight);
-            const viewportSum = height + offsetTop;
-            const baselineCandidate = Math.max(layoutHeight, viewportSum);
-            const windowBaselineCandidate = Math.max(windowHeight, viewportSum);
-            if (!isTextTarget && stickyKeyboardInset === 0) {
-                layoutViewportBaseline = baselineCandidate;
-                windowViewportBaseline = windowBaselineCandidate;
-            } else if (layoutViewportBaseline === 0) {
-                layoutViewportBaseline = baselineCandidate;
-                windowViewportBaseline = windowBaselineCandidate;
-            } else if (windowViewportBaseline === 0) {
-                windowViewportBaseline = windowBaselineCandidate;
-            }
-            const rootRawInset = Math.max(0, Math.max(layoutViewportBaseline, baselineCandidate) - viewportSum);
-            const windowRawInset = Math.max(0, Math.max(windowViewportBaseline, windowBaselineCandidate) - viewportSum);
-            const virtualKeyboardInset = (() => {
-                if (!isTauriAndroidRuntime || !isTextTarget) {
-                    return 0;
-                }
-                const value = virtualKeyboard?.boundingRect?.height;
-                if (typeof value !== 'number' || !Number.isFinite(value)) {
-                    return 0;
-                }
-                return Math.max(0, Math.round(value));
-            })();
-            const rawInset = Math.max(rootRawInset, windowRawInset, virtualKeyboardInset);
-
-            // Keyboard heuristic:
-            // - when an input is focused, smaller deltas can still be keyboard
-            // - when not focused, treat only big deltas as keyboard (ignore toolbars)
-            const openThreshold = isTextTarget ? 120 : 180;
-            const measuredInset = rawInset >= openThreshold ? rawInset : 0;
-            const effectiveInset = isTauriIOSRuntime && !isTextTarget ? 0 : measuredInset;
-
-            // Make the UI stable: treat keyboard inset as a step function.
-            // - When opening: take the first big inset and hold it.
-            // - When closing starts: immediately drop to 0 (even if keyboard animation continues).
-            // Closing start signals:
-            // - focus lost (handled via focusout)
-            // - visual viewport height starts increasing while inset is non-zero
-            if (ignoreOpenUntilZero) {
-                if (effectiveInset === 0) {
-                    ignoreOpenUntilZero = false;
-                }
-                stickyKeyboardInset = 0;
-            } else if (stickyKeyboardInset === 0) {
-                if (effectiveInset > 0 && isTextTarget) {
-                    stickyKeyboardInset = effectiveInset;
-                }
-            } else {
-                // Only detect closing-by-height when focus is NOT on text input
-                // (prevents false positives during Android keyboard animation)
-                const closingByHeight = !isTextTarget && height > previousHeight + 6;
-
-                if (effectiveInset === 0) {
-                    stickyKeyboardInset = 0;
-                    setKeyboardOpen(false);
-                } else if (closingByHeight) {
-                    forceKeyboardClosed();
-                } else if (effectiveInset > 0 && isTextTarget) {
-                    // When focus is on text input, track actual inset (allows settling
-                    // to correct value after Android animation fluctuations)
-                    stickyKeyboardInset = effectiveInset;
-                    setKeyboardOpen(true);
-                } else if (effectiveInset > stickyKeyboardInset) {
-                    stickyKeyboardInset = effectiveInset;
-                    setKeyboardOpen(true);
-                }
-            }
-
-            root.style.setProperty('--oc-keyboard-inset', `${stickyKeyboardInset}px`);
-            previousHeight = height;
-
-            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-            const keyboardHomeIndicator = isIOS && stickyKeyboardInset > 0 ? 34 : 0;
-            root.style.setProperty('--oc-keyboard-home-indicator', `${keyboardHomeIndicator}px`);
-
-            const avoidTarget = isTextTarget ? resolveKeyboardAvoidTarget(active) : null;
-
-            if (!isMobile || !avoidTarget || !active) {
-                clearKeyboardAvoidTarget();
-            } else {
-                if (avoidTarget !== keyboardAvoidTarget) {
-                    clearKeyboardAvoidTarget();
-                    keyboardAvoidTarget = avoidTarget;
-                }
-                const viewportBottom = offsetTop + height;
-                const rect = active.getBoundingClientRect();
-                const overlap = rect.bottom - viewportBottom;
-                const clearance = 8;
-                const keyboardInset = Math.max(stickyKeyboardInset, effectiveInset);
-                const avoidOffset = overlap > clearance && keyboardInset > 0
-                    ? Math.min(overlap, keyboardInset)
-                    : 0;
-                const target = keyboardAvoidTarget;
-                if (target) {
-                    target.style.setProperty('--oc-keyboard-avoid-offset', `${avoidOffset}px`);
-                    target.setAttribute('data-keyboard-avoid-active', 'true');
-                }
-            }
-
-            // Only force-scroll lock while an input is focused.
-            if (isMobile && isTextTarget) {
-                const scroller = document.scrollingElement;
-                if (scroller && scroller.scrollTop !== 0) {
-                    scroller.scrollTop = 0;
-                }
-                if (window.scrollY !== 0) {
-                    window.scrollTo(0, 0);
-                }
-            }
-        };
-
-        updateVisualViewport();
-
-        const viewport = window.visualViewport;
-        viewport?.addEventListener('resize', updateVisualViewport);
-        viewport?.addEventListener('scroll', updateVisualViewport);
-        try {
-            if (virtualKeyboard) {
-                virtualKeyboard.overlaysContent = true;
-            }
-        } catch {
-            // ignored
-        }
-        virtualKeyboard?.addEventListener?.('geometrychange', updateVisualViewport);
-        window.addEventListener('resize', updateVisualViewport);
-        window.addEventListener('orientationchange', updateVisualViewport);
-        const isTextInputTarget = (element: HTMLElement | null) => {
-            if (!element) {
-                return false;
-            }
-            const tagName = element.tagName;
-            const isInput = tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT';
-            return isInput || element.isContentEditable;
-        };
-
-        // Reset ignoreOpenUntilZero when focus moves to a text input.
-        // This allows keyboard detection to work when user taps input quickly
-        // while keyboard is still closing (common on Android).
-        const handleFocusIn = (event: FocusEvent) => {
-            const target = event.target as HTMLElement | null;
-            if (isTextInputTarget(target)) {
-                ignoreOpenUntilZero = false;
-            }
-            updateVisualViewport();
-        };
-        document.addEventListener('focusin', handleFocusIn, true);
-
-        const handleFocusOut = (event: FocusEvent) => {
-            const target = event.target as HTMLElement | null;
-            if (!isTextInputTarget(target)) {
-                return;
-            }
-
-            // Check if focus is moving to another input - if so, don't close keyboard
-            const related = event.relatedTarget as HTMLElement | null;
-            if (isTextInputTarget(related)) {
-                return;
-            }
-
-            // On mobile contenteditable editors (CodeMirror), focus can momentarily
-            // leave and return during drag-selection handles. Defer closing until the
-            // next frame and only close when no text target is focused and the
-            // visual viewport inset is actually zero.
-            window.requestAnimationFrame(() => {
-                if (isTextInputTarget(document.activeElement as HTMLElement | null)) {
-                    return;
-                }
-
-                const currentViewport = window.visualViewport;
-                const height = currentViewport ? Math.round(currentViewport.height) : window.innerHeight;
-                const measuredOffsetTop = currentViewport ? Math.max(0, Math.round(currentViewport.offsetTop)) : 0;
-                const offsetTop = isTauriIOSRuntime ? 0 : measuredOffsetTop;
-                const layoutHeight = Math.round(root.clientHeight || window.innerHeight);
-                const windowHeight = Math.round(window.innerHeight);
-                const viewportSum = height + offsetTop;
-                const baselineCandidate = Math.max(layoutHeight, viewportSum);
-                const windowBaselineCandidate = Math.max(windowHeight, viewportSum);
-                const rawInset = Math.max(
-                    0,
-                    Math.max(layoutViewportBaseline, baselineCandidate, windowViewportBaseline, windowBaselineCandidate) - viewportSum,
-                );
-
-                if (rawInset > 0) {
-                    updateVisualViewport();
-                    return;
-                }
-
-                forceKeyboardClosed();
-                updateVisualViewport();
-            });
-        };
-
-        document.addEventListener('focusout', handleFocusOut, true);
-
-        return () => {
-            viewport?.removeEventListener('resize', updateVisualViewport);
-            viewport?.removeEventListener('scroll', updateVisualViewport);
-            virtualKeyboard?.removeEventListener?.('geometrychange', updateVisualViewport);
-            window.removeEventListener('resize', updateVisualViewport);
-            window.removeEventListener('orientationchange', updateVisualViewport);
-            document.removeEventListener('focusin', handleFocusIn, true);
-            document.removeEventListener('focusout', handleFocusOut, true);
-            clearKeyboardAvoidTarget();
-        };
-    }, [isMobile]);
+    }, [isMobile, isTablet, setBottomTerminalOpen, setRightSidebarOpen]);
 
     const secondaryView = React.useMemo(() => {
         switch (activeMainTab) {
@@ -706,7 +390,7 @@ export const MainLayout: React.FC = () => {
             <div
                 data-page-scroll-lock="true"
                 className={cn(
-                    'main-content-safe-area h-full',
+                    'main-content-safe-area h-[100dvh]',
                     isMobile ? 'flex flex-col' : 'flex',
                     'bg-background'
                 )}
@@ -740,7 +424,7 @@ export const MainLayout: React.FC = () => {
                     setRightSidebarOpen,
                 }}>
                     {/* Mobile: header + drawer mode */}
-                    {!(isSettingsDialogOpen || isMultiRunLauncherOpen || isAgentLoopLauncherOpen) && <Header 
+                    {!isSettingsDialogOpen && <Header 
                         onToggleLeftDrawer={() => {
                             if (isRightSidebarOpen) {
                                 setRightSidebarOpen(false);
@@ -807,22 +491,17 @@ export const MainLayout: React.FC = () => {
                             }
                         }}
                         className={cn(
-                            'fixed left-0 top-0 z-50 h-full bg-transparent mobile-drawer-panel',
+                            'fixed left-0 top-[var(--oc-header-height,56px)] z-50 h-[calc(100%-var(--oc-header-height,56px))] bg-background',
                             'cursor-grab active:cursor-grabbing'
                         )}
                         aria-hidden={!mobileLeftDrawerOpen}
                     >
                         <div
-                            className="h-full overflow-hidden flex bg-sidebar shadow-none drawer-safe-area"
-                            style={{
-                                paddingTop: 'max(env(safe-area-inset-top, 0px), 48px)',
-                                paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 34px)'
-                            }}
+                            data-page-scroll-lock="true"
+                            className="h-full overflow-hidden flex bg-[var(--surface-background)] shadow-none drawer-safe-area"
+                            style={{ backgroundImage: 'linear-gradient(var(--surface-muted), var(--surface-muted))' }}
                         >
-                            <div onPointerDownCapture={(e) => e.stopPropagation()}>
-                              <NavRail className="shrink-0" mobile />
-                            </div>
-                            <div className="flex-1 min-w-0 overflow-hidden flex flex-col">
+                            <div className="flex-1 min-w-0 overflow-hidden flex flex-col" data-page-scroll-lock="true">
                                 <ErrorBoundary>
                                     <SessionSidebar mobileVariant />
                                 </ErrorBoundary>
@@ -864,18 +543,12 @@ export const MainLayout: React.FC = () => {
                             }
                         }}
                         className={cn(
-                            'fixed right-0 top-0 z-50 h-full bg-transparent mobile-drawer-panel',
+                            'fixed right-0 top-[var(--oc-header-height,56px)] z-50 h-[calc(100%-var(--oc-header-height,56px))] bg-background',
                             'cursor-grab active:cursor-grabbing'
                         )}
                         aria-hidden={!isRightSidebarOpen}
                     >
-                        <div 
-                            className="h-full overflow-hidden flex flex-col bg-background shadow-none drawer-safe-area"
-                            style={{
-                                paddingTop: 'max(env(safe-area-inset-top, 0px), 48px)',
-                                paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 34px)'
-                            }}
-                        >
+                        <div className="h-full overflow-hidden flex flex-col bg-background shadow-none drawer-safe-area" data-page-scroll-lock="true">
                             <ErrorBoundary>
                                 <React.Suspense fallback={null}><GitView /></React.Suspense>
                             </ErrorBoundary>
@@ -887,7 +560,7 @@ export const MainLayout: React.FC = () => {
                         data-page-scroll-lock="true"
                         className={cn(
                             'flex flex-1 overflow-hidden relative',
-                            (isSettingsDialogOpen || isMultiRunLauncherOpen || isAgentLoopLauncherOpen) && 'hidden'
+                            isSettingsDialogOpen && 'hidden'
                         )}
                     >
                         <main className="w-full h-full overflow-hidden bg-background relative" data-page-scroll-lock="true">
@@ -913,32 +586,6 @@ export const MainLayout: React.FC = () => {
                         </main>
                     </div>
 
-                    {/* Mobile multi-run launcher: full screen */}
-                    {isMultiRunLauncherOpen && (
-                        <div className="absolute inset-0 z-10 bg-background header-safe-area">
-                            <ErrorBoundary>
-                                <MultiRunLauncher
-                                    initialPrompt={multiRunLauncherPrefillPrompt}
-                                    onCreated={() => setMultiRunLauncherOpen(false)}
-                                    onCancel={() => setMultiRunLauncherOpen(false)}
-                                />
-                            </ErrorBoundary>
-                        </div>
-                    )}
-
-                    {/* Mobile agent loop launcher: full screen */}
-                    {isAgentLoopLauncherOpen && (
-                        <div className="absolute inset-0 z-10 bg-background header-safe-area">
-                            <ErrorBoundary>
-                                <AgentLoopLauncher
-                                    onCreated={() => setAgentLoopLauncherOpen(false)}
-                                    onCancel={() => setAgentLoopLauncherOpen(false)}
-                                    prefill={agentLoopLauncherPrefill}
-                                />
-                            </ErrorBoundary>
-                        </div>
-                    )}
-
                     {/* Mobile settings: full screen */}
                     {isSettingsDialogOpen && (
                         <div
@@ -955,23 +602,103 @@ export const MainLayout: React.FC = () => {
                 </DrawerProvider>
             ) : (
                 <>
-                    {/* Desktop: Header always on top, then Sidebar + Content below */}
-                    <div className="flex flex-1 flex-col overflow-hidden relative">
-                        {/* Normal view: Header above Sidebar + content (like SettingsView) */}
-                        <div className={cn('absolute inset-0 flex flex-col', (isMultiRunLauncherOpen || isAgentLoopLauncherOpen) && 'invisible')}>
-                            <Header />
-                            <div className="flex flex-1 overflow-hidden">
-                                <NavRail />
-                                <div className="flex flex-1 min-w-0 overflow-hidden border-t border-l border-border/50 rounded-tl-xl">
-                                <Sidebar isOpen={isSidebarOpen} isMobile={isMobile}>
-                                    <SessionSidebar hideProjectSelector />
-                                </Sidebar>
-                                <div className="flex flex-1 min-w-0 flex-col overflow-hidden">
-                                    <div className="flex flex-1 min-h-0 overflow-hidden">
-                                        <div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
-                                            <main className="flex-1 overflow-hidden bg-background relative">
-                                                <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
-                                                    <ErrorBoundary><ChatView /></ErrorBoundary>
+                    {/* Desktop: Sidebar is a left column; header belongs to content column */}
+                    <div className="flex flex-1 overflow-hidden relative">
+                        <div className={cn(
+                            'absolute inset-0 flex overflow-hidden',
+                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
+                        )} data-page-scroll-lock="true">
+                            {isSidebarOpen ? (
+                                <>
+                                    <div
+                                        aria-hidden
+                                        className={cn(
+                                            'pointer-events-none absolute top-0 z-0',
+                                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
+                                        )}
+                                        style={{
+                                            left: `${visibleSidebarWidth}px`,
+                                            width: '10px',
+                                            height: '10px',
+                                            WebkitMaskImage: 'radial-gradient(circle at 100% 100%, transparent calc(10px - 1px), black 10px)',
+                                            maskImage: 'radial-gradient(circle at 100% 100%, transparent calc(10px - 1px), black 10px)',
+                                        }}
+                                    />
+                                    <div
+                                        aria-hidden
+                                        className={cn(
+                                            'pointer-events-none absolute bottom-0 z-0',
+                                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
+                                        )}
+                                        style={{
+                                            left: `${visibleSidebarWidth}px`,
+                                            width: '10px',
+                                            height: '10px',
+                                            WebkitMaskImage: 'radial-gradient(circle at 100% 0%, transparent calc(10px - 1px), black 10px)',
+                                            maskImage: 'radial-gradient(circle at 100% 0%, transparent calc(10px - 1px), black 10px)',
+                                        }}
+                                    />
+                                </>
+                            ) : null}
+                            {isRightSidebarOpen ? (
+                                <>
+                                    <div
+                                        aria-hidden
+                                        className={cn(
+                                            'pointer-events-none absolute top-0 z-0',
+                                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
+                                        )}
+                                        style={{
+                                            right: `${visibleRightSidebarWidth}px`,
+                                            width: '10px',
+                                            height: '10px',
+                                            WebkitMaskImage: 'radial-gradient(circle at 0 100%, transparent calc(10px - 1px), black 10px)',
+                                            maskImage: 'radial-gradient(circle at 0 100%, transparent calc(10px - 1px), black 10px)',
+                                        }}
+                                    />
+                                    <div
+                                        aria-hidden
+                                        className={cn(
+                                            'pointer-events-none absolute bottom-0 z-0',
+                                            isDesktopShellRuntime ? 'bg-sidebar' : 'bg-sidebar'
+                                        )}
+                                        style={{
+                                            right: `${visibleRightSidebarWidth}px`,
+                                            width: '10px',
+                                            height: '10px',
+                                            WebkitMaskImage: 'radial-gradient(circle at 0 0, transparent calc(10px - 1px), black 10px)',
+                                            maskImage: 'radial-gradient(circle at 0 0, transparent calc(10px - 1px), black 10px)',
+                                        }}
+                                    />
+                                </>
+                            ) : null}
+                            <Sidebar
+                                isOpen={isSidebarOpen}
+                                isMobile={isMobile}
+                                className="border-0"
+                            >
+                                <SessionSidebar />
+                            </Sidebar>
+                            <div className={cn(
+                                'relative flex flex-1 min-w-0 flex-col overflow-hidden',
+                                'bg-sidebar',
+                                isSidebarOpen && 'border-l border-border/50 rounded-tl-[10px] rounded-bl-[10px]',
+                                isRightSidebarOpen && 'border-r border-border/50 rounded-tr-[10px] rounded-br-[10px]'
+                            )} data-page-scroll-lock="true">
+                                <Header desktopRightSidebarActionsHost={desktopRightSidebarActionsHost} />
+                                <div className={cn(
+                                    'flex flex-1 min-h-0 overflow-hidden',
+                                    isSidebarOpen || isChatActive ? '' : 'border-l border-border/50',
+                                    isRightSidebarOpen ? '' : 'border-r border-border/50'
+                                )} data-page-scroll-lock="true">
+                                    <div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden" data-page-scroll-lock="true">
+                                        <main className="flex-1 overflow-hidden bg-background relative" data-page-scroll-lock="true">
+                                            <div className={cn('absolute inset-0', !isChatActive && 'invisible')}>
+                                                <ErrorBoundary><ChatView /></ErrorBoundary>
+                                            </div>
+                                            {secondaryView && (
+                                                <div className="absolute inset-0">
+                                                    <ErrorBoundary>{secondaryView}</ErrorBoundary>
                                                 </div>
                                             )}
                                         </main>
@@ -997,31 +724,6 @@ export const MainLayout: React.FC = () => {
                             </RightSidebar>
                         </div>
 
-                        {/* Multi-Run Launcher: replaces tabs content only */}
-                        {isMultiRunLauncherOpen && (
-                            <div className={cn('absolute inset-0 z-10 bg-background')}>
-                                <ErrorBoundary>
-                                    <MultiRunLauncher
-                                        initialPrompt={multiRunLauncherPrefillPrompt}
-                                        onCreated={() => setMultiRunLauncherOpen(false)}
-                                        onCancel={() => setMultiRunLauncherOpen(false)}
-                                    />
-                                </ErrorBoundary>
-                            </div>
-                        )}
-
-                        {/* Agent Loop Launcher: replaces tabs content only */}
-                        {isAgentLoopLauncherOpen && (
-                            <div className={cn('absolute inset-0 z-10 bg-background')}>
-                                <ErrorBoundary>
-                                    <AgentLoopLauncher
-                                        onCreated={() => setAgentLoopLauncherOpen(false)}
-                                        onCancel={() => setAgentLoopLauncherOpen(false)}
-                                        prefill={agentLoopLauncherPrefill}
-                                    />
-                                </ErrorBoundary>
-                            </div>
-                        )}
                     </div>
 
                     {/* Desktop settings: windowed dialog with blur */}

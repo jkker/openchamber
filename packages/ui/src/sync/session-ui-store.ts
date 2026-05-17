@@ -14,11 +14,9 @@
 
 import { create } from "zustand"
 import type { Session, Part, Message, TextPart } from "@opencode-ai/sdk/v2/client"
-import type { HarnessRunConfig } from "@openchamber/harness-contracts"
 import type { AttachedFile, SessionContextUsage, SessionWorktreeAttachment } from "@/stores/types/sessionTypes"
 import type { WorktreeMetadata } from "@/types/worktree"
 import { opencodeClient } from "@/lib/opencode/client"
-import { runtimeFetch } from "@/lib/runtime-fetch"
 import { useConfigStore } from "@/stores/useConfigStore"
 import { useProjectsStore } from "@/stores/useProjectsStore"
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from "@/stores/useGlobalSessionsStore"
@@ -31,7 +29,6 @@ import { flattenAssistantTextParts } from "@/lib/messages/messageText"
 import { EXECUTION_FORK_META_TEXT } from "@/lib/messages/executionMeta"
 import { waitForWorktreeBootstrap } from "@/lib/worktrees/worktreeBootstrap"
 import { waitForPendingDraftWorktreeRequest } from "@/lib/worktrees/pendingDraftWorktree"
-import { normalizePath } from "@/lib/pathUtils"
 import { resolveProjectForSessionDirectory } from "@/lib/projectResolution"
 import {
   getSyncSessions,
@@ -42,7 +39,6 @@ import {
 } from "./sync-refs"
 import { markSessionViewed } from "./notification-store"
 import { setActiveSession } from "./sync-context"
-import { getCompatibleSessionDirectory, getCompatibleSessionProjectWorktree } from "./compat"
 import {
   createSession as createSessionAction,
   deleteSession as deleteSessionAction,
@@ -52,87 +48,39 @@ import {
   unshareSession as unshareSessionAction,
   optimisticSend,
   refetchSessionMessages,
-  revertToMessage as revertToMessageAction,
-  unrevertSession as unrevertSessionAction,
-  forkFromMessage as forkFromMessageAction,
 } from "./session-actions"
 import { useInputStore, type SyntheticContextPart } from "./input-store"
 import { useSelectionStore } from "./selection-store"
-import { getViewportSessionMemory, useViewportStore, viewportSessionKey } from "./viewport-store"
+import { useViewportStore } from "./viewport-store"
 import { useSessionWorktreeStore } from "./session-worktree-store"
 import { getAttachedSessionDirectory } from "./session-worktree-contract"
-import { setSessionOpener } from "./session-navigation"
-import { getRuntimeKey } from "@/lib/runtime-switch"
-import { rememberRuntimeLiveStatus } from "./runtime-live-memory"
 
 export type { AttachedFile }
 
 // ---------------------------------------------------------------------------
-/**
- * Resolve sandbox override based on the session's permission level.
- * Returns 'danger-full-access' when full-access is active, undefined otherwise.
- */
-function resolveSandboxOverride(sessionId: string): string | undefined {
-  const level = usePermissionStore.getState().getSessionPermissionLevel(sessionId)
-  return level === 'full-access' ? 'danger-full-access' : undefined
-}
-
-function getOpenCodeRunConfig(runConfig: HarnessRunConfig): { providerID: string; modelID: string; agent?: string; variant?: string } {
-  const raw = (runConfig as HarnessRunConfig & { raw?: { providerID?: string; modelID?: string; agent?: string; variant?: string } }).raw
-  const modelId = runConfig.model?.modelId
-  const slashIndex = typeof modelId === "string" ? modelId.indexOf("/") : -1
-  return {
-    providerID: raw?.providerID ?? (slashIndex > 0 && modelId ? modelId.slice(0, slashIndex) : ""),
-    modelID: raw?.modelID ?? (slashIndex > 0 && modelId ? modelId.slice(slashIndex + 1) : modelId ?? ""),
-    agent: runConfig.interactionMode ?? raw?.agent,
-    variant: runConfig.options?.find((option) => option.id === "variant" && typeof option.value === "string")?.value as string | undefined ?? raw?.variant,
-  }
-}
-
-function buildOpenCodeRunConfig(input: { backendId?: string; providerID: string; modelID: string; agent?: string; variant?: string }): HarnessRunConfig {
-  return toOpenCodeHarnessRunConfig(input)
-}
-
-function saveRunConfigForSession(sessionId: string, runConfig: HarnessRunConfig): void {
-  useSelectionStore.getState().saveSessionRunConfig(sessionId, runConfig)
-}
-
 // Send routing — shell mode, slash commands, or normal prompt
 // ---------------------------------------------------------------------------
 
 function routeMessage(params: {
   sessionId: string
   content: string
-  runConfig: HarnessRunConfig
+  providerID: string
+  modelID: string
+  agent?: string
+  agentMentionName?: string
+  variant?: string
   inputMode?: "normal" | "shell"
   files?: Array<{ type: "file"; mime: string; url: string; filename: string }>
   additionalParts?: Array<{ text: string; synthetic?: boolean; files?: Array<{ type: "file"; mime: string; url: string; filename: string }> }>
-  sandboxOverride?: string
 }): Promise<void> {
-  const sdk = opencodeClient.getSdkClient()
-  const openCodeConfig = getOpenCodeRunConfig(params.runConfig)
-  const explicitBackendId = useSelectionStore.getState().getSessionBackendSelection(params.sessionId)
-  const liveSession = getAllSyncSessions().find((session) => session.id === params.sessionId) as { backendId?: string | null } | undefined
-  const sessionBackendId =
-    (typeof explicitBackendId === 'string' && explicitBackendId.trim().length > 0
-      ? explicitBackendId.trim()
-      : '')
-    || (typeof liveSession?.backendId === 'string' && liveSession.backendId.trim().length > 0
-      ? liveSession.backendId.trim()
-      : '')
-    || params.runConfig.backendId
-    || 'opencode'
-
   if (params.inputMode === "shell") {
-    if (!useBackendsStore.getState().hasCapability(sessionBackendId, 'shell')) {
-      return Promise.reject(new Error(`Shell mode is not supported for backend "${sessionBackendId}"`))
-    }
+    const sdk = opencodeClient.getSdkClient()
     const dir = opencodeClient.getDirectory() || undefined
     return sdk.session.shell({
       sessionID: params.sessionId,
       directory: dir,
-      agent: openCodeConfig.agent,
-      model: { providerID: openCodeConfig.providerID, modelID: openCodeConfig.modelID },
+      agent: params.agent,
+      model: { providerID: params.providerID, modelID: params.modelID },
       command: params.content,
     }).then(() => {})
   }
@@ -146,21 +94,25 @@ function routeMessage(params: {
     const syncCommands = dirState?.command ?? []
     const storeCommands = useCommandsStore.getState().commands
 
-    const syncCommand = syncCommands.find((c) => c.name === cmdName)
-    const storeCommand = storeCommands.find((c) => c.name === cmdName)
-    const isCommand = Boolean(syncCommand || storeCommand)
+    const isCommand = syncCommands.find((c) => c.name === cmdName)
+      || storeCommands.find((c) => c.name === cmdName)
 
-    if (isCommand && storeCommand?.executionMode !== 'prompt-text') {
+    if (isCommand) {
       return optimisticSend({
         sessionId: params.sessionId,
         content: params.content,
-        runConfig: params.runConfig,
+        providerID: params.providerID,
+        modelID: params.modelID,
+        agent: params.agent,
         files: params.files,
-        send: (messageID) => harnessClient.sendCommand({
-          sessionId: params.sessionId,
-          commandId: cmdName,
+        send: (messageID) => opencodeClient.sendCommand({
+          id: params.sessionId,
+          providerID: params.providerID,
+          modelID: params.modelID,
+          command: cmdName,
           arguments: tail.join(" "),
-          runConfig: params.runConfig,
+          agent: params.agent,
+          variant: params.variant,
           files: params.files,
           messageId: messageID,
         }).then(() => {}),
@@ -172,22 +124,27 @@ function routeMessage(params: {
   return optimisticSend({
     sessionId: params.sessionId,
     content: params.content,
-    runConfig: params.runConfig,
+    providerID: params.providerID,
+    modelID: params.modelID,
+    agent: params.agent,
     files: params.files,
-    send: (messageID) => harnessClient.sendMessage({
-      sessionId: params.sessionId,
+    send: (messageID) => opencodeClient.sendMessage({
+      id: params.sessionId,
+      providerID: params.providerID,
+      modelID: params.modelID,
       text: params.content,
-      runConfig: params.runConfig,
+      agent: params.agent,
+      agentMentions: params.agentMentionName ? [{ name: params.agentMentionName }] : undefined,
+      variant: params.variant,
       files: params.files,
       additionalParts: params.additionalParts,
       messageId: messageID,
-      sandboxOverride: params.sandboxOverride,
     }).then(() => {}),
   })
 }
 
 function notifyMessageSent(sessionId: string): void {
-  runtimeFetch(`/api/sessions/${sessionId}/message-sent`, { method: "POST" })
+  fetch(`/api/sessions/${sessionId}/message-sent`, { method: "POST" })
     .catch(() => { /* ignore */ })
 }
 
@@ -201,9 +158,7 @@ export type { VoiceStatus, VoiceMode } from "./voice-store"
 
 export type NewSessionDraftState = {
   open: boolean
-  requestKey: number
   selectedProjectId?: string | null
-  backendId?: string | null
   directoryOverride: string | null
   pendingWorktreeRequestId?: string | null
   bootstrapPendingDirectory?: string | null
@@ -254,11 +209,9 @@ export type SessionUIState = {
 
   // Actions — UI state management
   setCurrentSession: (id: string | null, directoryHint?: string | null) => void
-  prepareForRuntimeSwitch: (apiBaseUrl?: string | null) => void
-  restoreForRuntimeSwitch: (apiBaseUrl?: string | null) => void
   openNewSessionDraft: (options?: Partial<NewSessionDraftState>) => void
   closeNewSessionDraft: () => void
-  setNewSessionDraftTarget: (target: { projectId?: string | null; directoryOverride?: string | null }, options?: { force?: boolean }) => void
+  setNewSessionDraftTarget: (target: { projectId?: string | null; selectedProjectId?: string | null; directoryOverride?: string | null }, options?: { force?: boolean }) => void
   setDraftPreserveDirectoryOverride: (value: boolean) => void
   acknowledgeSessionAbort: (sessionId: string) => void
   clearAbortPrompt: () => void
@@ -278,17 +231,17 @@ export type SessionUIState = {
   // Actions — SDK-calling operations (read domain data from sync-refs)
   sendMessage: (
     content: string,
-    runConfigOrProviderID: HarnessRunConfig | string,
-    modelIDOrAttachments?: string | AttachedFile[],
-    agentOrMentionName?: string,
-    attachmentsOrAdditionalParts?: AttachedFile[] | Array<{ text: string; attachments?: AttachedFile[]; synthetic?: boolean }>,
-    agentMentionNameOrInputMode?: string,
+    providerID: string,
+    modelID: string,
+    agent?: string,
+    attachments?: AttachedFile[],
+    agentMentionName?: string,
     additionalParts?: Array<{ text: string; attachments?: AttachedFile[]; synthetic?: boolean }>,
     variant?: string,
     inputMode?: "normal" | "shell",
   ) => Promise<void>
 
-  createSession: (title?: string, directoryOverride?: string | null, parentID?: string | null, backendId?: string | null) => Promise<Session | null>
+  createSession: (title?: string, directoryOverride?: string | null, parentID?: string | null) => Promise<Session | null>
   deleteSession: (id: string, options?: Record<string, unknown>) => Promise<boolean>
   deleteSessions: (ids: string[], options?: Record<string, unknown>) => Promise<{ deletedIds: string[]; failedIds: string[] }>
   archiveSession: (id: string) => Promise<boolean>
@@ -316,9 +269,22 @@ export type SessionUIState = {
 // Helpers
 // ---------------------------------------------------------------------------
 
+const normalizePath = (value?: string | null): string | null => {
+  if (typeof value !== "string") return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const replaced = trimmed.replace(/\\/g, "/")
+  if (replaced === "/") return "/"
+  return replaced.length > 1 ? replaced.replace(/\/+$/, "") : replaced
+}
+
 const resolveDirectoryKey = (session: Session): string | null => {
-  return normalizePath(getCompatibleSessionDirectory(session))
-    ?? normalizePath(getCompatibleSessionProjectWorktree(session))
+  const sessionRecord = session as Session & {
+    directory?: string | null
+    project?: { worktree?: string | null } | null
+  }
+  return normalizePath(sessionRecord.directory ?? null)
+    ?? normalizePath(sessionRecord.project?.worktree ?? null)
 }
 
 const safeStorage = getSafeStorage()
@@ -374,34 +340,8 @@ const activateConfigForDirectory = async (directory: string | null | undefined):
 
 const DEFAULT_DRAFT: NewSessionDraftState = {
   open: false,
-  requestKey: 0,
   directoryOverride: null,
   parentID: null,
-}
-
-const activeSessionByRuntime = new Map<string, string | null>()
-type RuntimeSessionMemory = {
-  sessionId: string | null
-  directory: string | null
-  draft: NewSessionDraftState
-}
-const runtimeSessionMemory = new Map<string, RuntimeSessionMemory>()
-
-const runtimeMemoryKey = (value?: string | null): string => {
-  const key = (value ?? getRuntimeKey()).trim()
-  return key || "default"
-}
-
-const cloneDraft = (draft: NewSessionDraftState): NewSessionDraftState => ({ ...draft })
-
-const writeRuntimeSessionMemory = (key: string, patch: Partial<RuntimeSessionMemory>): void => {
-  const current = runtimeSessionMemory.get(key)
-  runtimeSessionMemory.set(key, {
-    sessionId: current?.sessionId ?? null,
-    directory: current?.directory ?? null,
-    draft: current?.draft ? cloneDraft(current.draft) : { ...DEFAULT_DRAFT },
-    ...patch,
-  })
 }
 
 // ---------------------------------------------------------------------------
@@ -433,9 +373,6 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       get().closeNewSessionDraft()
     }
 
-    const key = runtimeMemoryKey()
-    activeSessionByRuntime.set(key, id)
-
     const previousSessionId = get().currentSessionId
 
     // Set currentSessionId immediately so the skeleton renders without delay.
@@ -449,7 +386,6 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     )
     const fallbackDir = opencodeClient.getDirectory() ?? directoryState.currentDirectory ?? null
     const resolvedDir = (directoryHint ? normalizePath(directoryHint) : null) ?? sessionDir ?? fallbackDir
-    writeRuntimeSessionMemory(key, { sessionId: id, directory: resolvedDir ?? null })
 
     try {
       if (resolvedDir && directoryState.currentDirectory !== resolvedDir) {
@@ -465,7 +401,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     if (previousSessionId && previousSessionId !== id) {
       const prevId = previousSessionId
       setTimeout(() => {
-        const memState = getViewportSessionMemory(prevId)
+        const memState = useViewportStore.getState().sessionMemoryState.get(prevId)
         if (!memState?.isStreaming) {
           const prevMessages = getSyncMessages(prevId)
           if (prevMessages.length > 0) {
@@ -482,50 +418,6 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     }
   },
 
-  prepareForRuntimeSwitch: (apiBaseUrl?: string | null) => {
-    const key = runtimeMemoryKey(apiBaseUrl)
-    const directory = useDirectoryStore.getState().currentDirectory || null
-    const currentSessionId = get().currentSessionId
-    const directorySnapshot = directory ? getDirectoryState(directory) : null
-    rememberRuntimeLiveStatus({
-      runtimeKey: key,
-      directory,
-      sessionId: currentSessionId,
-      status: currentSessionId ? directorySnapshot?.session_status?.[currentSessionId] : null,
-    })
-    activeSessionByRuntime.set(key, get().currentSessionId)
-    writeRuntimeSessionMemory(key, {
-      sessionId: currentSessionId,
-      directory,
-      draft: cloneDraft(get().newSessionDraft),
-    })
-  },
-
-  restoreForRuntimeSwitch: (apiBaseUrl?: string | null) => {
-    const key = runtimeMemoryKey(apiBaseUrl)
-    const memory = runtimeSessionMemory.get(key)
-    const restoredSessionId = memory?.sessionId ?? activeSessionByRuntime.get(key) ?? null
-    const restoredDraft = memory?.draft ? cloneDraft(memory.draft) : { ...DEFAULT_DRAFT }
-    const restoredDirectory = memory?.directory ?? null
-    if (restoredDirectory) {
-      useDirectoryStore.getState().setDirectory(restoredDirectory, { showOverlay: false })
-    }
-    set({
-      currentSessionId: restoredSessionId,
-      newSessionDraft: restoredSessionId ? { ...DEFAULT_DRAFT } : restoredDraft,
-      abortPromptSessionId: null,
-      abortPromptExpiresAt: null,
-      error: null,
-      sessionAbortFlags: new Map(),
-      pendingChangesBarDismissed: new Map(),
-    })
-    if (restoredSessionId) {
-      setActiveSession(opencodeClient.getDirectory() ?? "", restoredSessionId)
-    } else {
-      setActiveSession("", "")
-    }
-  },
-
   // ---------------------------------------------------------------------------
   // openNewSessionDraft
   // ---------------------------------------------------------------------------
@@ -533,10 +425,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     const projectsState = useProjectsStore.getState()
     const projects = projectsState.projects
     const availableWorktreesByProject = get().availableWorktreesByProject
-    const activeProject = projectsState.activeProjectId
-      ? projects.find((p) => p.id === projectsState.activeProjectId) ?? null
-      : null
-
+    const activeProject = projectsState.getActiveProject()
     const currentDirectory = normalizePath(useDirectoryStore.getState().currentDirectory ?? null)
     const persistedTarget = readPersistedDraftTarget()
 
@@ -550,6 +439,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     const inferredProjectFromDir = resolveDraftProjectForDirectory(projects, availableWorktreesByProject, explicitDirectory)
     const fallbackProject = (() => {
       if (activeProject) return activeProject
+      if (projectsState.activeProjectId) return projects.find((p) => p.id === projectsState.activeProjectId) ?? null
       return projects[0] ?? null
     })()
 
@@ -577,34 +467,23 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
     persistDraftTarget({ projectId: selectedProject?.id ?? null, directory })
 
-    const nextDraft: NewSessionDraftState = {
-      open: true,
-      selectedProjectId: selectedProject?.id ?? null,
-      directoryOverride: directory,
-      pendingWorktreeRequestId: options?.pendingWorktreeRequestId ?? null,
-      bootstrapPendingDirectory: normalizePath(options?.bootstrapPendingDirectory ?? null),
-      preserveDirectoryOverride: options?.preserveDirectoryOverride === true,
-      parentID: options?.parentID ?? null,
-      title: options?.title,
-      initialPrompt: options?.initialPrompt,
-      syntheticParts: options?.syntheticParts,
-      targetFolderId: options?.targetFolderId,
-    }
-
     set({
       newSessionDraft: {
-        ...nextDraft,
+        open: true,
+        selectedProjectId: selectedProject?.id ?? null,
+        directoryOverride: directory,
+        pendingWorktreeRequestId: options?.pendingWorktreeRequestId ?? null,
+        bootstrapPendingDirectory: normalizePath(options?.bootstrapPendingDirectory ?? null),
+        preserveDirectoryOverride: options?.preserveDirectoryOverride === true,
+        parentID: options?.parentID ?? null,
+        title: options?.title,
+        initialPrompt: options?.initialPrompt,
+        syntheticParts: options?.syntheticParts,
+        targetFolderId: options?.targetFolderId,
       },
       currentSessionId: null,
       error: null,
-    }))
-
-    // Clear composer attachments when opening a new session draft.
-    // Attachments from the previous session (e.g. restored by revert) must
-    // not bleed into the new session's input.
-    useInputStore.getState().clearAttachedFiles()
-
-    writeRuntimeSessionMemory(runtimeMemoryKey(), { sessionId: null, directory, draft: nextDraft })
+    })
 
     if (options?.initialPrompt) {
       useInputStore.getState().setPendingInputText(options.initialPrompt)
@@ -617,10 +496,10 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   // closeNewSessionDraft
   // ---------------------------------------------------------------------------
   closeNewSessionDraft: () => {
-    const nextDraft: NewSessionDraftState = {
+    set({
+      newSessionDraft: {
         open: false,
         selectedProjectId: null,
-        backendId: null,
         directoryOverride: null,
         pendingWorktreeRequestId: null,
         bootstrapPendingDirectory: null,
@@ -630,11 +509,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         initialPrompt: undefined,
         syntheticParts: undefined,
         targetFolderId: undefined,
-      }
-    set({
-      newSessionDraft: nextDraft,
+      },
     })
-    writeRuntimeSessionMemory(runtimeMemoryKey(), { draft: nextDraft })
   },
 
   setNewSessionDraftTarget: (target) => {
@@ -644,8 +520,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       return {
         newSessionDraft: {
           ...s.newSessionDraft,
-          selectedProjectId: target.projectId ?? s.newSessionDraft.selectedProjectId,
-          directoryOverride: nextDirectory,
+          selectedProjectId: target.projectId ?? target.selectedProjectId ?? s.newSessionDraft.selectedProjectId,
+          directoryOverride: target.directoryOverride ?? s.newSessionDraft.directoryOverride,
         },
       }
     })
@@ -695,7 +571,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     const messages = getSyncMessages(sessionId)
     if (messages.length === 0) return null
 
-    type AssistantTokens = { input: number; output: number; reasoning: number; cache: { read: number; write: number }; total?: number; contextWindow?: number }
+    type AssistantTokens = { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
     let lastTokens: AssistantTokens | undefined
     let lastMessageId: string | undefined
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -703,9 +579,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       if (msg.role !== "assistant") continue
       const tokens = (msg as { tokens?: AssistantTokens }).tokens
       if (!tokens) continue
-      const total = typeof tokens.total === 'number' && tokens.total > 0
-        ? tokens.total
-        : tokens.input + tokens.output + tokens.reasoning + (tokens.cache?.write ?? 0)
+      const total = tokens.input + tokens.output + tokens.reasoning + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
       if (total > 0) {
         lastTokens = tokens
         lastMessageId = msg.id
@@ -715,21 +589,15 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
     if (!lastTokens) return null
 
-    const totalTokens = typeof lastTokens.total === 'number' && lastTokens.total > 0
-      ? lastTokens.total
-      : lastTokens.input + lastTokens.output + lastTokens.reasoning + (lastTokens.cache?.write ?? 0)
-    const tokenContextWindow = typeof lastTokens.contextWindow === 'number' && lastTokens.contextWindow > 0
-      ? lastTokens.contextWindow
-      : 0
-    const effectiveContextLimit = tokenContextWindow > 0 ? tokenContextWindow : contextLimit
-    const thresholdLimit = effectiveContextLimit > 0 ? effectiveContextLimit : 200000
-    const percentage = effectiveContextLimit > 0 ? Math.round((totalTokens / effectiveContextLimit) * 100) : 0
+    const totalTokens = lastTokens.input + lastTokens.output + lastTokens.reasoning + (lastTokens.cache?.read ?? 0) + (lastTokens.cache?.write ?? 0)
+    const thresholdLimit = contextLimit > 0 ? contextLimit : 200000
+    const percentage = contextLimit > 0 ? Math.round((totalTokens / contextLimit) * 100) : 0
     const normalizedOutput = outputLimit > 0 ? Math.round((lastTokens.output / outputLimit) * 100) : undefined
 
     return {
       totalTokens,
       percentage,
-      contextLimit: effectiveContextLimit || 0,
+      contextLimit: contextLimit || 0,
       outputLimit: outputLimit || undefined,
       normalizedOutput,
       thresholdLimit,
@@ -748,7 +616,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         worktreeRoot: metadata.worktreeRoot ?? metadata.path ?? null,
         cwd: metadata.path ?? null,
         branch: metadata.branch ?? null,
-        headState: metadata.branch ? 'branch' : 'detached',
+        headState: metadata.headState ?? (metadata.branch ? 'branch' : 'detached'),
         worktreeStatus: metadata.worktreeStatus ?? 'ready',
         worktreeSource: metadata.worktreeSource ?? null,
         legacy: false,
@@ -822,27 +690,15 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   // ---------------------------------------------------------------------------
   sendMessage: async (
     content: string,
-    runConfigOrProviderID: HarnessRunConfig | string,
-    modelIDOrAttachments?: string | AttachedFile[],
-    agentOrMentionName?: string,
-    attachmentsOrAdditionalParts?: AttachedFile[] | Array<{ text: string; attachments?: AttachedFile[]; synthetic?: boolean }>,
-    agentMentionNameOrInputMode?: string,
+    providerID: string,
+    modelID: string,
+    agent?: string,
+    attachments?: AttachedFile[],
+    agentMentionName?: string,
     additionalParts?: Array<{ text: string; attachments?: AttachedFile[]; synthetic?: boolean }>,
     variant?: string,
     inputMode?: "normal" | "shell",
   ) => {
-    const usingRunConfig = typeof runConfigOrProviderID !== "string"
-    const openCodeConfig = usingRunConfig ? getOpenCodeRunConfig(runConfigOrProviderID) : undefined
-    const providerID = usingRunConfig ? openCodeConfig?.providerID ?? "" : runConfigOrProviderID
-    const modelID = usingRunConfig ? openCodeConfig?.modelID ?? "" : modelIDOrAttachments as string
-    const agent = usingRunConfig ? undefined : agentOrMentionName
-    const effectiveAttachments = usingRunConfig ? modelIDOrAttachments as AttachedFile[] | undefined : attachmentsOrAdditionalParts as AttachedFile[] | undefined
-    const effectiveAdditionalParts = usingRunConfig
-      ? attachmentsOrAdditionalParts as Array<{ text: string; attachments?: AttachedFile[]; synthetic?: boolean }> | undefined
-      : additionalParts
-    const effectiveVariant = usingRunConfig ? openCodeConfig?.variant : variant
-    const effectiveInputMode = usingRunConfig ? agentMentionNameOrInputMode as "normal" | "shell" | undefined : inputMode
-    const baseRunConfig = usingRunConfig ? runConfigOrProviderID : null
     // Clear non-Git changed-files bar on new user message for current session
     const sid = get().currentSessionId;
     if (sid) {
@@ -865,12 +721,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         get().resolvePendingDraftWorktreeTarget(draft.pendingWorktreeRequestId, draftDirectoryOverride)
       }
 
-      const selectionState = useSelectionStore.getState()
-      const draftBackendId = draft.backendId
-        || selectionState.draftBackendId
-        || selectionState.lastUsedBackendId
-        || "opencode"
-      const created = await get().createSession(draft.title, draftDirectoryOverride, draft.parentID ?? null, draftBackendId)
+      const created = await get().createSession(draft.title, draftDirectoryOverride, draft.parentID ?? null)
       if (!created?.id) throw new Error("Failed to create session")
 
       persistDraftTarget({
@@ -884,18 +735,16 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       const configState = useConfigStore.getState()
       const draftAgentName = configState.currentAgentName
       const effectiveDraftAgent = trimmedAgent ?? draftAgentName
-      const draftRunConfig = baseRunConfig ?? buildOpenCodeRunConfig({ backendId: draftBackendId, providerID, modelID, agent: effectiveDraftAgent, variant: effectiveVariant })
 
       if (configState.currentProviderId && configState.currentModelId) {
         useSelectionStore.getState().saveSessionModelSelection(created.id, configState.currentProviderId, configState.currentModelId)
       }
-      saveRunConfigForSession(created.id, draftRunConfig)
 
       if (effectiveDraftAgent) {
         useSelectionStore.getState().saveSessionAgentSelection(created.id, effectiveDraftAgent)
         if (configState.currentProviderId && configState.currentModelId) {
           useSelectionStore.getState().saveAgentModelForSession(created.id, effectiveDraftAgent, configState.currentProviderId, configState.currentModelId)
-          useSelectionStore.getState().saveAgentModelVariantForSession(created.id, effectiveDraftAgent, configState.currentProviderId, configState.currentModelId, effectiveVariant)
+          useSelectionStore.getState().saveAgentModelVariantForSession(created.id, effectiveDraftAgent, configState.currentProviderId, configState.currentModelId, variant)
         }
       }
 
@@ -914,8 +763,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       }
 
       const mergedAdditionalParts = draftSyntheticParts?.length
-        ? [...(effectiveAdditionalParts || []), ...draftSyntheticParts]
-        : effectiveAdditionalParts
+        ? [...(additionalParts || []), ...draftSyntheticParts]
+        : additionalParts
 
       if (createdDirectory) {
         await waitForWorktreeBootstrap(createdDirectory)
@@ -925,7 +774,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
       markPendingUserSendAnimation(created.id)
 
-      const files = effectiveAttachments?.map((a) => ({
+      const files = attachments?.map((a) => ({
         type: "file" as const,
         mime: a.mimeType,
         url: a.dataUrl,
@@ -935,8 +784,12 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       await routeMessage({
         sessionId: created.id,
         content,
-        runConfig: draftRunConfig,
-        inputMode: effectiveInputMode,
+        providerID,
+        modelID,
+        agent: effectiveDraftAgent,
+        agentMentionName,
+        variant,
+        inputMode,
         files,
         additionalParts: mergedAdditionalParts?.map((p) => ({
           text: p.text,
@@ -948,41 +801,29 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
             filename: a.filename,
           })),
         })),
-        sandboxOverride: resolveSandboxOverride(created.id),
       })
       return
     }
 
     // ---- Existing session ----
     const currentSessionId = get().currentSessionId
-    const existingSelectionState = useSelectionStore.getState()
     const sessionAgentSelection = currentSessionId
-      ? existingSelectionState.getSessionAgentSelection(currentSessionId)
+      ? useSelectionStore.getState().getSessionAgentSelection(currentSessionId)
       : null
     const configAgentName = useConfigStore.getState().currentAgentName
     const effectiveAgent = trimmedAgent || sessionAgentSelection || configAgentName || undefined
-    const runConfig = baseRunConfig ?? buildOpenCodeRunConfig({
-      backendId: currentSessionId ? existingSelectionState.getSessionBackendSelection(currentSessionId) ?? undefined : undefined,
-      providerID,
-      modelID,
-      agent: effectiveAgent,
-      variant: effectiveVariant,
-    })
 
     if (currentSessionId && effectiveAgent) {
       useSelectionStore.getState().saveSessionAgentSelection(currentSessionId, effectiveAgent)
-      useSelectionStore.getState().saveAgentModelVariantForSession(currentSessionId, effectiveAgent, providerID, modelID, effectiveVariant)
-    }
-    if (currentSessionId) {
-      saveRunConfigForSession(currentSessionId, runConfig)
+      useSelectionStore.getState().saveAgentModelVariantForSession(currentSessionId, effectiveAgent, providerID, modelID, variant)
     }
 
     if (currentSessionId) {
       const viewportState = useViewportStore.getState()
-      const memState = getViewportSessionMemory(currentSessionId)
+      const memState = viewportState.sessionMemoryState.get(currentSessionId)
       if (!memState || !memState.lastUserMessageAt) {
         const newMemState = new Map(viewportState.sessionMemoryState)
-        newMemState.set(viewportSessionKey(currentSessionId), {
+        newMemState.set(currentSessionId, {
           viewportAnchor: 0,
           isStreaming: false,
           lastAccessedAt: Date.now(),
@@ -1009,7 +850,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       markPendingUserSendAnimation(currentSessionId)
     }
 
-    const files = effectiveAttachments?.map((a) => ({
+    const files = attachments?.map((a) => ({
       type: "file" as const,
       mime: a.mimeType,
       url: a.dataUrl,
@@ -1019,10 +860,14 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     await routeMessage({
       sessionId: currentSessionId || "",
       content,
-      runConfig,
-      inputMode: effectiveInputMode,
+      providerID,
+      modelID,
+      agent: effectiveAgent,
+      agentMentionName,
+      variant,
+      inputMode,
       files,
-      additionalParts: effectiveAdditionalParts?.map((p) => ({
+      additionalParts: additionalParts?.map((p) => ({
         text: p.text,
         synthetic: p.synthetic,
         files: p.attachments?.map((a) => ({
@@ -1032,29 +877,21 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
           filename: a.filename,
         })),
       })),
-      sandboxOverride: currentSessionId ? resolveSandboxOverride(currentSessionId) : undefined,
     })
   },
 
   // ---------------------------------------------------------------------------
   // createSession
   // ---------------------------------------------------------------------------
-  createSession: async (title, directoryOverride, parentID, backendId) => {
+  createSession: async (title, directoryOverride, parentID) => {
     const draft = get().newSessionDraft
     const targetFolderId = draft.targetFolderId
     get().closeNewSessionDraft()
 
     try {
       const dir = directoryOverride ?? opencodeClient.getDirectory()
-      const session = await createSessionAction(title, dir, parentID ?? null, backendId ?? null)
+      const session = await createSessionAction(title, dir, parentID ?? null)
       if (!session) return null
-
-      const resolvedBackendId =
-        (session as { backendId?: string }).backendId
-        ?? backendId
-        ?? useBackendsStore.getState().defaultBackendId
-        ?? 'opencode'
-      useSelectionStore.getState().saveSessionBackendSelection(session.id, resolvedBackendId)
 
       if (targetFolderId) {
         const scopeKey = directoryOverride || get().lastLoadedDirectory || session.directory
@@ -1118,7 +955,11 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   // revertToMessage — delegates to session-actions (single implementation)
   // ---------------------------------------------------------------------------
   revertToMessage: async (sessionId, messageId) => {
-    await revertToMessageAction(sessionId, messageId)
+    // Ensure the complete message range is present before applying the revert
+    // marker. Reverted UI is derived from session.revert + stored messages.
+    await refetchSessionMessages(sessionId)
+    const { revertToMessage: revert } = await import("./session-actions")
+    await revert(sessionId, messageId)
   },
 
   // ---------------------------------------------------------------------------
@@ -1187,13 +1028,10 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     if (targetMessage) {
       await get().revertToMessage(sessionId, targetMessage.id, { skipRedoPush: true })
       const { toast } = await import("sonner")
-      toast.success(`Redid to: ${preview}`)
-    } else {
-      // Full unrevert
-      await unrevertSessionAction(sessionId)
-
-      const { toast } = await import("sonner")
-      toast.success("Restored all messages")
+      const { useI18nStore, formatMessage } = await import("@/lib/i18n/store")
+      const { dictionary } = useI18nStore.getState()
+      toast.success(formatMessage(dictionary, "chat.revert.toast.redo"))
+      return
     }
 
     const { unrevertSession } = await import("./session-actions")
@@ -1213,7 +1051,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     if (!existingSession) return
 
     try {
-      await forkFromMessageAction(sessionId, messageId)
+      const { forkFromMessage: fork } = await import("./session-actions")
+      await fork(sessionId, messageId)
 
       const { toast } = await import("sonner")
       toast.success(`Forked from ${existingSession.title}`)
@@ -1237,8 +1076,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     let sourceSessionId: string | undefined
     let sourceMessage: Message | undefined
 
-    for (const sid of Object.keys(state.message ?? {})) {
-      const msgs = getSyncMessages(sid)
+    for (const [sid, msgs] of Object.entries(state.message ?? {})) {
       const found = msgs.find((m) => m.id === sourceMessageId)
       if (found) {
         sourceSessionId = sid
@@ -1257,22 +1095,23 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       sourceSessionId ?? null,
       (sid) => get().worktreeMetadata.get(sid),
     )
-    const sourceSession = sourceSessionId
-      ? getAllSyncSessions().find((session) => session.id === sourceSessionId) ?? null
-      : null
-    const sourceBackendId = (
-      (sourceSession as { backendId?: string | null } | null)?.backendId
-      ?? (sourceSessionId ? useSelectionStore.getState().getSessionBackendSelection(sourceSessionId) : null)
-      ?? useSelectionStore.getState().lastUsedBackendId
-      ?? "opencode"
-    )
 
-    useSelectionStore.getState().setDraftBackendId(sourceBackendId)
-    get().openNewSessionDraft({
-      backendId: sourceBackendId,
-      directoryOverride: directory ?? null,
-      initialPrompt: assistantPlanText,
-      syntheticParts: [{ text: EXECUTION_FORK_META_TEXT, synthetic: true }],
+    const session = await get().createSession(undefined, directory ?? null, null)
+    if (!session) return
+
+    const { currentProviderId, currentModelId, currentAgentName } = useConfigStore.getState()
+    const pID = currentProviderId || useSelectionStore.getState().lastUsedProvider?.providerID
+    const mID = currentModelId || useSelectionStore.getState().lastUsedProvider?.modelID
+
+    if (!pID || !mID) return
+
+    await opencodeClient.sendMessage({
+      id: session.id,
+      providerID: pID,
+      modelID: mID,
+      text: assistantPlanText,
+      prefaceText: EXECUTION_FORK_META_TEXT,
+      agent: currentAgentName ?? undefined,
     })
   },
 
@@ -1374,7 +1213,3 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     return get().sessionPlanAvailable.get(sessionId) ?? false
   },
 }))
-
-setSessionOpener((sessionID, directory) => {
-  useSessionUIStore.getState().setCurrentSession(sessionID, directory)
-})

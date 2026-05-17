@@ -57,11 +57,9 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
   alwaysShowActions = false,
   disabledPaths,
 }) => {
-  const { isMobile } = useDeviceInfo();
-  const isWindowsRuntime = React.useMemo(
-    () => typeof navigator !== 'undefined' && /Windows/i.test(navigator.userAgent),
-    []
-  );
+  const { t } = useI18n();
+  const { isMobile, isTablet } = useDeviceInfo();
+  const showHoverActions = alwaysShowActions || isTablet;
   const [directories, setDirectories] = React.useState<DirectoryItem[]>([]);
   const [expandedPaths, setExpandedPaths] = React.useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = React.useState(true);
@@ -71,112 +69,68 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
   const [creatingInPath, setCreatingInPath] = React.useState<string | null>(null);
   const [newDirName, setNewDirName] = React.useState('');
   const [isPinnedExpanded, setIsPinnedExpanded] = React.useState(true);
-  const [mountedDriveEntries, setMountedDriveEntries] = React.useState<DirectoryItem[] | null>(null);
+  const [pinnedExpandedPaths, setPinnedExpandedPaths] = React.useState<Set<string>>(new Set());
+  const [pinnedItemChildren, setPinnedItemChildren] = React.useState<Map<string, DirectoryItem[]>>(new Map());
   const inputRef = React.useRef<HTMLInputElement>(null);
   const { requestAccess, startAccessing, isDesktop } = useFileSystemAccess();
   const previousShowHidden = React.useRef(showHidden);
 
-  const normalizeTreePath = React.useCallback((value: string | null | undefined) => {
-    if (typeof value !== 'string') {
-      return null;
+  const stripTrailingSlashes = React.useCallback((value: string | null | undefined) => {
+    if (!value) {
+      return value;
     }
-
-    const normalized = normalizePath(value);
-    if (normalized) {
-      return normalized;
+    if (value === '/' || value.length === 0) {
+      return '/';
     }
-
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed.replace(/\\/g, '/') : null;
+    let trimmed = value;
+    while (trimmed.length > 1 && trimmed.endsWith('/')) {
+      trimmed = trimmed.slice(0, -1);
+    }
+    return trimmed.length === 0 ? '/' : trimmed;
   }, []);
 
-  const isWindowsPathLike = React.useCallback((value: string | null | undefined) => {
-    if (typeof value !== 'string') {
-      return false;
+  const normalizedDisabledPaths = React.useMemo(() => {
+    const normalized = new Set<string>();
+    for (const path of disabledPaths ?? []) {
+      const value = stripTrailingSlashes(path.replace(/\\/g, '/'));
+      if (value) normalized.add(value.toLowerCase());
     }
+    return normalized;
+  }, [disabledPaths, stripTrailingSlashes]);
 
-    const trimmed = value.trim();
-    return /^\/[A-Za-z](?:\/|$)?/.test(trimmed) || /^[A-Za-z]:(?:[\\/]|$)?/.test(trimmed);
-  }, []);
-
-  const toRequestPath = React.useCallback((value: string) => {
-    const normalized = normalizeTreePath(value) ?? value.trim().replace(/\\/g, '/');
-    const converted = normalized.replace(/^\/([A-Za-z])(?=\/|$)/, (_, drive: string) => `${drive.toUpperCase()}:`);
-    return /^[A-Za-z]:$/.test(converted) ? `${converted}/` : converted;
-  }, [normalizeTreePath]);
+  const isPathDisabled = React.useCallback((path: string) => {
+    const normalized = stripTrailingSlashes(path.replace(/\\/g, '/'));
+    return normalized ? normalizedDisabledPaths.has(normalized.toLowerCase()) : false;
+  }, [normalizedDisabledPaths, stripTrailingSlashes]);
 
   const normalizedHomeDirectory = React.useMemo(() => {
-    return normalizeTreePath(homeDirectory);
-  }, [homeDirectory, normalizeTreePath]);
-
-  const normalizedCurrentPath = React.useMemo(() => {
-    return normalizeTreePath(currentPath);
-  }, [currentPath, normalizeTreePath]);
-
-  const scopeRoot = React.useMemo(() => {
-    return normalizeTreePath(rootDirectory);
-  }, [rootDirectory, normalizeTreePath]);
-
-  const isWindowsFilesystem = React.useMemo(() => {
-    if (!isWindowsRuntime) {
-      return false;
+    if (!homeDirectory) {
+      return null;
     }
-
-    return [currentPath, homeDirectory, rootDirectory].some((value) => isWindowsPathLike(value));
-  }, [currentPath, homeDirectory, isWindowsPathLike, isWindowsRuntime, rootDirectory]);
-
-  const hasScopeBoundary = scopeRoot !== null;
-  const allowWindowsDrivePicker = selectionBehavior === 'deferred' && !hasScopeBoundary;
-
-  const isPathWithinScope = React.useCallback(
-    (targetPath: string | null | undefined): boolean => {
-      const normalizedTarget = normalizeTreePath(targetPath);
-      if (!normalizedTarget) {
-        return false;
-      }
-
-      if (!scopeRoot) {
-        return true;
-      }
-
-      if (normalizedTarget === scopeRoot) {
-        return true;
-      }
-
-      if (scopeRoot === '/') {
-        return normalizedTarget.startsWith('/');
-      }
-
-      return normalizedTarget.startsWith(`${scopeRoot}/`);
-    },
-    [normalizeTreePath, scopeRoot]
-  );
+    const normalized = homeDirectory.replace(/\\/g, '/');
+    return stripTrailingSlashes(normalized) as string;
+  }, [homeDirectory, stripTrailingSlashes]);
 
   const effectiveRoot = React.useMemo(() => {
-    if (normalizedCurrentPath && isPathWithinScope(normalizedCurrentPath)) {
-      return normalizedCurrentPath;
+    if (typeof rootDirectory === 'string' && rootDirectory.length > 0) {
+      const normalized = rootDirectory.replace(/\\/g, '/');
+      const stripped = stripTrailingSlashes(normalized);
+      if (stripped && stripped !== '/') {
+        return stripped as string;
+      }
     }
-
-    if (scopeRoot) {
-      return scopeRoot;
-    }
-
     if (normalizedHomeDirectory && normalizedHomeDirectory !== '/') {
       return normalizedHomeDirectory;
     }
-
     return null;
-  }, [scopeRoot, normalizedCurrentPath, normalizedHomeDirectory, isPathWithinScope]);
+  }, [rootDirectory, normalizedHomeDirectory, stripTrailingSlashes]);
 
   const rootReady = React.useMemo(() => {
-    if (!hasScopeBoundary) {
-      return Boolean(effectiveRoot);
-    }
     if (typeof isRootReady === 'boolean') {
-      return Boolean(isRootReady && scopeRoot);
+      return Boolean(isRootReady && effectiveRoot);
     }
-    return Boolean(scopeRoot);
-  }, [hasScopeBoundary, isRootReady, effectiveRoot, scopeRoot]);
+    return Boolean(effectiveRoot);
+  }, [isRootReady, effectiveRoot]);
 
   React.useEffect(() => {
     if (!rootReady) {
@@ -185,120 +139,50 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
     }
   }, [rootReady]);
 
-  const navigationBasePath = React.useMemo(() => {
-    if (normalizedCurrentPath && isPathWithinScope(normalizedCurrentPath)) {
-      return normalizedCurrentPath;
-    }
-
-    return effectiveRoot;
-  }, [effectiveRoot, isPathWithinScope, normalizedCurrentPath]);
-
-  const getParentPath = React.useCallback((targetPath: string | null | undefined) => {
-    const normalizedTarget = normalizeTreePath(targetPath);
-    if (!normalizedTarget) {
-      return null;
-    }
-
-    if (scopeRoot && normalizedTarget === scopeRoot) {
-      return null;
-    }
-
-    if (normalizedTarget === '/') {
-      return null;
-    }
-
-    if (/^\/[A-Za-z]$/.test(normalizedTarget)) {
-      if (allowWindowsDrivePicker && isWindowsFilesystem && mountedDriveEntries && mountedDriveEntries.length > 0) {
-        return '/';
+  const isPathWithinHome = React.useCallback(
+    (targetPath: string | null | undefined): boolean => {
+      if (!targetPath) {
+        return false;
       }
-      return null;
-    }
-
-    const lastSlash = normalizedTarget.lastIndexOf('/');
-    const parent = lastSlash <= 0 ? '/' : normalizedTarget.slice(0, lastSlash);
-
-    if (!scopeRoot) {
-      return parent || '/';
-    }
-
-    if (parent === scopeRoot || parent.startsWith(`${scopeRoot}/`)) {
-      return parent;
-    }
-
-    return scopeRoot;
-  }, [allowWindowsDrivePicker, isWindowsFilesystem, mountedDriveEntries, normalizeTreePath, scopeRoot]);
-
-  const parentNavigationPath = React.useMemo(() => {
-    return getParentPath(navigationBasePath);
-  }, [getParentPath, navigationBasePath]);
-
-  const loadWindowsDrives = React.useCallback(async (): Promise<DirectoryItem[]> => {
-    if (!allowWindowsDrivePicker || !isWindowsFilesystem || scopeRoot) {
-      return [];
-    }
-
-    if (mountedDriveEntries) {
-      return mountedDriveEntries;
-    }
-
-    const entries = await opencodeClient.listMountedDrives();
-    return entries.map((entry) => ({
-      name: entry.name,
-      path: normalizeTreePath(entry.path) ?? entry.path.replace(/\\/g, '/'),
-      isDirectory: true,
-    }));
-  }, [allowWindowsDrivePicker, isWindowsFilesystem, mountedDriveEntries, normalizeTreePath, scopeRoot]);
-
-  React.useEffect(() => {
-    if (!allowWindowsDrivePicker || !isWindowsFilesystem || scopeRoot) {
-      setMountedDriveEntries(null);
-      return;
-    }
-
-    let cancelled = false;
-    void loadWindowsDrives()
-      .then((entries) => {
-        if (!cancelled) {
-          setMountedDriveEntries(entries);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setMountedDriveEntries([]);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [allowWindowsDrivePicker, isWindowsFilesystem, loadWindowsDrives, scopeRoot]);
+      if (!rootReady || !effectiveRoot) {
+        return false;
+      }
+      const normalizedTargetRaw = targetPath.replace(/\\/g, '/');
+      const normalizedTarget =
+        (stripTrailingSlashes(normalizedTargetRaw) as string) ?? normalizedTargetRaw;
+      if (normalizedTarget === effectiveRoot) {
+        return true;
+      }
+      const prefix = `${effectiveRoot}/`;
+      return normalizedTarget.startsWith(prefix);
+    },
+    [rootReady, effectiveRoot, stripTrailingSlashes]
+  );
 
   const handleDirectorySelect = async (path: string) => {
     if (!rootReady) {
       return;
     }
 
-    const normalizedPath = normalizeTreePath(path) ?? path;
-
     if (selectionBehavior === 'deferred') {
-      onSelectPath(normalizedPath);
+      onSelectPath(path);
       return;
     }
 
     if (isDesktop) {
 
-      const accessResult = await requestAccess(toRequestPath(normalizedPath));
+      const accessResult = await requestAccess(path);
       if (accessResult.success && accessResult.path) {
 
-        await startAccessing(toRequestPath(accessResult.path));
-        onSelectPath(normalizeTreePath(accessResult.path) ?? accessResult.path);
+        await startAccessing(accessResult.path);
+        onSelectPath(accessResult.path);
       } else {
         console.error('Failed to get directory access:', accessResult.error);
 
-        onSelectPath(normalizedPath);
+        onSelectPath(path);
       }
     } else {
-      onSelectPath(normalizedPath);
+      onSelectPath(path);
     }
   };
 
@@ -309,11 +193,11 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
       if (!candidate) {
         return false;
       }
-      const normalized = normalizeTreePath(candidate);
+      const normalized = stripTrailingSlashes(candidate.replace(/\\/g, '/'));
       if (!normalized || normalized === '/') {
         return false;
       }
-      setHomeDirectory(normalized);
+      setHomeDirectory(typeof normalized === 'string' ? normalized : candidate.replace(/\\/g, '/'));
       return true;
     };
 
@@ -346,7 +230,7 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [normalizeTreePath, rootDirectory]);
+  }, [rootDirectory, stripTrailingSlashes]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -357,8 +241,10 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
       }
       const normalized = paths
         .filter((path): path is string => typeof path === 'string' && path.length > 0)
-        .map((path) => normalizeTreePath(path))
-        .filter((path): path is string => typeof path === 'string' && path.length > 0);
+        .map((path) => {
+          const normalizedPath = path.replace(/\\/g, '/');
+          return (stripTrailingSlashes(normalizedPath) as string) ?? normalizedPath;
+        });
       setPinnedPaths(new Set(normalized));
     };
 
@@ -377,13 +263,13 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
       }
     };
 
-    const loadPinnedDirectories = async () => {
-      try {
-        let pinned: string[] = [];
+        const loadPinnedDirectories = async () => {
+          try {
+            let pinned: string[] = [];
 
         const response = await runtimeFetch('/api/config/settings', {
           method: 'GET',
-          headers: buildRuntimeApiHeaders(),
+          headers: { Accept: 'application/json' },
         });
         if (response.ok) {
           const data = await response.json();
@@ -416,7 +302,7 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
       cancelled = true;
       window.removeEventListener('openchamber:settings-synced', handleSettingsSynced);
     };
-  }, [normalizeTreePath]);
+  }, [stripTrailingSlashes]);
 
   const isInitialPinnedSync = React.useRef(true);
 
@@ -434,17 +320,16 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
   }, [pinnedPaths]);
 
   React.useEffect(() => {
-    if (!scopeRoot) {
+    if (!effectiveRoot) {
       return;
     }
     setPinnedPaths((prev) => {
       const filtered = Array.from(prev)
-        .map((path) => normalizeTreePath(path))
-        .filter((path): path is string => typeof path === 'string' && path.length > 0)
-        .filter((path) => isPathWithinScope(path));
+        .map((path) => (stripTrailingSlashes(path.replace(/\\/g, '/')) as string) ?? path)
+        .filter((path) => isPathWithinHome(path));
       return new Set(filtered);
     });
-  }, [isPathWithinScope, normalizeTreePath, scopeRoot]);
+  }, [effectiveRoot, isPathWithinHome, stripTrailingSlashes]);
 
   // Clean up pinned expansion state when pinned paths are removed (e.g., unpinned or filtered out)
   React.useEffect(() => {
@@ -484,10 +369,11 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
 
   const togglePin = (path: string) => {
     setPinnedPaths(prev => {
-      if (!isPathWithinScope(path)) {
+      if (!isPathWithinHome(path)) {
         return prev;
       }
-      const normalizedPath = normalizeTreePath(path) ?? path.replace(/\\/g, '/');
+      const normalizedPath =
+        (stripTrailingSlashes(path.replace(/\\/g, '/')) as string) ?? path.replace(/\\/g, '/');
       const newSet = new Set(prev);
       if (newSet.has(normalizedPath)) {
         newSet.delete(normalizedPath);
@@ -500,55 +386,42 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
 
   const pinnedDirectories = React.useMemo(() => {
     return Array.from(pinnedPaths)
-      .map((rawPath) => normalizeTreePath(rawPath) ?? rawPath)
-      .filter((path) => isPathWithinScope(path))
+      .map((rawPath) => {
+        const normalizedPath = stripTrailingSlashes(rawPath.replace(/\\/g, '/')) ?? rawPath;
+        return normalizedPath;
+      })
+      .filter((path) => isPathWithinHome(path))
       .map((path) => ({
         path,
         name: path.split('/').pop() || path
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [isPathWithinScope, normalizeTreePath, pinnedPaths]);
+  }, [pinnedPaths, isPathWithinHome, stripTrailingSlashes]);
 
   const loadDirectory = React.useCallback(async (path: string): Promise<DirectoryItem[]> => {
     const shouldInclude = (name: string) => showHidden || !name.startsWith('.');
-    const scopeBoundary = scopeRoot;
+    const normalizedHome = effectiveRoot;
 
-    if (!rootReady) {
+    if (!rootReady || !normalizedHome) {
       return [];
     }
 
-    const normalizedTarget = normalizeTreePath(path) ?? effectiveRoot;
-    if (!normalizedTarget) {
-      return [];
-    }
+    const normalizedPathRaw = path && path.length > 0 ? path : normalizedHome;
+    const normalizedPath = normalizedPathRaw ? normalizedPathRaw.replace(/\\/g, '/') : null;
+    const normalizedTarget = normalizedPath
+      ? stripTrailingSlashes(normalizedPath) ?? normalizedPath
+      : null;
 
-    if (allowWindowsDrivePicker && !scopeBoundary && isWindowsFilesystem && normalizedTarget === '/') {
-      return loadWindowsDrives();
-    }
-
-    if (scopeBoundary && !isPathWithinScope(normalizedTarget)) {
-      return [];
-    }
-
-    const isEntryAllowed = (candidatePath: string) => {
-      if (!scopeBoundary) {
-        return true;
+    if (normalizedTarget) {
+      const homePrefix = `${normalizedHome}/`;
+      const withinHome = normalizedTarget === normalizedHome || normalizedTarget.startsWith(homePrefix);
+      if (!withinHome) {
+        return [];
       }
-
-      const normalizedCandidate = normalizeTreePath(candidatePath);
-      if (!normalizedCandidate) {
-        return false;
-      }
-
-      if (scopeBoundary === '/') {
-        return normalizedCandidate.startsWith('/');
-      }
-
-      return normalizedCandidate === scopeBoundary || normalizedCandidate.startsWith(`${scopeBoundary}/`);
-    };
+    }
 
     try {
-      const filesystemEntries = await opencodeClient.listLocalDirectory(toRequestPath(normalizedTarget));
+      const filesystemEntries = await opencodeClient.listLocalDirectory(path);
       return filesystemEntries
         .filter((entry) => {
           if (!entry.isDirectory) {
@@ -557,11 +430,14 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
           if (!shouldInclude(entry.name)) {
             return false;
           }
-          return isEntryAllowed(entry.path);
+          const normalizedEntryRaw = entry.path.replace(/\\/g, '/');
+          const normalizedEntryPath = stripTrailingSlashes(normalizedEntryRaw) ?? normalizedEntryRaw;
+          const entryPrefix = normalizedEntryPath === normalizedHome ? normalizedHome : `${normalizedHome}/`;
+          return normalizedEntryPath === normalizedHome || normalizedEntryPath.startsWith(entryPrefix);
         })
         .map((entry) => ({
           name: entry.name,
-          path: normalizeTreePath(entry.path) ?? entry.path.replace(/\\/g, '/'),
+          path: entry.path.replace(/\\/g, '/'),
           isDirectory: true
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
@@ -571,7 +447,7 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
         const tempClient = opencodeClient.getApiClient();
         const response = await tempClient.file.list({
           path: '.',
-          directory: toRequestPath(normalizedTarget)
+          directory: path
         });
 
         if (!response.data) {
@@ -586,12 +462,14 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
             if (!item.name || !shouldInclude(item.name)) {
               return false;
             }
-            return isEntryAllowed(String(item.absolute || item.path || item.name));
+            const rawPath = String(item.absolute || item.path || item.name).replace(/\\/g, '/');
+            const absolutePath = stripTrailingSlashes(rawPath) ?? rawPath;
+            const entryPrefix = absolutePath === normalizedHome ? normalizedHome : `${normalizedHome}/`;
+            return absolutePath === normalizedHome || absolutePath.startsWith(entryPrefix);
           })
           .map((item: { name?: string; absolute?: string; path?: string }) => ({
             name: item.name || '',
-            path: normalizeTreePath(String(item.absolute || item.path || item.name))
-              ?? String(item.absolute || item.path || item.name).replace(/\\/g, '/'),
+            path: String(item.absolute || item.path || item.name).replace(/\\/g, '/'),
             isDirectory: true
           }))
           .filter((item): item is DirectoryItem => item.name !== '')
@@ -600,7 +478,7 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
         return [];
       }
     }
-  }, [showHidden, scopeRoot, rootReady, normalizeTreePath, effectiveRoot, isPathWithinScope, toRequestPath, isWindowsFilesystem, loadWindowsDrives, allowWindowsDrivePicker]);
+  }, [showHidden, effectiveRoot, stripTrailingSlashes, rootReady]);
 
   const hasLoadedOnce = React.useRef(false);
 
@@ -616,8 +494,8 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
       setIsLoading(true);
     }
     try {
-      const initialContents = await loadDirectory(effectiveRoot);
-      setDirectories(initialContents);
+      const homeContents = await loadDirectory(effectiveRoot);
+      setDirectories(homeContents);
       hasLoadedOnce.current = true;
     } catch { /* ignored */ } finally {
       setIsLoading(false);
@@ -799,13 +677,11 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
     setNewDirName('');
   };
 
-  const selectedPath = normalizedCurrentPath;
-
   const renderTreeItem = (item: DirectoryItem, level: number = 0) => {
     const isExpanded = expandedPaths.has(item.path);
     const hasChildren = item.isDirectory;
     const isPinned = pinnedPaths.has(item.path);
-    const isSelected = selectedPath === item.path;
+    const isSelected = currentPath === item.path;
     const isInlineVariant = variant === 'inline';
     const isDisabled = isPathDisabled(item.path);
 
@@ -990,7 +866,7 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
         <DropdownMenuItem
           className={cn(
             'flex items-center gap-1 cursor-pointer group',
-            selectedPath === item.path && 'bg-interactive-selection'
+            currentPath === item.path && 'bg-interactive-selection'
           )}
           style={{ paddingLeft: `${level * 12 + 8}px` }}
           onSelect={(e) => {
@@ -1074,89 +950,47 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
     );
   };
 
-  const renderParentNavigationRow = (path: string) => {
-    const isSelected = selectedPath === path;
+  const renderPinnedTreeItem = (item: DirectoryItem, level: number = 0) => {
+    const isExpanded = pinnedExpandedPaths.has(item.path);
+    const children = pinnedItemChildren.get(item.path);
+    const hasChildren = item.isDirectory;
+    const isPinned = pinnedPaths.has(item.path);
+    const isSelected = currentPath === item.path;
+    const isInlineVariant = variant === 'inline';
 
-    if (variant === 'inline') {
-      return (
-        <div key={`parent:${path}`}>
-          <div
-            className={cn(
-              'mx-1 rounded-lg transition-colors',
-              isMobile ? 'px-1.5 py-1' : 'px-2 py-1.5',
-              isSelected ? 'bg-primary/10' : 'hover:bg-interactive-hover/50'
-            )}
+    const rowContent = (
+      <>
+        {hasChildren && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              togglePinnedExpanded(item.path);
+            }}
+            className={cn("hover:bg-interactive-hover rounded", isMobile ? "p-0.5" : "p-0.5")}
           >
-            <button
-              type="button"
-              onClick={() => handleDirectorySelect(path)}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                if (onDoubleClickPath) {
-                  onDoubleClickPath(path);
-                }
-              }}
-              className={cn(
-                'flex w-full items-center gap-1.5 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/60 rounded min-w-0',
-                isSelected ? 'text-primary' : 'text-foreground'
-              )}
-            >
-              <RiFolder6Line
-                className={cn(
-                  'flex-shrink-0',
-                  isMobile ? 'h-4 w-4' : 'h-3.5 w-3.5',
-                  isSelected ? 'text-primary' : 'text-muted-foreground'
-                )}
-              />
-              <span
-                className={cn(
-                  'typography-ui-label font-medium truncate flex-shrink-0',
-                  isSelected ? 'text-primary' : 'text-foreground'
-                )}
-              >
-                ..
-              </span>
-              <span className="typography-meta text-muted-foreground/60 truncate">
-                {formatPathForDisplay(path, homeDirectory)}
-              </span>
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <DropdownMenuItem
-        key={`parent:${path}`}
-        onSelect={(e) => {
-          e.preventDefault();
-          handleDirectorySelect(path);
-          if (selectionBehavior === 'immediate') {
-            setIsOpen(false);
-          }
-        }}
-        className={cn(
-          'flex items-start gap-2 cursor-pointer group py-2',
-          selectedPath === path && 'bg-interactive-selection'
+            {isExpanded ? (
+              <Icon name="arrow-down-s" className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
+            ) : (
+              <Icon name="arrow-right-s" className={isMobile ? "h-3.5 w-3.5" : "h-3 w-3"} />
+            )}
+          </button>
         )}
-      >
-        <RiFolder6Line className="h-3.5 w-3.5 text-muted-foreground mt-0.5" />
-        <div className="flex-1 min-w-0">
-          <div className="typography-ui-label font-medium">..</div>
-          <div className="typography-meta text-muted-foreground">
-            {formatPathForDisplay(path, homeDirectory)}
-          </div>
-        </div>
-      </DropdownMenuItem>
-    );
-  };
+        {!hasChildren && <div className={isMobile ? "w-4.5" : "w-4"} />}
 
-  const renderPinnedRow = (name: string, path: string) => {
-    if (variant === 'inline') {
-      const isSelected = selectedPath === path;
-      return (
-        <div
-          key={path}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            handleDirectorySelect(item.path);
+            if (variant === 'dropdown' && selectionBehavior === 'immediate') {
+              setIsOpen(false);
+            }
+          }}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            if (onDoubleClickPath) {
+              onDoubleClickPath(item.path);
+            }
+          }}
           className={cn(
             'flex items-center flex-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/60 rounded',
             isMobile ? 'gap-1.5' : 'gap-1.5',
@@ -1224,30 +1058,14 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
     }
 
     return (
-      <DropdownMenuItem
-        key={path}
-        onSelect={(e) => {
-          e.preventDefault();
-          handleDirectorySelect(path);
-          if (selectionBehavior === 'immediate') {
-            setIsOpen(false);
-          }
-        }}
-        className={cn(
-          'flex items-start gap-2 cursor-pointer group py-2',
-          selectedPath === path && 'bg-interactive-selection'
-        )}
-      >
-        <RiFolder6Line className="h-3.5 w-3.5 text-muted-foreground mt-0.5" />
-        <div className="flex-1 min-w-0">
-          <div className="typography-ui-label font-medium">{name}</div>
-          <div className="typography-meta text-muted-foreground">
-            {formatPathForDisplay(path, homeDirectory)}
-          </div>
-        </div>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
+      <div key={item.path}>
+        <DropdownMenuItem
+          className={cn(
+            'flex items-center gap-1 cursor-pointer group',
+            currentPath === item.path && 'bg-interactive-selection'
+          )}
+          style={{ paddingLeft: `${level * 12 + 8}px` }}
+          onSelect={(e) => {
             e.preventDefault();
           }}
         >
@@ -1406,7 +1224,7 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
     <>
       {!rootReady ? (
         <div className="px-3 py-2 typography-ui-label text-muted-foreground">
-          Locating directory...
+          {t('directoryTree.state.locatingHomeDirectory')}
         </div>
       ) : (
         <>
@@ -1444,8 +1262,6 @@ export const DirectoryTree: React.FC<DirectoryTreeProps> = ({
           )}>
             {t('directoryTree.section.browse')}
           </div>
-
-          {parentNavigationPath ? renderParentNavigationRow(parentNavigationPath) : null}
 
           {isLoading ? (
             <div className="px-3 py-2 typography-ui-label text-muted-foreground">

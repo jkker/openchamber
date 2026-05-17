@@ -132,9 +132,11 @@ const formatPendingDeviceLabel = (grant: PendingDeviceGrant): string => {
     : `${name} - ${primary}`;
 };
 
-function App({ apis }: AppProps) {
-  const { initializeApp, isInitialized, isConnected } = useConfigStore();
-  const { error, clearError, loadSessions } = useSessionStore();
+const EmbeddedSessionChatContent: React.FC<{
+  embeddedSessionChat: EmbeddedSessionChatConfig;
+  isVSCodeRuntime: boolean;
+  embeddedBackgroundWorkEnabled: boolean;
+}> = ({ embeddedSessionChat, isVSCodeRuntime, embeddedBackgroundWorkEnabled }) => {
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
   const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
   const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
@@ -442,15 +444,16 @@ function App({ apis }: AppProps) {
   }, [isInitialized]);
 
   React.useEffect(() => {
-    let cancelled = false;
+    if (!initRetryExhausted) return;
 
-    const init = async () => {
-      if (isVSCodeRuntime) {
-        if (!cancelled) {
-          setConnectionCheckCompleted(true);
-        }
-        return;
-      }
+    const loadingElement = document.getElementById('initial-loading');
+    if (loadingElement) {
+      loadingElement.classList.add('fade-out');
+      setTimeout(() => {
+        loadingElement.remove();
+      }, 300);
+    }
+  }, [initRetryExhausted]);
 
   // Startup recovery: poll until providers AND agents are loaded.
   // loadProviders/loadAgents resolve normally even on failure (errors swallowed),
@@ -459,10 +462,17 @@ function App({ apis }: AppProps) {
     if (isVSCodeRuntime || !isConnected || !requiresOpenCodeConfig) return;
     if (providersCount > 0 && agentsCount > 0) return;
 
-      await initializeApp();
-
-      if (!cancelled) {
-        setConnectionCheckCompleted(true);
+    let active = true;
+    let retries = 0;
+    const MAX_RETRIES = 15;
+    const attempt = async () => {
+      const state = useConfigStore.getState();
+      if (state.providers.length > 0 && state.agents.length > 0) return;
+      try {
+        if (state.providers.length === 0) await loadProviders();
+        if (useConfigStore.getState().agents.length === 0) await loadAgents();
+      } catch {
+        // Retry on the next interval.
       }
     };
 

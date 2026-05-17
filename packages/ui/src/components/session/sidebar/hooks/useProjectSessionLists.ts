@@ -1,24 +1,19 @@
 import React from 'react';
 import type { Session } from '@opencode-ai/sdk/v2';
-import type { WorktreeMetadata } from '@/types/worktree';
-import { getProjectDirectories } from '@/lib/worktrees/projectDirectories';
 import { dedupeSessionsById, isSessionRelatedToProject, normalizePath } from '../utils';
-import { getCompatibleSessionArchivedAt, getCompatibleSessionDirectory, getCompatibleSessionProjectWorktree } from '@/sync/compat';
+
+type WorktreeMeta = { path: string };
 
 type Args = {
   isVSCode: boolean;
-  includeWorktreesInVSCode?: boolean;
   sessions: Session[];
   archivedSessions: Session[];
-  sessionsByDirectory: Map<string, Session[]>;
-  getSessionsByDirectory: (directory: string) => Session[];
-  availableWorktreesByProject: Map<string, WorktreeMetadata[]>;
+  availableWorktreesByProject: Map<string, WorktreeMeta[]>;
 };
 
 export const useProjectSessionLists = (args: Args) => {
   const {
     isVSCode,
-    includeWorktreesInVSCode,
     sessions,
     archivedSessions,
     availableWorktreesByProject,
@@ -107,19 +102,16 @@ export const useProjectSessionLists = (args: Args) => {
 
   const getSessionsForProject = React.useCallback(
     (project: { normalizedPath: string }) => {
-      const worktreesForProject = isVSCode && !includeWorktreesInVSCode
-        ? []
-        : (availableWorktreesByProject.get(project.normalizedPath) ?? []);
+      const worktreesForProject = isVSCode ? [] : (availableWorktreesByProject.get(project.normalizedPath) ?? []);
       const directories = [
         project.normalizedPath,
         ...worktreesForProject
           .map((meta) => normalizePath(meta.path) ?? meta.path)
           .filter((value): value is string => Boolean(value)),
-      ]);
+      ];
 
-      const matchedSessions = sessions.filter((session) =>
-        isSessionRelatedToProject(session, project.normalizedPath, validDirectories),
-      );
+      const seen = new Set<string>();
+      const collected: Session[] = [];
 
       directories.forEach((directory) => {
         const sessionsForDirectory = sessionsByDirectory.get(directory) ?? [];
@@ -157,14 +149,14 @@ export const useProjectSessionLists = (args: Args) => {
         const archived = archivedSessions.filter(isVSCodeProjectMatch);
 
         const unassignedLive = sessions.filter((session) => {
-          if (getCompatibleSessionArchivedAt(session)) {
+          if (session.time?.archived) {
             return false;
           }
-          const sessionDirectory = normalizePath(getCompatibleSessionDirectory(session));
+          const sessionDirectory = normalizePath((session as Session & { directory?: string | null }).directory ?? null);
           if (sessionDirectory) {
             return false;
           }
-          const projectWorktree = normalizePath(getCompatibleSessionProjectWorktree(session));
+          const projectWorktree = normalizePath((session as Session & { project?: { worktree?: string | null } | null }).project?.worktree ?? null);
           return projectWorktree === project.normalizedPath;
         });
 
@@ -177,9 +169,7 @@ export const useProjectSessionLists = (args: Args) => {
         return result;
       }
 
-      const worktreesForProject = isVSCode && !includeWorktreesInVSCode
-        ? []
-        : (availableWorktreesByProject.get(project.normalizedPath) ?? []);
+      const worktreesForProject = isVSCode ? [] : (availableWorktreesByProject.get(project.normalizedPath) ?? []);
       const validDirectories = new Set<string>([
         project.normalizedPath,
         ...worktreesForProject
@@ -193,14 +183,14 @@ export const useProjectSessionLists = (args: Args) => {
 
       const archived = collect(archivedSessions);
       const unassignedLive = sessions.filter((session) => {
-        if (getCompatibleSessionArchivedAt(session)) {
+        if (session.time?.archived) {
           return false;
         }
-        const sessionDirectory = normalizePath(getCompatibleSessionDirectory(session));
+        const sessionDirectory = normalizePath((session as Session & { directory?: string | null }).directory ?? null);
         if (sessionDirectory) {
           return false;
         }
-        const projectWorktree = normalizePath(getCompatibleSessionProjectWorktree(session));
+        const projectWorktree = normalizePath((session as Session & { project?: { worktree?: string | null } | null }).project?.worktree ?? null);
         if (!projectWorktree) {
           return false;
         }

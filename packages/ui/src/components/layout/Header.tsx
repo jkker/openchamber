@@ -17,15 +17,13 @@ import {
 import { SortableTabsStrip, type SortableTabsStripItem } from '@/components/ui/sortable-tabs-strip';
 
 import { DiffIcon } from '@/components/icons/DiffIcon';
-import { useUIStore, type MainTab } from '@/stores/useUIStore';
-import { useShallow } from 'zustand/react/shallow';
+import { useUIStore, type ContextPanelMode, type MainTab } from '@/stores/useUIStore';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessionWorktreeStore } from '@/sync/session-worktree-store';
 import { formatSessionWorktreeBadge } from '@/sync/session-worktree-contract';
 import { useAllLiveSessions, useSession, useSessionMessagesResolved } from '@/sync/sync-context';
 import { getAllSyncSessions } from '@/sync/sync-refs';
-import { getCompatibleSessionSlug, getCompatibleSessionSummary } from '@/sync/compat';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useQuotaAutoRefresh, useQuotaStore } from '@/stores/useQuotaStore';
 import { useGitBranchLabel } from '@/stores/useGitStore';
@@ -35,7 +33,6 @@ import { useFeatureFlagsStore } from '@/stores/useFeatureFlagsStore';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { ContextUsageDisplay } from '@/components/ui/ContextUsageDisplay';
-import { UpdateDialog } from '@/components/ui/UpdateDialog';
 import { useDeviceInfo, useTabletStandalonePwaRuntime } from '@/lib/device';
 import { cn, hasModifier } from '@/lib/utils';
 import { McpDropdownContent } from '@/components/mcp/McpDropdown';
@@ -66,39 +63,16 @@ import { OpenInAppButton } from '@/components/desktop/OpenInAppButton';
 import { forceKillTerminal } from '@/lib/terminalApi';
 import { useTerminalStore } from '@/stores/useTerminalStore';
 import { ProjectActionsButton } from '@/components/layout/ProjectActionsButton';
-import { canUseElectronDesktopIPC, invokeDesktop, isDesktopLocalOriginActive, isDesktopShell, isVSCodeRuntime, startDesktopWindowDrag, type UpdateInfo } from '@/lib/desktop';
-import { desktopHostsGet, getDesktopHostApiUrl, locationMatchesHost, redactSensitiveUrl } from '@/lib/desktopHosts';
+import { canUseElectronDesktopIPC, invokeDesktop, isDesktopShell, isVSCodeRuntime, startDesktopWindowDrag } from '@/lib/desktop';
+import { desktopHostsGet, locationMatchesHost, redactSensitiveUrl } from '@/lib/desktopHosts';
 import { resolveSessionDiffStats } from '@/components/session/sidebar/utils';
 import { Icon } from "@/components/icon/Icon";
 import { useI18n } from '@/lib/i18n';
-import { runtimeFetch } from '@/lib/runtime-fetch';
-import { getRuntimeBearerTokenSync } from '@/lib/runtime-auth';
-import { getRuntimeApiBaseUrl } from '@/lib/runtime-switch';
 import type { Session } from '@opencode-ai/sdk/v2/client';
-import { useSelectionStore } from '@/sync/selection-store';
+import type { IconName } from "@/components/icon/icons";
 
 const DESKTOP_HEADER_ICON_BUTTON_CLASS = 'app-region-no-drag inline-flex h-8 w-8 items-center justify-center gap-2 rounded-md typography-ui-label font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50 hover:bg-interactive-hover transition-colors';
 const MOBILE_HEADER_ICON_BUTTON_CLASS = 'app-region-no-drag inline-flex h-9 w-9 items-center justify-center gap-2 p-2 rounded-md typography-ui-label font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50 hover:text-foreground hover:bg-interactive-hover transition-colors';
-
-const formatBackendLabel = (backendId: string | null | undefined): string | null => {
-  if (typeof backendId !== 'string' || backendId.trim().length === 0) {
-    return null;
-  }
-
-  const normalized = backendId.trim().toLowerCase();
-  if (normalized === 'opencode') {
-    return 'OpenCode';
-  }
-  if (normalized === 'codex') {
-    return 'Codex';
-  }
-
-  return normalized
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-};
 
 type HeaderIconActionButtonProps = {
   visible?: boolean;
@@ -267,7 +241,6 @@ type DesktopServicesMenuProps = {
   isDesktopApp: boolean;
   currentInstanceLabel: string;
   compactCurrentInstanceLabel: string;
-  currentInstanceIsLocal: boolean;
   isDesktopServicesOpen: boolean;
   setIsDesktopServicesOpen: React.Dispatch<React.SetStateAction<boolean>>;
   refreshCurrentInstanceLabel: () => Promise<void>;
@@ -291,17 +264,12 @@ type DesktopServicesMenuProps = {
   showDevShutdown: boolean;
   isDevShutdownInFlight: boolean;
   onDevShutdown: () => Promise<void>;
-  remoteUpdateInfo: UpdateInfo | null;
-  remoteUpdateChecking: boolean;
-  remoteUpdateError: string | null;
-  onOpenRemoteUpdate: () => void;
 };
 
 const DesktopServicesMenu = React.memo(function DesktopServicesMenu({
   isDesktopApp,
   currentInstanceLabel,
   compactCurrentInstanceLabel,
-  currentInstanceIsLocal,
   isDesktopServicesOpen,
   setIsDesktopServicesOpen,
   refreshCurrentInstanceLabel,
@@ -325,10 +293,6 @@ const DesktopServicesMenu = React.memo(function DesktopServicesMenu({
   showDevShutdown,
   isDevShutdownInFlight,
   onDevShutdown,
-  remoteUpdateInfo,
-  remoteUpdateChecking,
-  remoteUpdateError,
-  onOpenRemoteUpdate,
 }: DesktopServicesMenuProps) {
   const { t } = useI18n();
   return (
@@ -405,39 +369,12 @@ const DesktopServicesMenu = React.memo(function DesktopServicesMenu({
         </div>
 
         {isDesktopApp && desktopServicesTab === 'instance' ? (
-          <div>
-            {!currentInstanceIsLocal ? (
-              <div className="border-b border-[var(--interactive-border)] px-4 py-2.5">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="typography-ui-label font-medium text-foreground">{t('header.services.remoteUpdate.title')}</div>
-                    <div className="typography-micro text-muted-foreground">
-                      {remoteUpdateInfo?.available
-                        ? t('header.services.remoteUpdate.available', { version: remoteUpdateInfo.version || '' })
-                        : remoteUpdateChecking
-                          ? t('header.services.remoteUpdate.checking')
-                          : remoteUpdateError || t('header.services.remoteUpdate.upToDate')}
-                    </div>
-                  </div>
-                  {remoteUpdateInfo?.available ? (
-                    <button
-                      type="button"
-                      className="shrink-0 rounded-md bg-[var(--primary-base)] px-3 py-1.5 typography-ui-label font-medium text-[var(--primary-foreground)] hover:opacity-90"
-                      onClick={onOpenRemoteUpdate}
-                    >
-                      {t('header.services.remoteUpdate.actions.open')}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
-            <DesktopHostSwitcherDialog
-              embedded
-              open={isDesktopServicesOpen && desktopServicesTab === 'instance'}
-              onOpenChange={() => {}}
-              onHostSwitched={() => setIsDesktopServicesOpen(false)}
-            />
-          </div>
+          <DesktopHostSwitcherDialog
+            embedded
+            open={isDesktopServicesOpen && desktopServicesTab === 'instance'}
+            onOpenChange={() => {}}
+            onHostSwitched={() => setIsDesktopServicesOpen(false)}
+          />
         ) : null}
 
         {desktopServicesTab === 'mcp' ? (
@@ -673,8 +610,8 @@ const normalize = (value: string): string => {
 const getActiveContextMode = (panelState: {
   isOpen: boolean;
   activeTabId: string | null;
-  tabs: Array<{ id: string; mode: 'diff' | 'file' | 'context' | 'plan' | 'chat' | 'board' }>;
-} | undefined): 'diff' | 'file' | 'context' | 'plan' | 'chat' | 'board' | null => {
+  tabs: Array<{ id: string; mode: ContextPanelMode }>;
+} | undefined): ContextPanelMode | null => {
   if (!panelState?.isOpen || !Array.isArray(panelState.tabs) || panelState.tabs.length === 0) {
     return null;
   }
@@ -718,49 +655,30 @@ export const Header: React.FC<HeaderProps> = ({
   rightDrawerOpen,
   desktopRightSidebarActionsHost = null,
 }) => {
-  const {
-    setSessionSwitcherOpen, toggleSidebar, isSidebarOpen,
-    isRightSidebarOpen, toggleBottomTerminal, toggleRightSidebar,
-    openContextOverview, openContextPlan, closeContextPanel,
-    contextPanelByDirectory, activeMainTab, setActiveMainTab,
-    shortcutOverrides,
-  } = useUIStore(useShallow((state) => ({
-    setSessionSwitcherOpen: state.setSessionSwitcherOpen,
-    toggleSidebar: state.toggleSidebar,
-    isSidebarOpen: state.isSidebarOpen,
-    isRightSidebarOpen: state.isRightSidebarOpen,
-    toggleBottomTerminal: state.toggleBottomTerminal,
-    toggleRightSidebar: state.toggleRightSidebar,
-    openContextOverview: state.openContextOverview,
-    openContextPlan: state.openContextPlan,
-    closeContextPanel: state.closeContextPanel,
-    contextPanelByDirectory: state.contextPanelByDirectory,
-    activeMainTab: state.activeMainTab,
-    setActiveMainTab: state.setActiveMainTab,
-    shortcutOverrides: state.shortcutOverrides,
-  })));
   const { t } = useI18n();
+  const setSessionSwitcherOpen = useUIStore((state) => state.setSessionSwitcherOpen);
+  const toggleSidebar = useUIStore((state) => state.toggleSidebar);
+  const isSidebarOpen = useUIStore((state) => state.isSidebarOpen);
+  const isRightSidebarOpen = useUIStore((state) => state.isRightSidebarOpen);
+  const toggleBottomTerminal = useUIStore((state) => state.toggleBottomTerminal);
+  const toggleRightSidebar = useUIStore((state) => state.toggleRightSidebar);
+  const openContextOverview = useUIStore((state) => state.openContextOverview);
+  const openContextPlan = useUIStore((state) => state.openContextPlan);
+  const openContextBrowser = useUIStore((state) => state.openContextBrowser);
+  const closeContextPanel = useUIStore((state) => state.closeContextPanel);
+  const contextPanelByDirectory = useUIStore((state) => state.contextPanelByDirectory);
+  const activeMainTab = useUIStore((state) => state.activeMainTab);
+  const setActiveMainTab = useUIStore((state) => state.setActiveMainTab);
+  const shortcutOverrides = useUIStore((state) => state.shortcutOverrides);
 
-  const currentProviderId = useConfigStore((state) => state.currentProviderId);
-  const currentModelId = useConfigStore((state) => state.currentModelId);
   const getCurrentModel = useConfigStore((state) => state.getCurrentModel);
-  const getModelMetadata = useConfigStore((state) => state.getModelMetadata);
-  const modelsMetadataSize = useConfigStore((state) => state.modelsMetadata.size);
-  void modelsMetadataSize;
   const runtimeApis = useRuntimeAPIs();
   const [isDevShutdownInFlight, setIsDevShutdownInFlight] = React.useState(false);
 
-  const {
-    getContextUsage, openNewSessionDraft, isNewSessionDraftOpen, currentSessionId,
-  } = useSessionUIStore(useShallow((state) => ({
-    getContextUsage: state.getContextUsage,
-    openNewSessionDraft: state.openNewSessionDraft,
-    isNewSessionDraftOpen: Boolean(state.newSessionDraft?.open),
-    currentSessionId: state.currentSessionId,
-  })));
-  const currentSessionModelSelection = useSelectionStore((state) =>
-    currentSessionId ? state.sessionModelSelections.get(currentSessionId) ?? null : null
-  );
+  const getContextUsage = useSessionUIStore((state) => state.getContextUsage);
+  const openNewSessionDraft = useSessionUIStore((state) => state.openNewSessionDraft);
+  const isNewSessionDraftOpen = useSessionUIStore((state) => Boolean(state.newSessionDraft?.open));
+  const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
   const currentSessionMessagesResolved = useSessionMessagesResolved(currentSessionId ?? '');
   const currentSyncedSession = useSession(currentSessionId ?? null);
   const globalActiveSessions = useGlobalSessionsStore((state) => state.activeSessions);
@@ -784,44 +702,36 @@ export const Header: React.FC<HeaderProps> = ({
     const pathSegments = activeProject.path.split(/[\\/]/).filter(Boolean);
     return pathSegments[pathSegments.length - 1] ?? null;
   }, [activeProject]);
-  const {
-    quotaResults, fetchAllQuotas, isQuotaLoading, quotaLastUpdated,
-    quotaDisplayMode, dropdownProviderIds, loadQuotaSettings, setQuotaDisplayMode,
-  } = useQuotaStore(useShallow((state) => ({
-    quotaResults: state.results,
-    fetchAllQuotas: state.fetchAllQuotas,
-    isQuotaLoading: state.isLoading,
-    quotaLastUpdated: state.lastUpdated,
-    quotaDisplayMode: state.displayMode,
-    dropdownProviderIds: state.dropdownProviderIds,
-    loadQuotaSettings: state.loadSettings,
-    setQuotaDisplayMode: state.setDisplayMode,
-  })));
+  const quotaResults = useQuotaStore((state) => state.results);
+  const fetchAllQuotas = useQuotaStore((state) => state.fetchAllQuotas);
+  const isQuotaLoading = useQuotaStore((state) => state.isLoading);
+  const quotaLastUpdated = useQuotaStore((state) => state.lastUpdated);
+  const quotaDisplayMode = useQuotaStore((state) => state.displayMode);
+  const dropdownProviderIds = useQuotaStore((state) => state.dropdownProviderIds);
+  const loadQuotaSettings = useQuotaStore((state) => state.loadSettings);
+  const setQuotaDisplayMode = useQuotaStore((state) => state.setDisplayMode);
 
   const { isMobile } = useDeviceInfo();
-  const { githubAuthStatus, setGitHubAuthStatus } = useGitHubAuthStore(
-    useShallow((state) => ({
-      githubAuthStatus: state.status,
-      setGitHubAuthStatus: state.setStatus,
-    })),
-  );
+  const githubAuthStatus = useGitHubAuthStore((state) => state.status);
+  const setGitHubAuthStatus = useGitHubAuthStore((state) => state.setStatus);
 
   const headerRef = React.useRef<HTMLElement | null>(null);
 
-  const isDesktopApp = isDesktopShell();
+  const [isDesktopApp, setIsDesktopApp] = React.useState<boolean>(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return isDesktopShell();
+  });
+  const hasElectronDesktopIPC = React.useMemo(() => canUseElectronDesktopIPC(), []);
+  const isTabletStandalonePwa = useTabletStandalonePwaRuntime();
+  const [isDesktopWindowFullscreen, setIsDesktopWindowFullscreen] = React.useState(false);
 
   const isMacPlatform = React.useMemo(() => {
     if (typeof navigator === 'undefined') {
       return false;
     }
     return /Macintosh|Mac OS X/.test(navigator.userAgent || '');
-  }, []);
-
-  const isWindowsElectronDesktop = React.useMemo(() => {
-    if (typeof window === 'undefined') {
-      return false;
-    }
-    return Boolean(window.__OPENCHAMBER_ELECTRON__) && window.__OPENCHAMBER_PLATFORM__ === 'win32';
   }, []);
 
   const macosMajorVersion = React.useMemo(() => {
@@ -851,61 +761,16 @@ export const Header: React.FC<HeaderProps> = ({
   }, []);
 
   useEffect(() => {
-    if (!import.meta.env.DEV || typeof window === 'undefined' || typeof document === 'undefined') {
+    if (typeof window === 'undefined') {
       return;
     }
-
-    const runtimeFromWindow = (
-      window as unknown as { __OPENCHAMBER_RUNTIME_APIS__?: { runtime?: unknown } }
-    ).__OPENCHAMBER_RUNTIME_APIS__?.runtime;
-    const root = document.documentElement;
-    const payload = {
-      timestamp: new Date().toISOString(),
-      isDesktopApp,
-      isMobile,
-      isMacPlatform,
-      macosMajorVersion,
-      runtimeFromHook: runtimeApis.runtime,
-      runtimeFromWindow,
-      injectedRuntimePlatform: (
-        window as unknown as { __OPENCHAMBER_RUNTIME_PLATFORM__?: unknown }
-      ).__OPENCHAMBER_RUNTIME_PLATFORM__,
-      localOriginHint: (
-        window as unknown as { __OPENCHAMBER_LOCAL_ORIGIN__?: unknown }
-      ).__OPENCHAMBER_LOCAL_ORIGIN__,
-      rootClasses: root.className,
-      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
-    };
-
-    (
-      window as unknown as {
-        __OPENCHAMBER_RUNTIME_DEBUG__?: unknown;
-      }
-    ).__OPENCHAMBER_RUNTIME_DEBUG__ = payload;
-
-    console.info('[runtime-debug][header]', payload);
-  }, [
-    isDesktopApp,
-    isMobile,
-    isMacPlatform,
-    macosMajorVersion,
-    runtimeApis.runtime,
-  ]);
+    setIsDesktopApp(isDesktopShell());
+  }, []);
 
   const currentModel = getCurrentModel();
-  const limitProviderId = currentSessionModelSelection?.providerId || currentProviderId;
-  const limitModelId = currentSessionModelSelection?.modelId || currentModelId;
-  const currentModelMetadata = limitProviderId && limitModelId
-    ? getModelMetadata(limitProviderId, limitModelId)
-    : undefined;
-  const metadataLimit = currentModelMetadata?.limit && typeof currentModelMetadata.limit === 'object'
-    ? currentModelMetadata.limit
-    : null;
-  const modelLimit = currentModel && typeof currentModel.limit === 'object' && currentModel.limit !== null
+  const limit = currentModel && typeof currentModel.limit === 'object' && currentModel.limit !== null
     ? (currentModel.limit as Record<string, unknown>)
     : null;
-  const isOpenCodeSession = (currentSyncedSession as { backendId?: string | null } | null)?.backendId === 'opencode';
-  const limit = isOpenCodeSession ? (modelLimit ?? metadataLimit) : (metadataLimit ?? modelLimit);
   const contextLimit = (limit && typeof limit.context === 'number' ? limit.context : 0);
   const outputLimit = (limit && typeof limit.output === 'number' ? limit.output : 0);
   const contextUsage = getContextUsage(contextLimit, outputLimit);
@@ -937,11 +802,6 @@ export const Header: React.FC<HeaderProps> = ({
   const [isDesktopServicesOpen, setIsDesktopServicesOpen] = React.useState(false);
   const [isUsageRefreshSpinning, setIsUsageRefreshSpinning] = React.useState(false);
   const [currentInstanceLabel, setCurrentInstanceLabel] = React.useState('Local');
-  const [currentInstanceIsLocal, setCurrentInstanceIsLocal] = React.useState(true);
-  const [remoteUpdateDialogOpen, setRemoteUpdateDialogOpen] = React.useState(false);
-  const [remoteUpdateInfo, setRemoteUpdateInfo] = React.useState<UpdateInfo | null>(null);
-  const [remoteUpdateChecking, setRemoteUpdateChecking] = React.useState(false);
-  const [remoteUpdateError, setRemoteUpdateError] = React.useState<string | null>(null);
   const compactCurrentInstanceLabel = React.useMemo(() => formatCompactHeaderLabel(currentInstanceLabel), [currentInstanceLabel]);
   const [desktopServicesTab, setDesktopServicesTab] = React.useState<'instance' | 'usage' | 'mcp'>(
     isDesktopApp ? 'instance' : 'usage'
@@ -974,25 +834,17 @@ export const Header: React.FC<HeaderProps> = ({
     }
 
     try {
-      if (isDesktopLocalOriginActive()) {
-        setCurrentInstanceLabel('Local');
-        setCurrentInstanceIsLocal(true);
-        return;
-      }
-      setCurrentInstanceIsLocal(false);
-
       const cfg = await desktopHostsGet();
+      const currentHref = window.location.href;
       const localOrigin = window.__OPENCHAMBER_LOCAL_ORIGIN__ || window.location.origin;
-      const runtimeApiBaseUrl = getRuntimeApiBaseUrl();
 
-      if (runtimeApiBaseUrl && locationMatchesHost(runtimeApiBaseUrl, localOrigin)) {
+      if (locationMatchesHost(currentHref, localOrigin)) {
         setCurrentInstanceLabel('Local');
-        setCurrentInstanceIsLocal(true);
         return;
       }
 
       const match = cfg.hosts.find((host) => {
-        return runtimeApiBaseUrl ? locationMatchesHost(runtimeApiBaseUrl, getDesktopHostApiUrl(host)) : false;
+        return locationMatchesHost(currentHref, host.url);
       });
 
       if (match?.label?.trim()) {
@@ -1003,98 +855,12 @@ export const Header: React.FC<HeaderProps> = ({
       setCurrentInstanceLabel('Instance');
     } catch {
       setCurrentInstanceLabel('Local');
-      setCurrentInstanceIsLocal(true);
     }
   }, [isDesktopApp]);
 
   useEffect(() => {
     void refreshCurrentInstanceLabel();
   }, [refreshCurrentInstanceLabel]);
-
-  const checkRemoteInstanceUpdate = React.useCallback(async () => {
-    if (currentInstanceIsLocal) {
-      setRemoteUpdateInfo(null);
-      setRemoteUpdateError(null);
-      return;
-    }
-
-    setRemoteUpdateChecking(true);
-    setRemoteUpdateError(null);
-    try {
-      const params = new URLSearchParams({ appType: 'web', instanceMode: 'remote' });
-      const response = await runtimeFetch(`/api/openchamber/update-check?${params.toString()}`, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-      });
-      if (!response.ok) {
-        throw new Error(`Server responded with ${response.status}`);
-      }
-      const data = await response.json();
-      setRemoteUpdateInfo({
-        available: data.available ?? false,
-        version: data.version,
-        currentVersion: data.currentVersion ?? 'unknown',
-        body: data.body,
-        nextSuggestedCheckInSec: typeof data.nextSuggestedCheckInSec === 'number' ? data.nextSuggestedCheckInSec : undefined,
-        packageManager: data.packageManager,
-        updateCommand: data.updateCommand,
-      });
-    } catch (error) {
-      setRemoteUpdateInfo(null);
-      setRemoteUpdateError(error instanceof Error ? error.message : t('header.services.remoteUpdate.error'));
-    } finally {
-      setRemoteUpdateChecking(false);
-    }
-  }, [currentInstanceIsLocal, t]);
-
-  React.useEffect(() => {
-    setRemoteUpdateInfo(null);
-    setRemoteUpdateError(null);
-    setRemoteUpdateDialogOpen(false);
-  }, [currentInstanceIsLocal, currentInstanceLabel]);
-
-  React.useEffect(() => {
-    if (!isDesktopApp || currentInstanceIsLocal) {
-      return;
-    }
-
-    const initialDelayMs = 3000;
-    const intervalMs = 60 * 60 * 1000;
-    let disposed = false;
-    let timer: number | null = null;
-
-    const schedule = (delayMs: number) => {
-      timer = window.setTimeout(() => {
-        if (disposed || (typeof document !== 'undefined' && document.visibilityState !== 'visible')) {
-          schedule(intervalMs);
-          return;
-        }
-        void checkRemoteInstanceUpdate().finally(() => {
-          if (!disposed) {
-            schedule(intervalMs);
-          }
-        });
-      }, delayMs);
-    };
-
-    schedule(initialDelayMs);
-
-    return () => {
-      disposed = true;
-      if (timer !== null) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [checkRemoteInstanceUpdate, currentInstanceIsLocal, currentInstanceLabel, isDesktopApp]);
-
-  const openRemoteInstanceUpdate = React.useCallback(() => {
-    if (remoteUpdateInfo?.available) {
-      setRemoteUpdateDialogOpen(true);
-      return;
-    }
-    void checkRemoteInstanceUpdate();
-  }, [checkRemoteInstanceUpdate, remoteUpdateInfo?.available]);
-
   useQuotaAutoRefresh();
   const selectedModels = useQuotaStore((state) => state.selectedModels);
   const expandedFamilies = useQuotaStore((state) => state.expandedFamilies);
@@ -1360,34 +1126,6 @@ export const Header: React.FC<HeaderProps> = ({
 
   const gitBranchForDirectory = useGitBranchLabel(openDirectory || null);
   const currentBranchLabel = gitBranchForDirectory || currentSessionWorktreeBranch || catalogWorktreeBranch;
-  const currentSessionBackendSelection = useSelectionStore((state) =>
-    currentSessionId ? state.sessionBackendSelections.get(currentSessionId) ?? null : null
-  );
-  const currentSessionBackendId = (currentSession as Session & { backendId?: string | null } | null)?.backendId
-    ?? currentSessionBackendSelection
-    ?? null;
-  const currentSessionBackendLabel = React.useMemo(() => {
-    return formatBackendLabel(currentSessionBackendId);
-  }, [currentSessionBackendId]);
-  const currentSessionTimestamp = React.useMemo(() => {
-    if (!currentSession) {
-      return null;
-    }
-    const updated = currentSession.time?.updated;
-    const created = currentSession.time?.created;
-    const resolved = typeof updated === 'number'
-      ? updated
-      : typeof created === 'number'
-        ? created
-        : null;
-    return resolved;
-  }, [currentSession]);
-  const currentSessionUpdatedLabel = React.useMemo(() => {
-    if (currentSessionTimestamp === null) {
-      return null;
-    }
-    return formatSessionDateLabel(currentSessionTimestamp);
-  }, [currentSessionTimestamp]);
 
   const currentSessionTitle = React.useMemo(() => {
     if (!currentSessionId) {
@@ -1398,8 +1136,8 @@ export const Header: React.FC<HeaderProps> = ({
   }, [activeProjectLabel, currentSession?.title, currentSessionId]);
 
   const currentSessionDiffStats = React.useMemo(() => {
-    return resolveSessionDiffStats(getCompatibleSessionSummary(currentSession ?? undefined) as Parameters<typeof resolveSessionDiffStats>[0]);
-  }, [currentSession]);
+    return resolveSessionDiffStats(currentSession?.summary as Parameters<typeof resolveSessionDiffStats>[0]);
+  }, [currentSession?.summary]);
 
   const currentSessionChanges = React.useMemo(() => {
     if (currentSessionDiffStats) {
@@ -1459,7 +1197,7 @@ export const Header: React.FC<HeaderProps> = ({
 
     if (!currentSessionId) return;
 
-    const sessionKey = `${currentSessionId || 'none'}:${sessionDirectory || 'none'}:${currentSession?.time?.created || 0}:${currentSession ? getCompatibleSessionSlug(currentSession) ?? 'none' : 'none'}`;
+    const sessionKey = `${currentSessionId || 'none'}:${sessionDirectory || 'none'}:${currentSession?.time?.created || 0}:${currentSession?.slug || 'none'}`;
     if (lastPlanSessionKeyRef.current !== sessionKey) {
       lastPlanSessionKeyRef.current = sessionKey;
     }
@@ -1471,7 +1209,7 @@ export const Header: React.FC<HeaderProps> = ({
   }, [
     planModeEnabled,
     planTabAvailable,
-    currentSession,
+    currentSession?.slug,
     currentSession?.time?.created,
     currentSessionId,
     sessionDirectory,
@@ -1484,7 +1222,7 @@ export const Header: React.FC<HeaderProps> = ({
       const payload = runtimeApis.github
         ? await runtimeApis.github.authActivate(accountId)
         : await (async () => {
-          const response = await runtimeFetch('/api/github/auth/activate', {
+          const response = await fetch('/api/github/auth/activate', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -1546,8 +1284,6 @@ export const Header: React.FC<HeaderProps> = ({
     void invokeDesktop('desktop_open_draft_mini_chat_window', {
       directory: normalize(openDirectory || activeProject?.path || ''),
       projectId: activeProject?.id ?? null,
-      apiBaseUrl: getRuntimeApiBaseUrl(),
-      clientToken: getRuntimeBearerTokenSync(),
     }).catch((error) => {
       console.warn('[header] failed to open draft mini chat window', error);
     });
@@ -1565,8 +1301,6 @@ export const Header: React.FC<HeaderProps> = ({
     void invokeDesktop('desktop_open_session_mini_chat_window', {
       sessionId: currentSessionId,
       directory: normalize(openDirectory || activeProject?.path || ''),
-      apiBaseUrl: getRuntimeApiBaseUrl(),
-      clientToken: getRuntimeBearerTokenSync(),
     }).catch((error) => {
       console.warn('[header] failed to open session mini chat window', error);
     });
@@ -1699,7 +1433,7 @@ export const Header: React.FC<HeaderProps> = ({
   }, [isDesktopApp, isMacPlatform, macosMajorVersion]);
 
   const webWindowControlsOverlayStyle = React.useMemo<React.CSSProperties | undefined>(() => {
-    if ((isDesktopApp && !isWindowsElectronDesktop) || isVSCode) {
+    if (isDesktopApp || isVSCode) {
       return undefined;
     }
 
@@ -1711,7 +1445,7 @@ export const Header: React.FC<HeaderProps> = ({
       minHeight: 'max(3rem, var(--oc-wco-titlebar-height, 0px))',
       height: 'max(3rem, var(--oc-wco-titlebar-height, 0px))',
     };
-  }, [isDesktopApp, isSidebarOpen, isTabletStandalonePwa, isVSCode, isWindowsElectronDesktop]);
+  }, [isDesktopApp, isSidebarOpen, isTabletStandalonePwa, isVSCode]);
 
   const updateHeaderHeight = React.useCallback(() => {
     if (typeof document === 'undefined') {
@@ -1868,7 +1602,7 @@ export const Header: React.FC<HeaderProps> = ({
       }
 
       try {
-        const devRes = await runtimeFetch('/api/system/dev-shutdown', {
+        const devRes = await fetch('/api/system/dev-shutdown', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ previewUrls }),
@@ -1876,7 +1610,7 @@ export const Header: React.FC<HeaderProps> = ({
         if (devRes.ok) {
           shutdownRequested = true;
         } else {
-          const shutdownRes = await runtimeFetch('/api/system/shutdown', { method: 'POST' });
+          const shutdownRes = await fetch('/api/system/shutdown', { method: 'POST' });
           shutdownRequested = shutdownRes.ok;
         }
       } catch {
@@ -2053,7 +1787,6 @@ export const Header: React.FC<HeaderProps> = ({
         isDesktopApp={isDesktopApp}
         currentInstanceLabel={currentInstanceLabel}
         compactCurrentInstanceLabel={compactCurrentInstanceLabel}
-        currentInstanceIsLocal={currentInstanceIsLocal}
         isDesktopServicesOpen={isDesktopServicesOpen}
         setIsDesktopServicesOpen={setIsDesktopServicesOpen}
         refreshCurrentInstanceLabel={refreshCurrentInstanceLabel}
@@ -2077,10 +1810,6 @@ export const Header: React.FC<HeaderProps> = ({
         showDevShutdown={showDevShutdown}
         isDevShutdownInFlight={isDevShutdownInFlight}
         onDevShutdown={handleDevShutdown}
-        remoteUpdateInfo={remoteUpdateInfo}
-        remoteUpdateChecking={remoteUpdateChecking}
-        remoteUpdateError={remoteUpdateError}
-        onOpenRemoteUpdate={openRemoteInstanceUpdate}
       />
       <HeaderIconActionButton
         title={t('header.actions.terminalPanelWithShortcut', { shortcut: shortcutLabel('toggle_terminal') })}
@@ -2165,38 +1894,17 @@ export const Header: React.FC<HeaderProps> = ({
         )}
         {!isNewSessionDraftOpen ? (
           <div className="mr-3 min-w-0">
-            <div className="truncate pl-1 typography-ui-label text-[14px] font-medium leading-tight text-foreground">
+            <div className="truncate pl-1 typography-ui-label text-[14px] font-normal leading-tight text-foreground">
               {currentSessionTitle}
             </div>
-            {(currentSessionBackendLabel || currentSessionUpdatedLabel || activeProjectLabel || currentBranchLabel || hasNonZeroSessionChanges) ? (
-              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 truncate pl-1 typography-micro text-[10.5px] font-normal leading-tight text-muted-foreground/75">
-                {currentSessionBackendLabel ? (
-                  <span className="inline-flex min-w-0 items-center gap-1">
-                    {currentSessionBackendId ? (
-                      <BackendIcon backendId={currentSessionBackendId} className="h-3 w-3 flex-shrink-0" />
-                    ) : null}
-                    <span className="truncate">{currentSessionBackendLabel}</span>
-                  </span>
-                ) : null}
-                {currentSessionBackendLabel && (currentSessionUpdatedLabel || activeProjectLabel || currentBranchLabel || hasNonZeroSessionChanges) ? (
-                  <span className="flex-shrink-0 text-muted-foreground/45">•</span>
-                ) : null}
-                {currentSessionUpdatedLabel ? <span className="flex-shrink-0">{currentSessionUpdatedLabel}</span> : null}
-                {currentSessionUpdatedLabel && (activeProjectLabel || currentBranchLabel || hasNonZeroSessionChanges) ? (
-                  <span className="flex-shrink-0 text-muted-foreground/45">•</span>
-                ) : null}
+            {(activeProjectLabel || currentBranchLabel || hasNonZeroSessionChanges) ? (
+              <div className="flex min-w-0 items-center gap-1.5 truncate pl-1 typography-micro text-[10.5px] font-normal leading-tight text-muted-foreground/75">
                 {activeProjectLabel ? <span className="truncate">{activeProjectLabel}</span> : null}
-                {activeProjectLabel && (currentBranchLabel || hasNonZeroSessionChanges) ? (
-                  <span className="flex-shrink-0 text-muted-foreground/45">•</span>
-                ) : null}
                 {currentBranchLabel ? (
                   <span className="inline-flex min-w-0 items-center gap-0.5">
                     <Icon name="git-branch" className="h-3 w-3 flex-shrink-0 text-muted-foreground/70" />
                     <span className="truncate">{currentBranchLabel}</span>
                   </span>
-                ) : null}
-                {currentBranchLabel && hasNonZeroSessionChanges ? (
-                  <span className="flex-shrink-0 text-muted-foreground/45">•</span>
                 ) : null}
                 {hasNonZeroSessionChanges ? (
                   <span className="inline-flex flex-shrink-0 items-center gap-0 text-[0.92em]">
@@ -2205,7 +1913,7 @@ export const Header: React.FC<HeaderProps> = ({
                     <span className="text-status-error/65">-{currentSessionChanges.deletions}</span>
                   </span>
                 ) : null}
-                {!isNewSessionDraftOpen && worktreeBadgeKind ? (
+                {worktreeBadgeKind ? (
                   <span className={cn(
                     "inline-flex min-w-0 items-center gap-0.5",
                     worktreeBadgeKind === 'attention' || worktreeBadgeKind === 'invalid' || worktreeBadgeKind === 'missing' ? 'text-status-warning' : 'text-muted-foreground/60'
@@ -2214,10 +1922,10 @@ export const Header: React.FC<HeaderProps> = ({
                     <span className="truncate">{worktreeBadge}</span>
                   </span>
                 ) : null}
-              </span>
+              </div>
             ) : null}
-          </button>
-        </SessionSwitcherDropdown>
+          </div>
+        ) : null}
 
         {tabs.length > 0 && (
           <div className="flex items-center gap-1 rounded-lg bg-[var(--surface-muted)]/50 p-1">
@@ -2678,26 +2386,12 @@ export const Header: React.FC<HeaderProps> = ({
   );
 
   return (
-    <>
-      <header
-        ref={headerRef}
-        className={headerClassName}
-        style={{ ['--padding-scale' as string]: '1' } as React.CSSProperties}
-      >
-        {isMobile ? renderMobile() : renderDesktop()}
-      </header>
-      <UpdateDialog
-        open={remoteUpdateDialogOpen}
-        onOpenChange={setRemoteUpdateDialogOpen}
-        info={remoteUpdateInfo}
-        downloading={false}
-        downloaded={false}
-        progress={null}
-        error={remoteUpdateError}
-        onDownload={() => {}}
-        onRestart={() => {}}
-        runtimeType="web"
-      />
-    </>
+    <header
+      ref={headerRef}
+      className={headerClassName}
+      style={{ ['--padding-scale' as string]: '1' } as React.CSSProperties}
+    >
+      {isMobile ? renderMobile() : renderDesktop()}
+    </header>
   );
 };

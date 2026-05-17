@@ -139,11 +139,15 @@ const persistDesktopClientToken = async (apiBaseUrl: string, clientToken: string
   }).catch(() => undefined);
 };
 
-const AuthShell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div
-    className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background text-foreground"
-    style={{ fontFamily: '"Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif' }}
-  >
+const AuthShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const titlebarDragStyle = React.useMemo<React.CSSProperties>(() => {
+    return {
+      height: 'var(--oc-wco-titlebar-height, 0px)',
+      right: 'var(--oc-wco-right-inset, 0px)',
+    };
+  }, []);
+
+  return (
     <div
       className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background text-foreground"
       style={{ fontFamily: '"Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif' }}

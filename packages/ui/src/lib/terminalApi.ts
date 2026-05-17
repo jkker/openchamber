@@ -13,10 +13,6 @@ export interface TerminalTransportCapability {
   ws?: TerminalWebSocketDescriptor;
 }
 
-import { buildRuntimeApiHeaders, resolveRuntimeApiBaseUrl, resolveRuntimeApiEndpoint } from '@/lib/instances/runtimeApiBaseUrl';
-import { resolveSelectedInstance } from '@/stores/useInstancesStore';
-import { getAccessToken } from '@/lib/auth/tokenStorage';
-
 export interface TerminalSession {
   sessionId: string;
   cols: number;
@@ -89,41 +85,6 @@ const GLOBAL_TERMINAL_TRANSPORT_STATE_KEY = '__openchamberTerminalTransportState
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
-
-const getSelectedAccessToken = (): string | null => {
-  const selected = resolveSelectedInstance();
-  if (!selected?.id) {
-    return null;
-  }
-  return getAccessToken(selected.id);
-};
-
-const appendAccessTokenQuery = (rawUrl: string): string => {
-  const token = getSelectedAccessToken();
-  if (!token) {
-    return rawUrl;
-  }
-
-  try {
-    const parsed = new URL(rawUrl, typeof window !== 'undefined' ? window.location.href : 'http://localhost');
-    parsed.searchParams.set('access_token', token);
-    return parsed.toString();
-  } catch {
-    return rawUrl;
-  }
-};
-
-const resolveRuntimeApiOrigin = (): string => {
-  if (typeof window === 'undefined') {
-    return '';
-  }
-
-  try {
-    return new URL(resolveRuntimeApiBaseUrl(), window.location.href).origin;
-  } catch {
-    return window.location.origin;
-  }
-};
 
 const normalizeWebSocketPath = (pathValue: string): string => {
   return getRuntimeUrlResolver().websocket(pathValue);
@@ -765,9 +726,7 @@ const applyTerminalTransportCapabilities = (capabilities: TerminalSession['capab
 const sendTerminalInputHttp = async (sessionId: string, data: string): Promise<void> => {
   const response = await runtimeFetch(`/api/terminal/${sessionId}/input`, {
     method: 'POST',
-    headers: buildRuntimeApiHeaders({
-      'Content-Type': 'text/plain',
-    }),
+    headers: { 'Content-Type': 'text/plain' },
     body: data,
   });
 
@@ -780,9 +739,7 @@ const sendTerminalInputHttp = async (sessionId: string, data: string): Promise<v
 export async function createTerminalSession(options: CreateTerminalOptions): Promise<TerminalSession> {
   const response = await runtimeFetch('/api/terminal/create', {
     method: 'POST',
-    headers: buildRuntimeApiHeaders({
-      'Content-Type': 'application/json',
-    }),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       cwd: options.cwd,
       cols: options.cols ?? 80,
@@ -840,72 +797,6 @@ const connectTerminalStreamViaSse = (
       eventSource.close();
       eventSource = null;
     }
-  };
-
-  const connect = () => {
-    if (isClosed || terminalExited) {
-      return;
-    }
-
-    if (eventSource && eventSource.readyState !== EventSource.CLOSED) {
-      console.warn('Attempted to create duplicate EventSource, skipping');
-      return;
-    }
-
-    hasDispatchedOpen = false;
-    eventSource = new EventSource(
-      appendAccessTokenQuery(resolveRuntimeApiEndpoint(`/terminal/${sessionId}/stream`))
-    );
-
-    connectionTimeoutId = setTimeout(() => {
-      if (!hasDispatchedOpen && eventSource?.readyState !== EventSource.OPEN) {
-        console.error('Terminal connection timeout');
-        eventSource?.close();
-        handleError(new Error('Connection timeout'), false);
-      }
-    }, connectionTimeout);
-
-    eventSource.onopen = () => {
-      if (hasDispatchedOpen) {
-        return;
-      }
-      hasDispatchedOpen = true;
-      retryCount = 0;
-      clearTimeouts();
-
-      onEvent({ type: 'connected' });
-    };
-
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data) as TerminalStreamEvent;
-
-        if (data.type === 'exit') {
-          getTerminalInputWsGlobalState().manager?.unbindSession(sessionId);
-          terminalExited = true;
-          cleanup();
-        }
-
-        onEvent(data);
-      } catch (error) {
-        console.error('Failed to parse terminal event:', error);
-        onError?.(error as Error, false);
-      }
-    };
-
-    eventSource.onerror = (error) => {
-      console.error('Terminal stream error:', error, 'readyState:', eventSource?.readyState);
-      clearTimeouts();
-
-      const isFatalError = terminalExited || eventSource?.readyState === EventSource.CLOSED;
-
-      eventSource?.close();
-      eventSource = null;
-
-      if (!terminalExited) {
-        handleError(new Error('Terminal stream connection error'), isFatalError);
-      }
-    };
   };
 
   const handleError = (error: Error, isFatal: boolean) => {
@@ -1037,9 +928,7 @@ export async function resizeTerminal(
 ): Promise<void> {
   const response = await runtimeFetch(`/api/terminal/${sessionId}/resize`, {
     method: 'POST',
-    headers: buildRuntimeApiHeaders({
-      'Content-Type': 'application/json',
-    }),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cols, rows }),
   });
 
@@ -1054,7 +943,6 @@ export async function closeTerminal(sessionId: string): Promise<void> {
 
   const response = await runtimeFetch(`/api/terminal/${sessionId}`, {
     method: 'DELETE',
-    headers: buildRuntimeApiHeaders(),
   });
 
   if (!response.ok) {
@@ -1071,9 +959,7 @@ export async function restartTerminalSession(
 
   const response = await runtimeFetch(`/api/terminal/${currentSessionId}/restart`, {
     method: 'POST',
-    headers: buildRuntimeApiHeaders({
-      'Content-Type': 'application/json',
-    }),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       cwd: options.cwd,
       cols: options.cols ?? 80,
@@ -1097,9 +983,7 @@ export async function forceKillTerminal(options: {
 }): Promise<void> {
   const response = await runtimeFetch('/api/terminal/force-kill', {
     method: 'POST',
-    headers: buildRuntimeApiHeaders({
-      'Content-Type': 'application/json',
-    }),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options),
   });
 
