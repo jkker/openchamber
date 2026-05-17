@@ -1428,8 +1428,32 @@ class OpencodeService {
   // Agent Management
   async listAgents(): Promise<Agent[]> {
     try {
-      // Always use global config (no directory parameter)
-      const response = await this.client.app.agents();
+      const base = this.baseUrl.replace(/\/+$/, '');
+      const url = new URL(`${base}/agent`, typeof window !== 'undefined' ? window.location.href : 'http://localhost');
+      if (this.currentDirectory) {
+        url.searchParams.set('directory', this.currentDirectory);
+      }
+
+      const response = await fetch(url.toString(), {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json().catch(() => null);
+        if (Array.isArray(data)) {
+          return data as Agent[];
+        }
+      }
+    } catch {
+    }
+
+    try {
+      const response = await this.client.app.agents(
+        this.currentDirectory ? { directory: this.currentDirectory } : undefined
+      );
       return response.data || [];
     } catch {
       return [];
