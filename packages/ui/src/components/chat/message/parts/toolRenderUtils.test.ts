@@ -17,12 +17,15 @@ describe('toolRenderUtils', () => {
         expect(isStaticTool('task')).toBe(false);
     });
 
-    test('keeps known summary tools static', () => {
-        expect(isStaticTool('read')).toBe(true);
-        expect(isStaticTool('grep')).toBe(true);
-        expect(isStaticTool('glob')).toBe(true);
-        expect(isStaticTool('todowrite')).toBe(true);
-        expect(isExpandableTool('grep')).toBe(false);
+    test('makes built-in summary tools expandable for input and output inspection', () => {
+        expect(isExpandableTool('read')).toBe(true);
+        expect(isExpandableTool('grep')).toBe(true);
+        expect(isExpandableTool('glob')).toBe(true);
+        expect(isExpandableTool('websearch')).toBe(true);
+        expect(isExpandableTool('todowrite')).toBe(true);
+        expect(isStaticTool('read')).toBe(false);
+        expect(isStaticTool('grep')).toBe(false);
+        expect(isStaticTool('todowrite')).toBe(false);
     });
 
     test('treats unknown custom tool names as expandable', () => {

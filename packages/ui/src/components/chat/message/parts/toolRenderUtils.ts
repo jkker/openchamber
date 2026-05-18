@@ -1,16 +1,5 @@
 const STANDALONE_TOOL_NAMES = new Set<string>(['task']);
-
-const STATIC_TOOL_NAMES = new Set<string>([
-    'read', 'file_read',
-    'grep', 'search', 'find', 'ripgrep', 'glob',
-    'list',
-    'webfetch', 'fetch', 'curl', 'wget',
-    'websearch', 'web-search', 'search_web', 'codesearch', 'perplexity',
-    'skill',
-    'todowrite', 'todoread',
-    'plan_enter', 'plan_exit',
-    'structuredoutput',
-]);
+const STATIC_TOOL_NAMES = new Set<string>();
 
 const SEARCH_TOOL_NAMES = new Set<string>(['grep', 'search', 'find', 'ripgrep', 'glob']);
 
@@ -33,7 +22,7 @@ export const isExpandableTool = (toolName: unknown): boolean => {
         return false;
     }
 
-    return !STANDALONE_TOOL_NAMES.has(normalizedToolName) && !STATIC_TOOL_NAMES.has(normalizedToolName);
+    return !STANDALONE_TOOL_NAMES.has(normalizedToolName);
 };
 
 export const isStandaloneTool = (toolName: unknown): boolean => {
