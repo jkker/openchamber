@@ -7,15 +7,14 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
-import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { CodeMirrorEditor } from '@/components/ui/CodeMirrorEditor';
 import { GoToLineDialog } from './GoToLineDialog';
 import { PreviewToggleButton } from './PreviewToggleButton';
+import { OpenChamberFileTree } from '@/components/files/OpenChamberFileTree';
 import { JsonTreeView } from '@/components/ui/JsonTreeView';
 import { SimpleMarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { languageByExtension, loadLanguageByExtension } from '@/lib/codemirror/languageByExtension';
@@ -29,10 +28,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { useDebouncedValue } from '@/hooks/useDebouncedValue';
-import { useFileSearchStore } from '@/stores/useFileSearchStore';
 import { useDeviceInfo } from '@/lib/device';
-import { cn, getModifierLabel, getRevealLabelKey, hasModifier } from '@/lib/utils';
+import { cn, getModifierLabel, hasModifier } from '@/lib/utils';
 import { getLanguageFromExtension, getImageMimeType, isImageFile } from '@/lib/toolHelpers';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { EditorView } from '@codemirror/view';
@@ -44,7 +41,6 @@ import { useFilesViewTabsStore } from '@/stores/useFilesViewTabsStore';
 import { useGitStatus } from '@/stores/useGitStore';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { buildCodeMirrorCommentWidgets, normalizeLineRange, useInlineCommentController } from '@/components/comments';
-import { opencodeClient } from '@/lib/opencode/client';
 import { useDirectoryShowHidden } from '@/lib/directoryShowHidden';
 import { useFilesViewShowGitignored } from '@/lib/filesViewShowGitignored';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
@@ -57,6 +53,13 @@ import { openDesktopFileInApp, openDesktopPath } from '@/lib/desktop';
 import { useOpenInAppsStore } from '@/stores/useOpenInAppsStore';
 import { eventMatchesShortcut, getEffectiveShortcutCombo } from '@/lib/shortcuts';
 import { useI18n } from '@/lib/i18n';
+import {
+  getAncestorPaths,
+  getDisplayPath,
+  getParentDirectoryPath,
+  isPathWithinRoot,
+  normalizePath,
+} from '@/components/files/fileTreeOperations';
 
 type FileNode = {
   name: string;
@@ -75,28 +78,6 @@ type FileStatSnapshot = {
 type SelectedLineRange = {
   start: number;
   end: number;
-};
-
-const getParentDirectoryPath = (path: string): string => {
-  const normalized = normalizePath(path);
-  if (!normalized) return '';
-  if (normalized === '/' || /^[A-Za-z]:\/$/.test(normalized)) {
-    return normalized;
-  }
-
-  const lastSlash = normalized.lastIndexOf('/');
-  if (lastSlash < 0) {
-    return normalized;
-  }
-  if (lastSlash === 0) {
-    return '/';
-  }
-
-  const parent = normalized.slice(0, lastSlash);
-  if (/^[A-Za-z]:$/.test(parent)) {
-    return `${parent}/`;
-  }
-  return parent;
 };
 
 const OpenInAppListIcon = ({ label, iconDataUrl }: { label: string; iconDataUrl?: string }) => {
@@ -126,111 +107,6 @@ const OpenInAppListIcon = ({ label, iconDataUrl }: { label: string; iconDataUrl?
   );
 };
 
-const sortNodes = (items: FileNode[]) =>
-  items.slice().sort((a, b) => {
-    if (a.type !== b.type) {
-      return a.type === 'directory' ? -1 : 1;
-    }
-    return a.name.localeCompare(b.name);
-  });
-
-const normalizePath = (value: string): string => {
-  if (!value) return '';
-
-  const raw = value.replace(/\\/g, '/');
-  const hadUncPrefix = raw.startsWith('//');
-
-  let normalized = raw.replace(/\/+/g, '/');
-  if (hadUncPrefix && !normalized.startsWith('//')) {
-    normalized = `/${normalized}`;
-  }
-
-  const isUnixRoot = normalized === '/';
-  const isWindowsDriveRoot = /^[A-Za-z]:\/$/.test(normalized);
-  if (!isUnixRoot && !isWindowsDriveRoot) {
-    normalized = normalized.replace(/\/+$/, '');
-  }
-
-  return normalized;
-};
-
-const isAbsolutePath = (value: string): boolean => {
-  return value.startsWith('/') || value.startsWith('//') || /^[A-Za-z]:\//.test(value);
-};
-
-const toComparablePath = (value: string): string => {
-  if (/^[A-Za-z]:\//.test(value)) {
-    return value.toLowerCase();
-  }
-  return value;
-};
-
-const isPathWithinRoot = (path: string, root: string): boolean => {
-  const normalizedRoot = normalizePath(root);
-  const normalizedPath = normalizePath(path);
-  if (!normalizedRoot || !normalizedPath) return false;
-
-  const comparableRoot = toComparablePath(normalizedRoot);
-  const comparablePath = toComparablePath(normalizedPath);
-  return comparablePath === comparableRoot || comparablePath.startsWith(`${comparableRoot}/`);
-};
-
-const getAncestorPaths = (filePath: string, root: string): string[] => {
-  const normalizedRoot = normalizePath(root);
-  const normalizedFile = normalizePath(filePath);
-
-  // Ensure file is within root
-  if (!isPathWithinRoot(normalizedFile, normalizedRoot)) return [];
-
-  const relative = normalizedFile.slice(normalizedRoot.length).replace(/^\//, '');
-  const parts = relative.split('/');
-  const ancestors: string[] = [];
-  let current = normalizedRoot;
-
-  for (let i = 0; i < parts.length - 1; i++) {
-    current = current ? `${current}/${parts[i]}` : parts[i];
-    ancestors.push(current);
-  }
-  return ancestors;
-};
-
-const getDisplayPath = (root: string | null, path: string): string => {
-  if (!path) {
-    return '';
-  }
-
-  const normalizedFilePath = normalizePath(path);
-  if (!root || !isPathWithinRoot(normalizedFilePath, root)) {
-    return normalizedFilePath;
-  }
-
-  const relative = normalizedFilePath.slice(root.length);
-  return relative.startsWith('/') ? relative.slice(1) : relative;
-};
-
-const DEFAULT_IGNORED_DIR_NAMES = new Set(['node_modules']);
-
-type FileStatus = 'open' | 'modified' | 'git-modified' | 'git-added' | 'git-deleted';
-
-const FileStatusDot: React.FC<{ status: FileStatus }> = ({ status }) => {
-  const color = {
-    open: 'var(--status-info)',
-    modified: 'var(--status-warning)',
-    'git-modified': 'var(--status-warning)',
-    'git-added': 'var(--status-success)',
-    'git-deleted': 'var(--status-error)',
-  }[status];
-
-  return <span className="size-2 rounded-full" style={{ backgroundColor: color }} />;
-};
-
-const shouldIgnoreEntryName = (name: string): boolean => DEFAULT_IGNORED_DIR_NAMES.has(name);
-
-const shouldIgnorePath = (path: string): boolean => {
-  const normalized = normalizePath(path);
-  return normalized === 'node_modules' || normalized.endsWith('/node_modules') || normalized.includes('/node_modules/');
-};
-
 const isDirectoryReadError = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error ?? '');
   const normalized = message.toLowerCase();
@@ -252,10 +128,6 @@ const getInitialAutoSaveEnabled = (): boolean => {
   }
 };
 
-const getFileIcon = (filePath: string, extension?: string): React.ReactNode => {
-  return <FileTypeIcon filePath={filePath} extension={extension} />;
-};
-
 const isMarkdownFile = (path: string): boolean => {
   if (!path) return false;
   const ext = path.toLowerCase().split('.').pop();
@@ -272,284 +144,6 @@ const isHtmlFile = (path: string): boolean => {
   if (!path) return false;
   const ext = path.toLowerCase().split('.').pop();
   return ext === 'html' || ext === 'htm';
-};
-
-interface FileRowProps {
-  node: FileNode;
-  root: string;
-  isExpanded: boolean;
-  isActive: boolean;
-  isMobile: boolean;
-  alwaysShowActions: boolean;
-  status?: FileStatus | null;
-  badge?: { modified: number; added: number } | null;
-  permissions: {
-    canRename: boolean;
-    canCreateFile: boolean;
-    canCreateFolder: boolean;
-    canDelete: boolean;
-    canReveal: boolean;
-  };
-  downloadFile?: (path: string) => Promise<void>;
-  contextMenuPath: string | null;
-  setContextMenuPath: (path: string | null) => void;
-  onSelect: (node: FileNode) => void;
-  onToggle: (path: string) => void;
-  onRevealPath: (path: string) => void;
-  onOpenDialog: (type: 'createFile' | 'createFolder' | 'rename' | 'delete', data: { path: string; name?: string; type?: 'file' | 'directory' }) => void;
-}
-
-const FileRow: React.FC<FileRowProps> = ({
-  node,
-  root,
-  isExpanded,
-  isActive,
-  isMobile,
-  alwaysShowActions,
-  status,
-  badge,
-  permissions,
-  downloadFile,
-  contextMenuPath,
-  setContextMenuPath,
-  onSelect,
-  onToggle,
-  onRevealPath,
-  onOpenDialog,
-}) => {
-  const { t } = useI18n();
-  const isDir = node.type === 'directory';
-  const { canRename, canCreateFile, canCreateFolder, canDelete, canReveal } = permissions;
-
-  const handleContextMenu = React.useCallback((event?: React.MouseEvent) => {
-    if (!canRename && !canCreateFile && !canCreateFolder && !canDelete && !canReveal) {
-      return;
-    }
-    event?.preventDefault();
-    setContextMenuPath(node.path);
-  }, [canRename, canCreateFile, canCreateFolder, canDelete, canReveal, node.path, setContextMenuPath]);
-
-  const handleInteraction = React.useCallback(() => {
-    if (isDir) {
-      onToggle(node.path);
-    } else {
-      onSelect(node);
-    }
-  }, [isDir, node, onSelect, onToggle]);
-
-  const handleMenuButtonClick = React.useCallback((event: React.MouseEvent) => {
-    event.stopPropagation();
-    setContextMenuPath(node.path);
-  }, [node.path, setContextMenuPath]);
-
-  return (
-    <div
-      className="group relative flex items-center"
-      onContextMenu={!isMobile ? handleContextMenu : undefined}
-    >
-      <button
-        type="button"
-        onClick={handleInteraction}
-        onContextMenu={!isMobile ? handleContextMenu : undefined}
-        className={cn(
-          'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-foreground transition-colors pr-8 select-none',
-          isActive ? 'bg-interactive-selection/70' : 'hover:bg-interactive-hover/40'
-        )}
-      >
-        {isDir ? (
-          isExpanded ? (
-            <Icon name="folder-open-fill" className="size-4 flex-shrink-0 text-primary/60" />
-          ) : (
-            <Icon name="folder-3-fill" className="size-4 flex-shrink-0 text-primary/60" />
-          )
-        ) : (
-          getFileIcon(node.path, node.extension)
-        )}
-        <span
-          className="min-w-0 flex-1 truncate typography-meta"
-          title={node.path}
-        >
-          {node.name}
-        </span>
-        {!isDir && status && <FileStatusDot status={status} />}
-        {isDir && badge && (
-          <span className="text-xs flex items-center gap-1 ml-auto mr-1">
-            {badge.modified > 0 && <span className="text-[var(--status-warning)]">M{badge.modified}</span>}
-            {badge.added > 0 && <span className="text-[var(--status-success)]">+{badge.added}</span>}
-          </span>
-        )}
-      </button>
-      {(canRename || canCreateFile || canCreateFolder || canDelete || canReveal) && (
-        <div className={cn(
-          "absolute right-1 top-1/2 -translate-y-1/2",
-          alwaysShowActions ? "opacity-100" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100"
-        )}>
-          <DropdownMenu
-            open={contextMenuPath === node.path}
-            onOpenChange={(open) => setContextMenuPath(open ? node.path : null)}
-          >
-            <DropdownMenuTrigger asChild>
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                className="size-6"
-                onClick={handleMenuButtonClick}
-              >
-                <Icon name="more-2-fill" className="size-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" side={isMobile ? "bottom" : "bottom"} onCloseAutoFocus={() => setContextMenuPath(null)}>
-              {canRename && (
-                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onOpenDialog('rename', node); }}>
-                  <Icon name="edit" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.rename')}
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuItem onClick={(e) => {
-                e.stopPropagation();
-                void copyTextToClipboard(node.path).then((result) => {
-                  if (result.ok) {
-                    toast.success(t('sidebarFilesTree.toast.pathCopied'));
-                    return;
-                  }
-                  toast.error(t('sidebarFilesTree.toast.copyFailed'));
-                });
-              }}>
-                <Icon name="file-copy" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.copyPath')}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={(e) => {
-                e.stopPropagation();
-                const relativePath = getDisplayPath(root, node.path) || node.path;
-                void copyTextToClipboard(relativePath).then((result) => {
-                  if (result.ok) {
-                    toast.success(t('filesView.toast.relativePathCopied'));
-                    return;
-                  }
-                  toast.error(t('sidebarFilesTree.toast.copyFailed'));
-                });
-              }}>
-                <Icon name="file-copy-2" className="mr-2 size-4" /> {t('filesView.tree.menu.copyRelativePath')}
-              </DropdownMenuItem>
-              {!isDir && downloadFile && (
-                <DropdownMenuItem onClick={(e) => {
-                  e.stopPropagation();
-                  void downloadFile(node.path);
-                }}>
-                  <Icon name="download" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.save')}
-                </DropdownMenuItem>
-              )}
-              {canReveal && (
-                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onRevealPath(node.path); }}>
-                  <Icon name="folder-received" className="mr-2 size-4" /> {t(getRevealLabelKey())}
-                </DropdownMenuItem>
-              )}
-              {isDir && (canCreateFile || canCreateFolder) && (
-                <>
-                  <DropdownMenuSeparator />
-                  {canCreateFile && (
-                    <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onOpenDialog('createFile', node); }}>
-                      <Icon name="file-add" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.newFile')}
-                    </DropdownMenuItem>
-                  )}
-                  {canCreateFolder && (
-                    <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onOpenDialog('createFolder', node); }}>
-                      <Icon name="folder-add" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.newFolder')}
-                    </DropdownMenuItem>
-                  )}
-                </>
-              )}
-              {canDelete && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    onClick={(e) => { e.stopPropagation(); onOpenDialog('delete', node); }}
-                    className="text-destructive focus:text-destructive"
-                  >
-                    <Icon name="delete-bin" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.delete')}
-                  </DropdownMenuItem>
-                </>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      )}
-    </div>
-  );
-};
-
-interface DialogsProps {
-  activeDialog: 'createFile' | 'createFolder' | 'rename' | 'delete' | null;
-  dialogData: { path: string; name?: string; type?: 'file' | 'directory' } | null;
-  dialogInputValue: string;
-  onDialogInputChange: (value: string) => void;
-  isDialogSubmitting: boolean;
-  onDialogSubmit: (e?: React.FormEvent) => Promise<void>;
-  onClose: () => void;
-  inputRef: React.RefObject<HTMLInputElement | null>;
-}
-
-const Dialogs: React.FC<DialogsProps> = ({
-  activeDialog,
-  dialogData,
-  dialogInputValue,
-  onDialogInputChange,
-  isDialogSubmitting,
-  onDialogSubmit,
-  onClose,
-  inputRef,
-}) => {
-  const { t } = useI18n();
-
-  return (
-    <Dialog open={!!activeDialog} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent initialFocus={inputRef}>
-        <DialogHeader>
-          <DialogTitle>
-            {activeDialog === 'createFile' && t('filesView.dialog.createFile.title')}
-            {activeDialog === 'createFolder' && t('filesView.dialog.createFolder.title')}
-            {activeDialog === 'rename' && t('filesView.dialog.rename.title')}
-            {activeDialog === 'delete' && t('filesView.dialog.delete.title')}
-          </DialogTitle>
-          <DialogDescription>
-            {activeDialog === 'createFile' && t('filesView.dialog.createFile.description', { path: dialogData?.path ?? t('filesView.dialog.rootFallback') })}
-            {activeDialog === 'createFolder' && t('filesView.dialog.createFolder.description', { path: dialogData?.path ?? t('filesView.dialog.rootFallback') })}
-            {activeDialog === 'rename' && t('filesView.dialog.rename.description', { name: dialogData?.name ?? '' })}
-            {activeDialog === 'delete' && t('filesView.dialog.delete.description', { name: dialogData?.name ?? '' })}
-          </DialogDescription>
-        </DialogHeader>
-
-        {activeDialog !== 'delete' && (
-          <div className="py-4">
-            <Input
-              value={dialogInputValue}
-              onChange={(e) => onDialogInputChange(e.target.value)}
-              placeholder={activeDialog === 'rename' ? t('filesView.dialog.rename.placeholder') : t('filesView.dialog.namePlaceholder')}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  void onDialogSubmit();
-                }
-              }}
-              ref={inputRef}
-              />
-            </div>
-          )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={isDialogSubmitting}>
-            {t('filesView.dialog.cancel')}
-          </Button>
-          <Button
-            variant={activeDialog === 'delete' ? 'destructive' : 'default'}
-            onClick={() => void onDialogSubmit()}
-            disabled={isDialogSubmitting || (activeDialog !== 'delete' && !dialogInputValue.trim())}
-          >
-            {isDialogSubmitting ? <Icon name="loader-4" className="animate-spin" /> : (
-                activeDialog === 'delete' ? t('filesView.dialog.delete.confirm') : t('filesView.dialog.confirm')
-            )}
-          </Button>
-        </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    );
 };
 
 interface FilesViewProps {
@@ -569,12 +163,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   const root = normalizePath(currentDirectory.trim());
   const showEditorTabsRow = isMobile || mode !== 'editor-only';
   const suppressFileLoadingIndicator = mode === 'editor-only' && !isMobile;
-  const searchFiles = useFileSearchStore((state) => state.searchFiles);
   const gitStatus = useGitStatus(currentDirectory);
-
-  const [searchQuery, setSearchQuery] = React.useState('');
-  const debouncedSearchQuery = useDebouncedValue(searchQuery, 200);
-  const searchInputRef = React.useRef<HTMLInputElement>(null);
 
   const [showMobilePageContent, setShowMobilePageContent] = React.useState(false);
   const [wrapLines, setWrapLines] = React.useState(true);
@@ -640,8 +229,8 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   const addOpenPath = useFilesViewTabsStore((state) => state.addOpenPath);
   const removeOpenPath = useFilesViewTabsStore((state) => state.removeOpenPath);
   const removeOpenPathsByPrefix = useFilesViewTabsStore((state) => state.removeOpenPathsByPrefix);
+  const setExpandedPaths = useFilesViewTabsStore((state) => state.setExpandedPaths);
   const setSelectedPath = useFilesViewTabsStore((state) => state.setSelectedPath);
-  const toggleExpandedPath = useFilesViewTabsStore((state) => state.toggleExpandedPath);
   const expandPaths = useFilesViewTabsStore((state) => state.expandPaths);
 
   const toFileNode = React.useCallback((path: string): FileNode => {
@@ -658,6 +247,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   }, []);
 
   const openFiles = React.useMemo(() => openPaths.map(toFileNode), [openPaths, toFileNode]);
+  const openFilePathSet = React.useMemo(() => new Set(openPaths), [openPaths]);
   const effectiveSelectedPath = React.useMemo(() => selectedPath ?? openPaths[0] ?? null, [openPaths, selectedPath]);
   const selectedFile = React.useMemo(() => (effectiveSelectedPath ? toFileNode(effectiveSelectedPath) : null), [effectiveSelectedPath, toFileNode]);
   const selectedFilePath = selectedFile?.path ?? '';
@@ -694,15 +284,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     };
   }, [openFiles.length]);
 
-  const [childrenByDir, setChildrenByDir] = React.useState<Record<string, FileNode[]>>({});
-  const loadedDirsRef = React.useRef<Set<string>>(new Set());
-  const inFlightDirsRef = React.useRef<Set<string>>(new Set());
-  const activeDirectoryLoadIdsRef = React.useRef<Map<string, number>>(new Map());
-  const nextDirectoryLoadIdRef = React.useRef(0);
-
-  const [searchResults, setSearchResults] = React.useState<FileNode[]>([]);
-  const [searching, setSearching] = React.useState(false);
-
   const [fileContent, setFileContent] = React.useState<string>('');
   const [fileLoading, setFileLoading] = React.useState(false);
   const [fileError, setFileError] = React.useState<string | null>(null);
@@ -712,7 +293,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
 
   const [draftContent, setDraftContent] = React.useState('');
   const [isSaving, setIsSaving] = React.useState(false);
-  const dialogInputRef = React.useRef<HTMLInputElement>(null);
   const autoSaveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLoadedFileStatRef = React.useRef<FileStatSnapshot | null>(null);
   const activeFileLoadIdRef = React.useRef(0);
@@ -726,11 +306,14 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   const skipDirtyOnceRef = React.useRef(false);
   const copiedContentTimeoutRef = React.useRef<number | null>(null);
   const copiedPathTimeoutRef = React.useRef<number | null>(null);
+  const [copiedContent, setCopiedContent] = React.useState(false);
+  const [copiedPath, setCopiedPath] = React.useState(false);
   const editorViewRef = React.useRef<EditorView | null>(null);
   const editorWrapperRef = React.useRef<HTMLDivElement | null>(null);
   const [editorViewReadyNonce, setEditorViewReadyNonce] = React.useState(0);
   const pendingNavigationRafRef = React.useRef<number | null>(null);
   const pendingNavigationCycleRef = React.useRef<{ key: string; attempts: number }>({ key: '', attempts: 0 });
+  const [isGoToLineOpen, setIsGoToLineOpen] = React.useState(false);
 
   React.useEffect(() => {
     return () => {
@@ -741,20 +324,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     };
   }, []);
 
-  const [activeDialog, setActiveDialog] = React.useState<'createFile' | 'createFolder' | 'rename' | 'delete' | null>(null);
-  const [dialogData, setDialogData] = React.useState<{ path: string; name?: string; type?: 'file' | 'directory' } | null>(null);
-  const [dialogInputValue, setDialogInputValue] = React.useState('');
-  const [isDialogSubmitting, setIsDialogSubmitting] = React.useState(false);
-  const [contextMenuPath, setContextMenuPath] = React.useState<string | null>(null);
-  const [copiedContent, setCopiedContent] = React.useState(false);
-  const [copiedPath, setCopiedPath] = React.useState(false);
-  const [isGoToLineOpen, setIsGoToLineOpen] = React.useState(false);
-
-  const canCreateFile = Boolean(files.writeFile);
-  const canCreateFolder = Boolean(files.createDirectory);
-  const canRename = Boolean(files.rename);
-  const canDelete = Boolean(files.delete);
-  const canReveal = Boolean(files.revealPath);
   const openInApps = useOpenInAppsStore((state) => state.availableApps);
   const openInCacheStale = useOpenInAppsStore((state) => state.isCacheStale);
   const initializeOpenInApps = useOpenInAppsStore((state) => state.initialize);
@@ -763,13 +332,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
   React.useEffect(() => {
     initializeOpenInApps();
   }, [initializeOpenInApps]);
-
-  const handleRevealPath = React.useCallback((targetPath: string) => {
-    if (!files.revealPath) return;
-    void files.revealPath(targetPath).catch(() => {
-      toast.error(t('sidebarFilesTree.toast.revealFailed'));
-    });
-  }, [files, t]);
 
   const handleOpenInApp = React.useCallback(async (app: { id: string; appName: string }) => {
     if (!selectedFile?.path) {
@@ -793,15 +355,9 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
         return;
       }
     }
+
     toast.error(t('filesView.toast.openInAppFailed', { app: app.appName }));
   }, [root, selectedFile?.path, t]);
-
-  const handleOpenDialog = React.useCallback((type: 'createFile' | 'createFolder' | 'rename' | 'delete', data: { path: string; name?: string; type?: 'file' | 'directory' }) => {
-    setActiveDialog(type);
-    setDialogData(data);
-    setDialogInputValue(type === 'rename' ? data.name || '' : '');
-    setIsDialogSubmitting(false);
-  }, []);
 
   // Line selection state for commenting
   const [lineSelection, setLineSelection] = React.useState<SelectedLineRange | null>(null);
@@ -914,402 +470,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     saveComment(text, finalRange);
     setLineSelection(null);
   }, [lineSelection, saveComment]);
-
-  const mapDirectoryEntries = React.useCallback((dirPath: string, entries: Array<{ name: string; path: string; isDirectory: boolean }>): FileNode[] => {
-    const nodes: FileNode[] = [];
-    for (const entry of entries) {
-      if (!(entry && typeof entry.name === 'string' && entry.name.length > 0)) continue;
-      if (!showHidden && entry.name.startsWith('.')) continue;
-      if (!showGitignored && shouldIgnoreEntryName(entry.name)) continue;
-      const name = entry.name;
-      const normalizedEntryPath = normalizePath(entry.path || '');
-      const path = normalizedEntryPath
-        ? (isAbsolutePath(normalizedEntryPath)
-          ? normalizedEntryPath
-          : normalizePath(`${dirPath}/${normalizedEntryPath}`))
-        : normalizePath(`${dirPath}/${name}`);
-      const type = entry.isDirectory ? 'directory' : 'file';
-      const extension = type === 'file' && name.includes('.') ? name.split('.').pop()?.toLowerCase() : undefined;
-      nodes.push({ name, path, type, extension });
-    }
-
-    return sortNodes(nodes);
-  }, [showGitignored, showHidden]);
-
-  const loadDirectory = React.useCallback(async (dirPath: string) => {
-    const normalizedDir = normalizePath(dirPath.trim());
-    if (!normalizedDir) {
-      return;
-    }
-
-    if (loadedDirsRef.current.has(normalizedDir) || inFlightDirsRef.current.has(normalizedDir)) {
-      return;
-    }
-
-    inFlightDirsRef.current = new Set(inFlightDirsRef.current);
-    inFlightDirsRef.current.add(normalizedDir);
-    const requestId = nextDirectoryLoadIdRef.current + 1;
-    nextDirectoryLoadIdRef.current = requestId;
-    activeDirectoryLoadIdsRef.current = new Map(activeDirectoryLoadIdsRef.current);
-    activeDirectoryLoadIdsRef.current.set(normalizedDir, requestId);
-
-    const isCurrentRequest = () => activeDirectoryLoadIdsRef.current.get(normalizedDir) === requestId;
-
-    const respectGitignore = !showGitignored;
-    const listPromise = runtime.isDesktop
-      ? files.listDirectory(normalizedDir, { respectGitignore }).then((result) => result.entries.map((entry) => ({
-        name: entry.name,
-        path: entry.path,
-        isDirectory: entry.isDirectory,
-      })))
-      : opencodeClient.listLocalDirectory(normalizedDir, { respectGitignore }).then((result) => result.map((entry) => ({
-        name: entry.name,
-        path: entry.path,
-        isDirectory: entry.isDirectory,
-      })));
-
-    await listPromise
-      .then((entries) => {
-        if (!isCurrentRequest()) {
-          return;
-        }
-
-        const mapped = mapDirectoryEntries(normalizedDir, entries);
-
-        loadedDirsRef.current = new Set(loadedDirsRef.current);
-        loadedDirsRef.current.add(normalizedDir);
-        setChildrenByDir((prev) => ({ ...prev, [normalizedDir]: mapped }));
-      })
-      .catch(() => {
-        if (!isCurrentRequest()) {
-          return;
-        }
-
-        setChildrenByDir((prev) => ({
-          ...prev,
-          [normalizedDir]: prev[normalizedDir] ?? [],
-        }));
-      })
-      .finally(() => {
-        if (!isCurrentRequest()) {
-          return;
-        }
-
-        activeDirectoryLoadIdsRef.current = new Map(activeDirectoryLoadIdsRef.current);
-        activeDirectoryLoadIdsRef.current.delete(normalizedDir);
-        inFlightDirsRef.current = new Set(inFlightDirsRef.current);
-        inFlightDirsRef.current.delete(normalizedDir);
-      });
-  }, [files, mapDirectoryEntries, runtime.isDesktop, showGitignored]);
-
-  const refreshRoot = React.useCallback(async () => {
-    if (!root) {
-      return;
-    }
-
-    loadedDirsRef.current = new Set();
-    inFlightDirsRef.current = new Set();
-    activeDirectoryLoadIdsRef.current = new Map();
-    setChildrenByDir((prev) => (Object.keys(prev).length === 0 ? prev : {}));
-
-    await loadDirectory(root);
-  }, [loadDirectory, root]);
-
-  /**
-   * Incrementally refresh a single directory without nuking the rest of the
-   * tree.  After the operation the parent directory is reloaded in-place so
-   * the new/renamed/deleted entry becomes visible immediately while every
-   * other expanded directory keeps its cached children.
-   */
-  const refreshDirectory = React.useCallback(async (dirPath: string) => {
-    if (!dirPath) {
-      await refreshRoot();
-      return;
-    }
-    const normalized = normalizePath(dirPath);
-    // Remove from loaded set so loadDirectory will actually fetch again.
-    loadedDirsRef.current = new Set(loadedDirsRef.current);
-    loadedDirsRef.current.delete(normalized);
-    // Also cancel any in-flight request for this dir so the new fetch wins.
-    inFlightDirsRef.current = new Set(inFlightDirsRef.current);
-    inFlightDirsRef.current.delete(normalized);
-    await loadDirectory(normalized);
-  }, [loadDirectory, refreshRoot]);
-
-  const lastFilesViewDirRef = React.useRef<string>('');
-  const lastFilesViewTreeKeyRef = React.useRef<string>('');
-
-  React.useEffect(() => {
-    if (!root) {
-      return;
-    }
-
-    const treeKey = `${root}|h${showHidden ? '1' : '0'}|g${showGitignored ? '1' : '0'}`;
-    const dirChanged = lastFilesViewDirRef.current !== root;
-    const treeKeyChanged = lastFilesViewTreeKeyRef.current !== treeKey;
-
-    if (!dirChanged && !treeKeyChanged) {
-      return;
-    }
-
-    if (dirChanged) {
-      lastFilesViewDirRef.current = root;
-      setFileContent('');
-      setFileError(null);
-      setDesktopImageSrc('');
-      setLoadedFilePath(null);
-      setShowMobilePageContent(false);
-    }
-
-    if (treeKeyChanged) {
-      lastFilesViewTreeKeyRef.current = treeKey;
-      loadedDirsRef.current = new Set();
-      inFlightDirsRef.current = new Set();
-      activeDirectoryLoadIdsRef.current = new Map();
-      setChildrenByDir((prev) => (Object.keys(prev).length === 0 ? prev : {}));
-      void loadDirectory(root);
-    }
-  }, [loadDirectory, root, showGitignored, showHidden]);
-
-  // Auto-refresh expanded directories when user returns to the tab
-  React.useEffect(() => {
-    if (!files.listDirectory) return;
-
-    const handleVisibilityChange = () => {
-      if (!document.hidden && expandedPaths.length > 0) {
-        for (const dir of expandedPaths) {
-          void refreshDirectory(dir);
-        }
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [expandedPaths, files.listDirectory, refreshDirectory]);
-
-  // Poll expanded directories for external changes
-  React.useEffect(() => {
-    if (!files.listDirectory) return;
-    if (expandedPaths.length === 0) return;
-
-    const interval = setInterval(() => {
-      if (document.hidden) return;
-      for (const dir of expandedPaths) {
-        void refreshDirectory(dir);
-      }
-    }, 8000);
-
-    return () => clearInterval(interval);
-  }, [expandedPaths, files.listDirectory, refreshDirectory]);
-
-  const handleDialogSubmit = React.useCallback(async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!dialogData || !activeDialog) return;
-
-    setIsDialogSubmitting(true);
-    const finishDialogOperation = () => {
-      setActiveDialog(null);
-    };
-
-    const failDialogOperation = (message: string) => {
-      toast.error(message);
-    };
-
-    const done = () => {
-      setIsDialogSubmitting(false);
-    };
-
-    if (activeDialog === 'createFile') {
-      if (!dialogInputValue.trim()) {
-        failDialogOperation(t('sidebarFilesTree.toast.filenameRequired'));
-        done();
-        return;
-      }
-      if (!files.writeFile) {
-        failDialogOperation(t('sidebarFilesTree.toast.writeNotSupported'));
-        done();
-        return;
-      }
-
-      const parentPath = dialogData.path;
-      const prefix = parentPath ? `${parentPath}/` : '';
-      const newPath = normalizePath(`${prefix}${dialogInputValue.trim()}`);
-      await files.writeFile(newPath, '')
-        .then(async (result) => {
-          if (result.success) {
-            toast.success(t('sidebarFilesTree.toast.fileCreated'));
-            await refreshDirectory(parentPath);
-          }
-          finishDialogOperation();
-        })
-        .catch(() => failDialogOperation(t('sidebarFilesTree.toast.operationFailed')))
-        .finally(done);
-      return;
-    }
-
-    if (activeDialog === 'createFolder') {
-      if (!dialogInputValue.trim()) {
-        failDialogOperation(t('sidebarFilesTree.toast.folderNameRequired'));
-        done();
-        return;
-      }
-
-      const parentPath = dialogData.path;
-      const prefix = parentPath ? `${parentPath}/` : '';
-      const newPath = normalizePath(`${prefix}${dialogInputValue.trim()}`);
-      await files.createDirectory(newPath)
-        .then(async (result) => {
-          if (result.success) {
-            toast.success(t('sidebarFilesTree.toast.folderCreated'));
-            await refreshDirectory(parentPath);
-          }
-          finishDialogOperation();
-        })
-        .catch(() => failDialogOperation(t('sidebarFilesTree.toast.operationFailed')))
-        .finally(done);
-      return;
-    }
-
-    if (activeDialog === 'rename') {
-      if (!dialogInputValue.trim()) {
-        failDialogOperation(t('sidebarFilesTree.toast.nameRequired'));
-        done();
-        return;
-      }
-
-      if (!files.rename) {
-        failDialogOperation(t('sidebarFilesTree.toast.renameNotSupported'));
-        done();
-        return;
-      }
-
-      const oldPath = dialogData.path;
-      const parentDir = oldPath.split('/').slice(0, -1).join('/');
-      const prefix = parentDir ? `${parentDir}/` : '';
-      const newPath = normalizePath(`${prefix}${dialogInputValue.trim()}`);
-
-      await files.rename(oldPath, newPath)
-        .then(async (result) => {
-          if (result.success) {
-            toast.success(t('sidebarFilesTree.toast.renamedSuccessfully'));
-            await refreshDirectory(parentDir);
-            if (root) {
-              removeOpenPathsByPrefix(root, oldPath);
-            }
-            if (selectedFile?.path === oldPath || selectedFile?.path.startsWith(`${oldPath}/`)) {
-              if (root) {
-                setSelectedPath(root, null);
-              }
-              setFileContent('');
-              setFileError(null);
-              setDesktopImageSrc('');
-              setLoadedFilePath(null);
-              if (isMobile) {
-                setShowMobilePageContent(false);
-              }
-            }
-          }
-          finishDialogOperation();
-        })
-        .catch(() => failDialogOperation(t('sidebarFilesTree.toast.operationFailed')))
-        .finally(done);
-      return;
-    }
-
-    if (activeDialog === 'delete') {
-      if (!files.delete) {
-        failDialogOperation(t('sidebarFilesTree.toast.deleteNotSupported'));
-        done();
-        return;
-      }
-
-      const deletedPath = dialogData.path;
-      const parentDir = deletedPath.split('/').slice(0, -1).join('/');
-      await files.delete(deletedPath)
-        .then(async (result) => {
-          if (result.success) {
-            toast.success(t('sidebarFilesTree.toast.deletedSuccessfully'));
-            await refreshDirectory(parentDir);
-            if (root) {
-              removeOpenPathsByPrefix(root, deletedPath);
-            }
-            if (selectedFile?.path === deletedPath || selectedFile?.path.startsWith(`${deletedPath}/`)) {
-              if (root) {
-                setSelectedPath(root, null);
-              }
-              setFileContent('');
-              setFileError(null);
-              setDesktopImageSrc('');
-              setLoadedFilePath(null);
-              if (isMobile) {
-                setShowMobilePageContent(false);
-              }
-            }
-          }
-          finishDialogOperation();
-        })
-        .catch(() => failDialogOperation(t('sidebarFilesTree.toast.operationFailed')))
-        .finally(done);
-      return;
-    }
-
-    done();
-  }, [activeDialog, dialogData, dialogInputValue, files, refreshDirectory, isMobile, removeOpenPathsByPrefix, root, selectedFile?.path, setSelectedPath, t]);
-
-  React.useEffect(() => {
-    if (!currentDirectory) {
-      setSearchResults([]);
-      setSearching(false);
-      return;
-    }
-
-    const trimmedQuery = debouncedSearchQuery.trim();
-    if (!trimmedQuery) {
-      setSearchResults([]);
-      setSearching(false);
-      return;
-    }
-
-    let cancelled = false;
-    setSearching(true);
-
-    searchFiles(currentDirectory, trimmedQuery, 150, {
-      includeHidden: showHidden,
-      respectGitignore: !showGitignored,
-      type: 'file',
-    })
-      .then((hits) => {
-        if (cancelled) {
-          return;
-        }
-
-        const filtered = hits.filter((hit) => showGitignored || !shouldIgnorePath(hit.path));
-
-        const mapped: FileNode[] = filtered.map((hit) => ({
-          name: hit.name,
-          path: normalizePath(hit.path),
-          type: 'file',
-          extension: hit.extension,
-          relativePath: hit.relativePath,
-        }));
-
-        setSearchResults(mapped);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setSearchResults([]);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setSearching(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [currentDirectory, debouncedSearchQuery, searchFiles, showHidden, showGitignored]);
 
   const readFile = React.useCallback(async (path: string, options?: { allowOutsideWorkspace?: boolean; optional?: boolean }): Promise<string> => {
     if (files.readFile) {
@@ -1572,9 +732,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
           setDraftContent('');
           setLoadedFilePath(null);
           lastLoadedFileStatRef.current = null;
-          if (searchQuery.trim().length > 0) {
-            setSearchQuery('');
-          }
           if (isMobile) {
             setShowMobilePageContent(false);
           }
@@ -1583,11 +740,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
             const pathsToExpand = [...ancestors, node.path];
             if (pathsToExpand.length > 0) {
               expandPaths(root, pathsToExpand);
-            }
-            for (const path of pathsToExpand) {
-              if (!loadedDirsRef.current.has(path)) {
-                void loadDirectory(path);
-              }
             }
           }
           return;
@@ -1602,28 +754,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
           setFileLoading(false);
         }
       });
-  }, [expandPaths, isMobile, loadDirectory, mode, readFile, readFileStat, root, runtime.isDesktop, searchQuery, setSelectedPath, t]);
-
-  const ensurePathVisible = React.useCallback(async (targetPath: string, includeTarget: boolean) => {
-    if (!root) {
-      return;
-    }
-
-    const ancestors = getAncestorPaths(targetPath, root);
-    const pathsToExpand = includeTarget ? [...ancestors, targetPath] : ancestors;
-
-    if (pathsToExpand.length > 0) {
-      expandPaths(root, pathsToExpand);
-    }
-
-    const loadPromises = pathsToExpand.map((path) => {
-      if (!loadedDirsRef.current.has(path)) {
-        return loadDirectory(path);
-      }
-      return undefined;
-    }).filter(Boolean);
-    await Promise.all(loadPromises);
-  }, [expandPaths, loadDirectory, root]);
+  }, [expandPaths, isMobile, mode, readFile, readFileStat, root, runtime.isDesktop, setSelectedPath, t]);
 
   const getNextOpenFile = React.useCallback((path: string, filesList: FileNode[]) => {
     const index = filesList.findIndex((file) => file.path === path);
@@ -1645,7 +776,10 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     if (root) {
       setSelectedPath(root, node.path);
       addOpenPath(root, node.path);
-      void ensurePathVisible(node.path, false);
+      const ancestors = getAncestorPaths(node.path, root);
+      if (ancestors.length > 0) {
+        expandPaths(root, ancestors);
+      }
     }
 
     setFileError(null);
@@ -1656,15 +790,56 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     if (isMobile) {
       setShowMobilePageContent(true);
     }
-  }, [addOpenPath, ensurePathVisible, isDirty, isMobile, root, setSelectedPath]);
+  }, [addOpenPath, expandPaths, isDirty, isMobile, root, setSelectedPath]);
+
+  const handleTreePathDeleted = React.useCallback((deletedPath: string) => {
+    if (root) {
+      removeOpenPathsByPrefix(root, deletedPath);
+    }
+    if (selectedFile?.path === deletedPath || selectedFile?.path?.startsWith(`${deletedPath}/`)) {
+      if (root) {
+        setSelectedPath(root, null);
+      }
+      setFileContent('');
+      setFileError(null);
+      setDesktopImageSrc('');
+      setDraftContent('');
+      setLoadedFilePath(null);
+      if (isMobile) {
+        setShowMobilePageContent(false);
+      }
+    }
+  }, [isMobile, removeOpenPathsByPrefix, root, selectedFile?.path, setSelectedPath]);
+
+  const handleTreePathRenamed = React.useCallback((oldPath: string) => {
+    if (root) {
+      removeOpenPathsByPrefix(root, oldPath);
+    }
+    if (selectedFile?.path === oldPath || selectedFile?.path?.startsWith(`${oldPath}/`)) {
+      if (root) {
+        setSelectedPath(root, null);
+      }
+      setFileContent('');
+      setFileError(null);
+      setDesktopImageSrc('');
+      setDraftContent('');
+      setLoadedFilePath(null);
+      if (isMobile) {
+        setShowMobilePageContent(false);
+      }
+    }
+  }, [isMobile, removeOpenPathsByPrefix, root, selectedFile?.path, setSelectedPath]);
 
   React.useEffect(() => {
     if (!selectedFile?.path) {
       return;
     }
 
-    void ensurePathVisible(selectedFile.path, false);
-  }, [ensurePathVisible, selectedFile?.path]);
+    const ancestors = getAncestorPaths(selectedFile.path, root);
+    if (ancestors.length > 0) {
+      expandPaths(root, ancestors);
+    }
+  }, [expandPaths, root, selectedFile?.path]);
 
   React.useEffect(() => {
     if (!selectedFile) {
@@ -1878,101 +1053,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
       setShowMobilePageContent(false);
     }
   }, [getNextOpenFile, handleSelectFile, isDirty, isMobile, openFiles, removeOpenPath, root, selectedFile?.path, setSelectedPath]);
-
-  const getFileStatus = React.useCallback((path: string): FileStatus | null => {
-    // Check open status
-    if (openPaths.includes(path)) return 'open';
-    
-    // Check git status
-    if (gitStatus?.files) {
-      const relative = path.startsWith(root + '/') ? path.slice(root.length + 1) : path;
-      const file = gitStatus.files.find(f => f.path === relative);
-      if (file) {
-        if (file.index === 'A' || file.working_dir === '?') return 'git-added';
-        if (file.index === 'D') return 'git-deleted';
-        if (file.index === 'M' || file.working_dir === 'M') return 'git-modified';
-      }
-    }
-    return null;
-  }, [openPaths, gitStatus, root]);
-
-  const getFolderBadge = React.useCallback((dirPath: string): { modified: number; added: number } | null => {
-    if (!gitStatus?.files) return null;
-    const relativeDir = dirPath.startsWith(root + '/') ? dirPath.slice(root.length + 1) : dirPath;
-    const prefix = relativeDir ? `${relativeDir}/` : '';
-    
-    let modified = 0, added = 0;
-    for (const f of gitStatus.files) {
-      if (f.path.startsWith(prefix)) {
-        if (f.index === 'M' || f.working_dir === 'M') modified++;
-        if (f.index === 'A' || f.working_dir === '?') added++;
-      }
-    }
-    return modified + added > 0 ? { modified, added } : null;
-  }, [gitStatus, root]);
-
-  const toggleDirectory = React.useCallback(async (dirPath: string) => {
-    const normalized = normalizePath(dirPath);
-    if (!root) return;
-
-    toggleExpandedPath(root, normalized);
-
-    if (!loadedDirsRef.current.has(normalized)) {
-      await loadDirectory(normalized);
-    }
-  }, [loadDirectory, root, toggleExpandedPath]);
-
-  const fileRowPermissions = React.useMemo(
-    () => ({ canRename, canCreateFile, canCreateFolder, canDelete, canReveal }),
-    [canRename, canCreateFile, canCreateFolder, canDelete, canReveal]
-  );
-
-  function renderTree(dirPath: string, depth: number): React.ReactNode {
-    const nodes = childrenByDir[dirPath] ?? [];
-
-    return nodes.map((node, index) => {
-      const isDir = node.type === 'directory';
-      const isExpanded = isDir && expandedPaths.includes(node.path);
-      const isActive = selectedFile?.path === node.path;
-      const isLast = index === nodes.length - 1;
-
-      return (
-        <li key={node.path} className="relative">
-          {depth > 0 && (
-            <>
-              <span className="absolute top-3.5 left-[-12px] w-3 h-px bg-border/40" />
-              {isLast && (
-                <span className="absolute top-3.5 bottom-0 left-[-13px] w-[2px] bg-background" />
-              )}
-            </>
-          )}
-          <FileRow
-            node={node}
-            root={root}
-            isExpanded={isExpanded}
-            isActive={isActive}
-            isMobile={isMobile}
-            alwaysShowActions={alwaysShowActions}
-            status={!isDir ? getFileStatus(node.path) : undefined}
-            badge={isDir ? getFolderBadge(node.path) : undefined}
-            permissions={fileRowPermissions}
-            downloadFile={files.downloadFile}
-            contextMenuPath={contextMenuPath}
-            setContextMenuPath={setContextMenuPath}
-            onSelect={handleSelectFile}
-            onToggle={toggleDirectory}
-            onRevealPath={handleRevealPath}
-            onOpenDialog={handleOpenDialog}
-          />
-          {isDir && isExpanded && (
-            <ul className="flex flex-col gap-1 ml-3 pl-3 border-l border-border/40 relative">
-              {renderTree(node.path, depth + 1)}
-            </ul>
-          )}
-        </li>
-      );
-    });
-  }
 
   const isSelectedImage = Boolean(selectedFile?.path && isImageFile(selectedFile.path));
   const isSelectedSvg = Boolean(selectedFile?.path && selectedFile.path.toLowerCase().endsWith('.svg'));
@@ -2508,8 +1588,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
       cancelled = true;
     };
   }, [files, isSelectedImage, isSelectedSvg, runtime.isDesktop, selectedFile?.path, selectedFileReadOptions, t]);
-
-  const handleCloseDialog = React.useCallback(() => setActiveDialog(null), []);
 
   const blockWidgets = React.useMemo(() => {
     return buildCodeMirrorCommentWidgets({
@@ -3235,102 +2313,25 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
     </div>
   );
 
-  const hasTree = Boolean(root && childrenByDir[root]);
-
   const treePanel = (
-    <section className={cn(
-      "flex min-h-0 flex-col overflow-hidden",
-      isMobile ? "h-full w-full bg-background" : "h-full rounded-xl border border-border/60 bg-background/70"
-    )}>
-      <div className={cn("flex flex-col gap-2 py-2", isMobile ? "px-3" : "px-2")}>
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1 min-w-0">
-            <Icon name="search" className="pointer-events-none absolute left-2 top-2 size-4 text-muted-foreground" />
-            <Input
-              ref={searchInputRef}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={t('filesView.tree.search.placeholder')}
-              className="h-8 pl-8 pr-8 typography-meta"
-            />
-            {searchQuery.trim().length > 0 && (
-              <button
-                type="button"
-                aria-label={t('filesView.tree.search.clearAria')}
-                className="absolute right-2 top-2 inline-flex size-4 items-center justify-center text-muted-foreground hover:text-foreground"
-                onClick={() => {
-                  setSearchQuery('');
-                  searchInputRef.current?.focus();
-                }}
-              >
-                <Icon name="close" className="size-4" />
-              </button>
-            )}
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => handleOpenDialog('createFile', { path: currentDirectory, type: 'directory' })}
-            className="size-8 p-0 flex-shrink-0"
-            title={t('filesView.tree.actions.newFileTitle')}
-          >
-            <Icon name="file-add" className="size-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => handleOpenDialog('createFolder', { path: currentDirectory, type: 'directory' })}
-            className="size-8 p-0 flex-shrink-0"
-            title={t('filesView.tree.actions.newFolderTitle')}
-          >
-            <Icon name="folder-add" className="size-4" />
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => void refreshRoot()} className="size-8 p-0 flex-shrink-0">
-            <Icon name="refresh" className="size-4" />
-          </Button>
-        </div>
-      </div>
-
-      <ScrollableOverlay outerClassName="flex-1 min-h-0" className={cn("py-2", isMobile ? "px-3" : "px-2")}>
-        <ul className="flex flex-col">
-          {searching ? (
-            <li className="flex items-center gap-1.5 px-2 py-1 typography-meta text-muted-foreground">
-              <Icon name="loader-4" className="size-4 animate-spin" />
-              {t('filesView.tree.search.searching')}
-            </li>
-          ) : searchResults.length > 0 ? (
-            searchResults.map((node) => {
-              const isActive = selectedFile?.path === node.path;
-              return (
-                <li key={node.path}>
-                  <button
-                    type="button"
-                    onClick={() => void handleSelectFile(node)}
-                    className={cn(
-                      'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-foreground transition-colors',
-                      isActive ? 'bg-interactive-selection/70' : 'hover:bg-interactive-hover/40'
-                    )}
-                  >
-                    {getFileIcon(node.path, node.extension)}
-                    <span
-                      className="min-w-0 flex-1 truncate typography-meta"
-                      style={{ direction: 'rtl', textAlign: 'left' }}
-                      title={node.path}
-                    >
-                      {node.relativePath ?? node.path}
-                    </span>
-                  </button>
-                </li>
-              );
-            })
-          ) : hasTree ? (
-            renderTree(root, 0)
-          ) : (
-            <li className="px-2 py-1 typography-meta text-muted-foreground">{t('filesView.state.loading')}</li>
-          )}
-        </ul>
-      </ScrollableOverlay>
-    </section>
+    <OpenChamberFileTree
+      appearance="panel"
+      expandedPaths={expandedPaths}
+      files={files}
+      gitStatus={gitStatus}
+      isMobile={isMobile}
+      onExpandedPathsChange={(paths) => setExpandedPaths(root, paths)}
+      onFileOpen={handleSelectFile}
+      onPathDeleted={handleTreePathDeleted}
+      onPathRenamed={handleTreePathRenamed}
+      openMode="files-editor"
+      openPaths={openFilePathSet}
+      root={root}
+      runtime={runtime}
+      selectedPath={selectedFile?.path ?? null}
+      showGitignored={showGitignored}
+      showHidden={showHidden}
+    />
   );
 
   // Fullscreen file viewer overlay
@@ -3426,16 +2427,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full' }) => {
 
   return (
     <div className="flex h-full min-h-0 overflow-hidden bg-background relative">
-      <Dialogs
-        activeDialog={activeDialog}
-        dialogData={dialogData}
-        dialogInputValue={dialogInputValue}
-        onDialogInputChange={setDialogInputValue}
-        isDialogSubmitting={isDialogSubmitting}
-        onDialogSubmit={handleDialogSubmit}
-        onClose={handleCloseDialog}
-        inputRef={dialogInputRef}
-      />
       {fullscreenViewer}
       {isMobile ? (
         showMobilePageContent ? (

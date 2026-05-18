@@ -23,6 +23,7 @@ type FilesViewTabsActions = {
   toggleExpandedPath: (root: string, path: string) => void;
   expandPath: (root: string, path: string) => void;
   expandPaths: (root: string, paths: string[]) => void;
+  setExpandedPaths: (root: string, paths: string[]) => void;
 };
 
 export type FilesViewTabsStore = FilesViewTabsState & FilesViewTabsActions;
@@ -404,6 +405,38 @@ export const useFilesViewTabsStore = create<FilesViewTabsStore>()(
               [normalizedRoot]: {
                 ...current,
                 expandedPaths: [...current.expandedPaths, ...newPaths],
+              },
+            };
+            return { byRoot: clampRoots(byRoot, 20) };
+          });
+        },
+
+        setExpandedPaths: (root, paths) => {
+          const normalizedRoot = normalizePath((root || '').trim());
+          if (!normalizedRoot) {
+            return;
+          }
+
+          const normalizedPaths = Array.from(new Set((paths ?? [])
+            .map((path) => normalizePath((path || '').trim()))
+            .filter((path) => path && isPathWithinRoot(path, normalizedRoot))));
+
+          set((state) => {
+            const prev = state.byRoot[normalizedRoot];
+            const current = touchRoot(prev);
+            if (
+              prev
+              && prev.expandedPaths.length === normalizedPaths.length
+              && prev.expandedPaths.every((path, index) => path === normalizedPaths[index])
+            ) {
+              return state;
+            }
+
+            const byRoot = {
+              ...state.byRoot,
+              [normalizedRoot]: {
+                ...current,
+                expandedPaths: normalizedPaths,
               },
             };
             return { byRoot: clampRoots(byRoot, 20) };
