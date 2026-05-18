@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { useBrowserVoice } from '@/hooks/useBrowserVoice';
+import { useServerTTS } from '@/hooks/useServerTTS';
+import { useSayTTS } from '@/hooks/useSayTTS';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useDeviceInfo } from '@/lib/device';
 
@@ -19,8 +20,10 @@ import { browserVoiceService } from '@/lib/voice/browserVoiceService';
 import { audioStreamService } from '@/lib/voice/audioStreamService';
 import { wasmSttService, WASM_MODELS } from '@/lib/voice/wasmSttService';
 import type { WasmModelStatus } from '@/lib/voice/wasmSttService';
+import { OPENAI_TTS_VOICE_OPTIONS, SPEECH_SDK_PROVIDER_OPTIONS, getSpeechSdkProviderDefaults, getTtsProviderLabel, isServerTtsProvider, type SpeechSdkProviderId } from '@/lib/voice/ttsConfig';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
+import { useBrowserVoiceRuntime } from '@/hooks/useBrowserVoiceRuntime';
 const LANGUAGE_OPTIONS = [
     { value: 'en-US', label: 'English' },
     { value: 'es-ES', label: 'Español' },
@@ -110,22 +113,6 @@ const WasmModelStatusIndicator = ({ modelId }: { modelId: string }) => {
     );
 };
 
-const OPENAI_VOICE_OPTIONS = [
-    { value: 'alloy', label: 'Alloy' },
-    { value: 'ash', label: 'Ash' },
-    { value: 'ballad', label: 'Ballad' },
-    { value: 'coral', label: 'Coral' },
-    { value: 'echo', label: 'Echo' },
-    { value: 'fable', label: 'Fable' },
-    { value: 'nova', label: 'Nova' },
-    { value: 'onyx', label: 'Onyx' },
-    { value: 'sage', label: 'Sage' },
-    { value: 'shimmer', label: 'Shimmer' },
-    { value: 'verse', label: 'Verse' },
-    { value: 'marin', label: 'Marin' },
-    { value: 'cedar', label: 'Cedar' },
-];
-
 export const VoiceSettings: React.FC = () => {
     const { t } = useI18n();
     const { isMobile } = useDeviceInfo();
@@ -133,29 +120,37 @@ export const VoiceSettings: React.FC = () => {
         isSupported,
         language,
         setLanguage,
-    } = useBrowserVoice();
-    const voiceProvider = useConfigStore((state) => state.voiceProvider);
-    const setVoiceProvider = useConfigStore((state) => state.setVoiceProvider);
-    const speechRate = useConfigStore((state) => state.speechRate);
-    const setSpeechRate = useConfigStore((state) => state.setSpeechRate);
-    const speechPitch = useConfigStore((state) => state.speechPitch);
-    const setSpeechPitch = useConfigStore((state) => state.setSpeechPitch);
-    const speechVolume = useConfigStore((state) => state.speechVolume);
-    const setSpeechVolume = useConfigStore((state) => state.setSpeechVolume);
+    } = useBrowserVoiceRuntime();
+    const voiceProvider = useConfigStore((state) => state.ttsProvider);
+    const setVoiceProvider = useConfigStore((state) => state.setTtsProvider);
+    const speechSdkProvider = useConfigStore((state) => state.ttsSpeechSdkProvider);
+    const setSpeechSdkProvider = useConfigStore((state) => state.setTtsSpeechSdkProvider);
+    const speechRate = useConfigStore((state) => state.ttsRate);
+    const setSpeechRate = useConfigStore((state) => state.setTtsRate);
+    const speechPitch = useConfigStore((state) => state.ttsPitch);
+    const setSpeechPitch = useConfigStore((state) => state.setTtsPitch);
+    const speechVolume = useConfigStore((state) => state.ttsVolume);
+    const setSpeechVolume = useConfigStore((state) => state.setTtsVolume);
     const sayVoice = useConfigStore((state) => state.sayVoice);
     const setSayVoice = useConfigStore((state) => state.setSayVoice);
     const browserVoice = useConfigStore((state) => state.browserVoice);
     const setBrowserVoice = useConfigStore((state) => state.setBrowserVoice);
-    const openaiVoice = useConfigStore((state) => state.openaiVoice);
-    const setOpenaiVoice = useConfigStore((state) => state.setOpenaiVoice);
-    const openaiApiKey = useConfigStore((state) => state.openaiApiKey);
-    const setOpenaiApiKey = useConfigStore((state) => state.setOpenaiApiKey);
-    const openaiCompatibleUrl = useConfigStore((state) => state.openaiCompatibleUrl);
-    const setOpenaiCompatibleUrl = useConfigStore((state) => state.setOpenaiCompatibleUrl);
-    const openaiCompatibleVoice = useConfigStore((state) => state.openaiCompatibleVoice);
-    const setOpenaiCompatibleVoice = useConfigStore((state) => state.setOpenaiCompatibleVoice);
-    const openaiCompatibleTtsModel = useConfigStore((state) => state.openaiCompatibleTtsModel);
-    const setOpenaiCompatibleTtsModel = useConfigStore((state) => state.setOpenaiCompatibleTtsModel);
+    const openaiVoice = useConfigStore((state) => state.ttsVoice);
+    const setOpenaiVoice = useConfigStore((state) => state.setTtsVoice);
+    const openaiApiKey = useConfigStore((state) => state.ttsApiKey);
+    const setOpenaiApiKey = useConfigStore((state) => state.setTtsApiKey);
+    const openaiApiKeyMode = useConfigStore((state) => state.ttsApiKeyMode);
+    const setOpenaiApiKeyMode = useConfigStore((state) => state.setTtsApiKeyMode);
+    const openaiCompatibleUrl = useConfigStore((state) => state.ttsBaseURL);
+    const setOpenaiCompatibleUrl = useConfigStore((state) => state.setTtsBaseURL);
+    const openaiCompatibleVoice = useConfigStore((state) => state.ttsVoice);
+    const setOpenaiCompatibleVoice = useConfigStore((state) => state.setTtsVoice);
+    const openaiCompatibleTtsModel = useConfigStore((state) => state.ttsModel);
+    const setOpenaiCompatibleTtsModel = useConfigStore((state) => state.setTtsModel);
+    const ttsVoiceLocale = useConfigStore((state) => state.ttsVoiceLocale);
+    const setTtsVoiceLocale = useConfigStore((state) => state.setTtsVoiceLocale);
+    const ttsTimestampsEnabled = useConfigStore((state) => state.ttsTimestampsEnabled);
+    const setTtsTimestampsEnabled = useConfigStore((state) => state.setTtsTimestampsEnabled);
     const showMessageTTSButtons = useConfigStore((state) => state.showMessageTTSButtons);
     // STT settings
     const sttProvider = useConfigStore((state) => state.sttProvider);
@@ -186,20 +181,22 @@ export const VoiceSettings: React.FC = () => {
     const summarizeMaxLength = useConfigStore((state) => state.summarizeMaxLength);
     const setSummarizeMaxLength = useConfigStore((state) => state.setSummarizeMaxLength);
 
+    const [providerCatalog, setProviderCatalog] = useState<Record<string, Record<string, unknown>>>({});
     const [isSayAvailable, setIsSayAvailable] = useState(false);
     const [sayVoices, setSayVoices] = useState<Array<{ name: string; locale: string }>>([]);
-    const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
-    const [previewAudio, setPreviewAudio] = useState<HTMLAudioElement | null>(null);
-
-    const [isOpenAIAvailable, setIsOpenAIAvailable] = useState(false);
-    const [isOpenAIPreviewPlaying, setIsOpenAIPreviewPlaying] = useState(false);
-    const [openaiPreviewAudio, setOpenaiPreviewAudio] = useState<HTMLAudioElement | null>(null);
-
-    const [isCompatiblePreviewPlaying, setIsCompatiblePreviewPlaying] = useState(false);
-    const [compatiblePreviewAudio, setCompatiblePreviewAudio] = useState<HTMLAudioElement | null>(null);
+    const [edgeVoices, setEdgeVoices] = useState<Array<{ id: string; label: string; locale: string; gender: string }>>([]);
+    const [edgeVoiceGender, setEdgeVoiceGender] = useState<'all' | 'female' | 'male'>('all');
+    const [isEdgeVoiceLoading, setIsEdgeVoiceLoading] = useState(false);
 
     const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
     const [isBrowserPreviewPlaying, setIsBrowserPreviewPlaying] = useState(false);
+    const { speak: previewServerVoice, stop: stopPreviewServerVoice, isPlaying: isServerPreviewPlaying, isAvailable: isServerPreviewAvailable } = useServerTTS({
+        enabled: voiceModeEnabled && isServerTtsProvider(voiceProvider),
+        availabilityMode: isServerTtsProvider(voiceProvider) ? voiceProvider : 'auto',
+    });
+    const { speak: previewSayVoice, stop: stopPreviewSayVoice, isPlaying: isSayPreviewPlaying } = useSayTTS({
+        enabled: voiceModeEnabled && voiceProvider === 'say',
+    });
 
     useEffect(() => {
         const loadVoices = async () => {
@@ -234,6 +231,127 @@ export const VoiceSettings: React.FC = () => {
                 return a.name.localeCompare(b.name);
             });
     }, [browserVoices]);
+
+    useEffect(() => {
+        if (!voiceModeEnabled) {
+            setProviderCatalog({});
+            return;
+        }
+
+        let cancelled = false;
+        fetch('/api/tts/providers')
+            .then((res) => res.json())
+            .then((data) => {
+                if (cancelled || !Array.isArray(data?.providers)) {
+                    return;
+                }
+                const nextCatalog = data.providers.reduce((acc: Record<string, Record<string, unknown>>, provider: Record<string, unknown>) => {
+                    if (typeof provider.id === 'string') {
+                        acc[provider.id] = provider;
+                    }
+                    return acc;
+                }, {});
+                setProviderCatalog(nextCatalog);
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setProviderCatalog({});
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [voiceModeEnabled]);
+
+    useEffect(() => {
+        if (!voiceModeEnabled) {
+            setIsSayAvailable(false);
+            setSayVoices([]);
+            return;
+        }
+
+        fetch('/api/tts/say/status')
+            .then(res => res.json())
+            .then(data => {
+                setIsSayAvailable(Boolean(data.available));
+                if (Array.isArray(data.voices)) {
+                    const uniqueVoices = data.voices
+                        .filter((v: { name: string; locale: string }, i: number, arr: Array<{ name: string; locale: string }>) =>
+                            arr.findIndex((x: { name: string }) => x.name === v.name) === i
+                        )
+                        .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
+                    setSayVoices(uniqueVoices);
+                }
+            })
+            .catch(() => {
+                setIsSayAvailable(false);
+                setSayVoices([]);
+            });
+    }, [voiceModeEnabled]);
+
+    useEffect(() => {
+        if (!voiceModeEnabled || voiceProvider !== 'edge-tts') {
+            setEdgeVoices([]);
+            return;
+        }
+
+        let cancelled = false;
+        setIsEdgeVoiceLoading(true);
+        const query = new URLSearchParams({ provider: 'edge-tts' });
+
+        fetch(`/api/tts/voices?${query.toString()}`)
+            .then((res) => res.json())
+            .then((data) => {
+                if (cancelled) {
+                    return;
+                }
+                setEdgeVoices(Array.isArray(data?.voices) ? data.voices : []);
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setEdgeVoices([]);
+                }
+            })
+            .finally(() => {
+                if (!cancelled) {
+                    setIsEdgeVoiceLoading(false);
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [voiceModeEnabled, voiceProvider]);
+
+    const speechSdkMeta = providerCatalog['speech-sdk'];
+    const speechSdkConfigured = Boolean(openaiApiKey.trim())
+        || (openaiApiKeyMode === 'gateway'
+            ? Boolean(speechSdkMeta?.gatewayConfigured)
+            : Boolean(speechSdkMeta?.configured));
+    const providerStatusLabel = voiceProvider === 'edge-tts'
+        ? 'No key required'
+        : voiceProvider === 'speech-sdk'
+            ? speechSdkConfigured ? 'Configured' : 'Needs API key'
+            : voiceProvider === 'openai-compatible'
+                ? openaiCompatibleUrl.trim() ? 'Configured' : 'Add server URL'
+                : voiceProvider === 'say'
+                    ? isSayAvailable ? 'Available on this Mac' : 'Unavailable'
+                    : 'Built in';
+    const speechSdkDefaults = getSpeechSdkProviderDefaults(speechSdkProvider);
+    const edgeLocaleOptions = Array.from(new Set(edgeVoices.map((voice) => voice.locale))).sort();
+    const visibleEdgeVoices = edgeVoices.filter((voice) => {
+        if (ttsVoiceLocale && voice.locale !== ttsVoiceLocale) {
+            return false;
+        }
+        if (edgeVoiceGender === 'female' && voice.gender?.toLowerCase() !== 'female') {
+            return false;
+        }
+        if (edgeVoiceGender === 'male' && voice.gender?.toLowerCase() !== 'male') {
+            return false;
+        }
+        return true;
+    });
 
     const previewBrowserVoice = useCallback(() => {
         if (isBrowserPreviewPlaying) {
@@ -273,224 +391,41 @@ export const VoiceSettings: React.FC = () => {
         };
     }, [isBrowserPreviewPlaying]);
 
-    useEffect(() => {
-        if (!voiceModeEnabled || (voiceProvider !== 'openai' && voiceProvider !== 'openai-compatible')) {
-            setIsOpenAIAvailable(openaiApiKey.trim().length > 0);
-            return;
-        }
-
-        const checkOpenAIAvailability = async () => {
-            try {
-                const response = await fetch('/api/tts/status');
-                const data = await response.json();
-                const hasServerKey = data.available;
-                const hasSettingsKey = openaiApiKey.trim().length > 0;
-                setIsOpenAIAvailable(hasServerKey || hasSettingsKey);
-            } catch {
-                setIsOpenAIAvailable(openaiApiKey.trim().length > 0);
-            }
-        };
-
-        checkOpenAIAvailability();
-    }, [openaiApiKey, voiceModeEnabled, voiceProvider]);
-
-    useEffect(() => {
-        if (!voiceModeEnabled) {
-            setIsSayAvailable(false);
-            setSayVoices([]);
-            return;
-        }
-
-        fetch('/api/tts/say/status')
-            .then(res => res.json())
-            .then(data => {
-                setIsSayAvailable(data.available);
-                if (data.voices) {
-                    const uniqueVoices = data.voices
-                        .filter((v: { name: string; locale: string }, i: number, arr: Array<{ name: string; locale: string }>) =>
-                            arr.findIndex((x: { name: string }) => x.name === v.name) === i
-                        )
-                        .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name));
-                    setSayVoices(uniqueVoices);
-                }
-            })
-            .catch(() => {
-                setIsSayAvailable(false);
-            });
-    }, [voiceModeEnabled]);
-
     const previewVoice = useCallback(async () => {
-        if (previewAudio) {
-            previewAudio.pause();
-            previewAudio.currentTime = 0;
-            setPreviewAudio(null);
-            setIsPreviewPlaying(false);
+        if (isSayPreviewPlaying) {
+            stopPreviewSayVoice();
             return;
         }
 
-        setIsPreviewPlaying(true);
-        try {
-            const response = await fetch('/api/tts/say/speak', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    text: t('settings.voice.page.preview.voiceLine', { voiceName: sayVoice }),
-                    voice: sayVoice,
-                    rate: Math.round(100 + (speechRate - 0.5) * 200),
-                }),
-            });
+        await previewSayVoice(t('settings.voice.page.preview.voiceLine', { voiceName: sayVoice }), {
+            voice: sayVoice,
+            rate: Math.round(100 + (speechRate - 0.5) * 200),
+        });
+    }, [isSayPreviewPlaying, previewSayVoice, sayVoice, speechRate, stopPreviewSayVoice, t]);
 
-            if (!response.ok) throw new Error('Preview failed');
-
-            const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-            const audio = new Audio(url);
-
-            audio.onended = () => {
-                URL.revokeObjectURL(url);
-                setPreviewAudio(null);
-                setIsPreviewPlaying(false);
-            };
-
-            audio.onerror = () => {
-                URL.revokeObjectURL(url);
-                setPreviewAudio(null);
-                setIsPreviewPlaying(false);
-            };
-
-            setPreviewAudio(audio);
-            await audio.play();
-        } catch {
-            setIsPreviewPlaying(false);
-        }
-    }, [sayVoice, speechRate, previewAudio, t]);
-
-    useEffect(() => {
-        return () => {
-            if (previewAudio) {
-                previewAudio.pause();
-            }
-        };
-    }, [previewAudio]);
-
-    const previewOpenAIVoice = useCallback(async () => {
-        if (openaiPreviewAudio) {
-            openaiPreviewAudio.pause();
-            openaiPreviewAudio.currentTime = 0;
-            setOpenaiPreviewAudio(null);
-            setIsOpenAIPreviewPlaying(false);
+    const previewServerProviderVoice = useCallback(async () => {
+        if (isServerPreviewPlaying) {
+            stopPreviewServerVoice();
             return;
         }
 
-        setIsOpenAIPreviewPlaying(true);
-        try {
-            const response = await fetch('/api/tts/speak', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    text: t('settings.voice.page.preview.voiceLine', { voiceName: openaiVoice }),
-                    voice: openaiVoice,
-                    speed: speechRate,
-                    apiKey: openaiApiKey || undefined,
-                }),
-            });
+        const previewLine = voiceProvider === 'openai-compatible'
+            ? t('settings.voice.page.preview.customServerLine')
+            : t('settings.voice.page.preview.voiceLine', { voiceName: openaiVoice || getTtsProviderLabel(voiceProvider) });
 
-            if (!response.ok) {
-                const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-                throw new Error(errorData.error || `HTTP ${response.status}`);
-            }
-
-            const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-            const audio = new Audio(url);
-
-            audio.onended = () => {
-                URL.revokeObjectURL(url);
-                setOpenaiPreviewAudio(null);
-                setIsOpenAIPreviewPlaying(false);
-            };
-
-            audio.onerror = () => {
-                URL.revokeObjectURL(url);
-                setOpenaiPreviewAudio(null);
-                setIsOpenAIPreviewPlaying(false);
-            };
-
-            setOpenaiPreviewAudio(audio);
-            await audio.play();
-        } catch {
-            setIsOpenAIPreviewPlaying(false);
-        }
-    }, [openaiVoice, speechRate, openaiPreviewAudio, openaiApiKey, t]);
-
-    useEffect(() => {
-        return () => {
-            if (openaiPreviewAudio) {
-                openaiPreviewAudio.pause();
-            }
-        };
-    }, [openaiPreviewAudio]);
-
-    const previewCompatibleVoice = useCallback(async () => {
-        if (compatiblePreviewAudio) {
-            compatiblePreviewAudio.pause();
-            compatiblePreviewAudio.currentTime = 0;
-            setCompatiblePreviewAudio(null);
-            setIsCompatiblePreviewPlaying(false);
-            return;
-        }
-
-        if (!openaiCompatibleUrl.trim()) return;
-
-        setIsCompatiblePreviewPlaying(true);
-        try {
-            const response = await fetch('/api/tts/speak', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    text: t('settings.voice.page.preview.customServerLine'),
-                    voice: openaiCompatibleVoice,
-                    model: openaiCompatibleTtsModel || undefined,
-                    speed: speechRate,
-                    baseURL: openaiCompatibleUrl,
-                }),
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-                throw new Error(errorData.error || `HTTP ${response.status}`);
-            }
-
-            const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-            const audio = new Audio(url);
-
-            audio.onended = () => {
-                URL.revokeObjectURL(url);
-                setCompatiblePreviewAudio(null);
-                setIsCompatiblePreviewPlaying(false);
-            };
-
-            audio.onerror = () => {
-                URL.revokeObjectURL(url);
-                setCompatiblePreviewAudio(null);
-                setIsCompatiblePreviewPlaying(false);
-            };
-
-            setCompatiblePreviewAudio(audio);
-            await audio.play();
-        } catch {
-            setIsCompatiblePreviewPlaying(false);
-        }
-    }, [openaiCompatibleUrl, openaiCompatibleVoice, openaiCompatibleTtsModel, speechRate, compatiblePreviewAudio, t]);
-
-    useEffect(() => {
-        return () => {
-            if (compatiblePreviewAudio) {
-                compatiblePreviewAudio.pause();
-            }
-        };
-    }, [compatiblePreviewAudio]);
+        await previewServerVoice(previewLine, {
+            provider: voiceProvider,
+            speechSdkProvider,
+            voice: openaiVoice,
+            model: openaiCompatibleTtsModel || undefined,
+            speed: speechRate,
+            pitch: speechPitch,
+            volume: speechVolume,
+            baseURL: voiceProvider === 'openai-compatible' ? openaiCompatibleUrl : undefined,
+            apiKeyMode: openaiApiKeyMode,
+            timestamps: ttsTimestampsEnabled,
+        });
+    }, [isServerPreviewPlaying, openaiApiKeyMode, openaiCompatibleTtsModel, openaiCompatibleUrl, openaiVoice, previewServerVoice, speechPitch, speechRate, speechSdkProvider, speechVolume, stopPreviewServerVoice, t, ttsTimestampsEnabled, voiceProvider]);
 
     const sliderClass = "flex-1 min-w-0 h-1.5 bg-[var(--interactive-border)] rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[var(--primary-base)] [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-[var(--primary-base)] [&::-moz-range-thumb]:border-0 disabled:opacity-50";
 
@@ -532,92 +467,120 @@ export const VoiceSettings: React.FC = () => {
                                             <TooltipContent sideOffset={8} className="max-w-xs">
                                                 <ul className="space-y-1">
                                                     <li><strong>{t('settings.voice.page.provider.browser')}</strong> {t('settings.voice.page.tooltip.browser')}</li>
-                                                    <li><strong>OpenAI:</strong> {t('settings.voice.page.tooltip.openai')}</li>
-                                                    <li><strong>{t('settings.voice.page.provider.custom')}</strong> {t('settings.voice.page.tooltip.custom')}</li>
+                                                    <li><strong>Edge TTS:</strong> No key required, synthesized on the server.</li>
+                                                    <li><strong>Speech SDK:</strong> Supports multiple hosted TTS providers behind one OpenChamber setting.</li>
+                                                    <li><strong>OpenAI-compatible:</strong> {t('settings.voice.page.tooltip.custom')}</li>
                                                     <li><strong>{t('settings.voice.page.provider.say')}</strong> {t('settings.voice.page.tooltip.say')}</li>
                                                 </ul>
                                             </TooltipContent>
                                         </Tooltip>
                                     </div>
                                     <div className="flex flex-wrap items-center gap-1">
-                                        <Button
-                                            variant="chip"
-                                            size="xs"
-                                            aria-pressed={voiceProvider === 'browser'}
-                                            onClick={() => setVoiceProvider('browser')}
-                                            className="!font-normal"
-                                        >
+                                        <Button variant="chip" size="xs" aria-pressed={voiceProvider === 'browser'} onClick={() => setVoiceProvider('browser')} className="!font-normal">
                                             {t('settings.voice.page.provider.browser')}
                                         </Button>
-                                        <Button
-                                            variant="chip"
-                                            size="xs"
-                                            aria-pressed={voiceProvider === 'openai'}
-                                            onClick={() => setVoiceProvider('openai')}
-                                            className="!font-normal"
-                                        >
-                                            OpenAI
+                                        <Button variant="chip" size="xs" aria-pressed={voiceProvider === 'edge-tts'} onClick={() => setVoiceProvider('edge-tts')} className="!font-normal">
+                                            Edge TTS
                                         </Button>
-                                        <Button
-                                            variant="chip"
-                                            size="xs"
-                                            aria-pressed={voiceProvider === 'openai-compatible'}
-                                            onClick={() => setVoiceProvider('openai-compatible')}
-                                            className="!font-normal"
-                                        >
-                                            {t('settings.voice.page.provider.custom')}
+                                        <Button variant="chip" size="xs" aria-pressed={voiceProvider === 'speech-sdk'} onClick={() => setVoiceProvider('speech-sdk')} className="!font-normal">
+                                            Speech SDK
+                                        </Button>
+                                        <Button variant="chip" size="xs" aria-pressed={voiceProvider === 'openai-compatible'} onClick={() => setVoiceProvider('openai-compatible')} className="!font-normal">
+                                            OpenAI-compatible
                                         </Button>
                                         {isSayAvailable && (
-                                            <Button
-                                                variant="chip"
-                                                size="xs"
-                                                aria-pressed={voiceProvider === 'say'}
-                                                onClick={() => setVoiceProvider('say')}
-                                                className="!font-normal"
-                                            >
+                                            <Button variant="chip" size="xs" aria-pressed={voiceProvider === 'say'} onClick={() => setVoiceProvider('say')} className="!font-normal">
                                                 <Icon name="apple" className="w-3.5 h-3.5 mr-0.5" />
                                                 {t('settings.voice.page.provider.say')}
                                             </Button>
                                         )}
                                     </div>
+                                    <div className="pt-1">
+                                        <span className="inline-flex items-center rounded-full border border-[var(--interactive-border)] px-2 py-0.5 typography-meta text-muted-foreground">
+                                            {providerStatusLabel}
+                                        </span>
+                                    </div>
                                 </div>
                             </div>
 
-                            {/* OpenAI API Key */}
-                            {voiceProvider === 'openai' && (
-                                <div className="py-1.5">
-                                    <span className={cn("typography-ui-label text-foreground", !isOpenAIAvailable && "text-[var(--status-error)]")}>
-                                        {t('settings.voice.page.field.apiKey')}
-                                    </span>
-                                    <span className={cn("typography-meta ml-2", !isOpenAIAvailable ? "text-[var(--status-error)]/80" : "text-muted-foreground")}>
-                                        {isOpenAIAvailable && !openaiApiKey
-                                          ? t('settings.voice.page.field.apiKeyHintUsingConfig')
-                                          : !isOpenAIAvailable
-                                            ? t('settings.voice.page.field.apiKeyHintRequired')
-                                            : t('settings.voice.page.field.apiKeyHintProvide')}
-                                    </span>
-                                    <div className="relative mt-1.5 max-w-xs">
-                                        <input
-                                            type="password"
-                                            value={openaiApiKey}
-                                            onChange={(e) => setOpenaiApiKey(e.target.value)}
-                                            placeholder="sk-..."
-                                            className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
-                                        />
-                                        {openaiApiKey && (
-                                            <button
-                                                type="button"
-                                                onClick={() => setOpenaiApiKey('')}
-                                                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                                            >
-                                                <Icon name="close" className="w-3.5 h-3.5" />
-                                            </button>
-                                        )}
+                            {voiceProvider === 'speech-sdk' && (
+                                <div className="py-1.5 space-y-2">
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">Speech SDK provider</span>
+                                        <div className="mt-1.5 max-w-xs">
+                                            <Select value={speechSdkProvider} onValueChange={(value) => setSpeechSdkProvider(value as SpeechSdkProviderId)}>
+                                                <SelectTrigger>
+                                                    <SelectValue placeholder="Select provider" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {SPEECH_SDK_PROVIDER_OPTIONS.map((provider) => (
+                                                        <SelectItem key={provider.id} value={provider.id}>{provider.label}</SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">API key source</span>
+                                        <div className="mt-1.5 max-w-xs">
+                                            <Select value={openaiApiKeyMode} onValueChange={(value) => setOpenaiApiKeyMode(value as 'server' | 'client' | 'gateway')}>
+                                                <SelectTrigger>
+                                                    <SelectValue placeholder="Select API key mode" />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="server">Server environment</SelectItem>
+                                                    <SelectItem value="client">Client supplied</SelectItem>
+                                                    <SelectItem value="gateway">Speech Gateway</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        <p className="mt-1 typography-meta text-muted-foreground">Client-supplied keys stay in memory for this session only.</p>
+                                    </div>
+                                    {openaiApiKeyMode !== 'server' && (
+                                        <div>
+                                            <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.apiKey')}</span>
+                                            <div className="relative mt-1.5 max-w-xs">
+                                                <input
+                                                    type="password"
+                                                    value={openaiApiKey}
+                                                    onChange={(e) => setOpenaiApiKey(e.target.value)}
+                                                    placeholder="sk-..."
+                                                    className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                                />
+                                                {openaiApiKey && (
+                                                    <button type="button" onClick={() => setOpenaiApiKey('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                                                        <Icon name="close" className="w-3.5 h-3.5" />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.model')}</span>
+                                        <div className="relative mt-1.5 max-w-xs">
+                                            <input
+                                                type="text"
+                                                value={openaiCompatibleTtsModel}
+                                                onChange={(e) => setOpenaiCompatibleTtsModel(e.target.value)}
+                                                placeholder={speechSdkDefaults.defaultModel}
+                                                className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div
+                                        className="group flex cursor-pointer items-center gap-2 py-1.5"
+                                        role="button"
+                                        tabIndex={0}
+                                        aria-pressed={ttsTimestampsEnabled}
+                                        onClick={() => setTtsTimestampsEnabled(!ttsTimestampsEnabled)}
+                                        onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setTtsTimestampsEnabled(!ttsTimestampsEnabled); } }}
+                                    >
+                                        <Checkbox checked={ttsTimestampsEnabled} onChange={setTtsTimestampsEnabled} ariaLabel="Enable word timestamps" />
+                                        <span className="typography-ui-label text-foreground">Enable word timestamps</span>
                                     </div>
                                 </div>
                             )}
 
-                            {/* OpenAI-compatible custom server */}
                             {voiceProvider === 'openai-compatible' && (
                                 <div className="py-1.5 space-y-2">
                                     <div>
@@ -635,16 +598,8 @@ export const VoiceSettings: React.FC = () => {
                                                 placeholder="http://localhost:8880/v1"
                                                 className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
                                             />
-                                            {openaiCompatibleUrl && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setOpenaiCompatibleUrl('')}
-                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                                                >
-                                                    <Icon name="close" className="w-3.5 h-3.5" />
-                                                </button>
-                                            )}
                                         </div>
+                                        <p className="mt-1 typography-meta text-muted-foreground">Remote custom URLs remain blocked unless explicitly allowed by the server.</p>
                                     </div>
                                     <div>
                                         <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.model')}</span>
@@ -653,58 +608,141 @@ export const VoiceSettings: React.FC = () => {
                                                 type="text"
                                                 value={openaiCompatibleTtsModel}
                                                 onChange={(e) => setOpenaiCompatibleTtsModel(e.target.value)}
-                                                placeholder="speaches-ai/Kokoro-82M-v1.0-ONNX"
+                                                placeholder="kokoro"
                                                 className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
                                             />
                                         </div>
                                     </div>
                                     <div>
                                         <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.voice')}</span>
-                                        <span className="typography-meta ml-2 text-muted-foreground">
-                                            {t('settings.voice.page.field.voiceIdentifierHint')}
-                                        </span>
-                                        <div className="flex items-center gap-2 mt-1.5">
-                                            <div className="relative max-w-xs flex-1">
-                                                <input
-                                                    type="text"
-                                                    value={openaiCompatibleVoice}
-                                                    onChange={(e) => setOpenaiCompatibleVoice(e.target.value)}
-                                                    placeholder="af_sky"
-                                                    className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
-                                                />
-                                            </div>
-                                            <Button size="xs" variant="ghost" onClick={previewCompatibleVoice} title={t('settings.voice.page.actions.preview')} disabled={!openaiCompatibleUrl.trim()}>
-                                                {isCompatiblePreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
-                                            </Button>
+                                        <div className="relative mt-1.5 max-w-xs">
+                                            <input
+                                                type="text"
+                                                value={openaiCompatibleVoice}
+                                                onChange={(e) => setOpenaiCompatibleVoice(e.target.value)}
+                                                placeholder="af_sky"
+                                                className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <span className="typography-ui-label text-foreground">{t('settings.voice.page.field.apiKey')}</span>
+                                        <p className="mt-1 typography-meta text-muted-foreground">Optional and kept only in memory for this session.</p>
+                                        <div className="relative mt-1.5 max-w-xs">
+                                            <input
+                                                type="password"
+                                                value={openaiApiKey}
+                                                onChange={(e) => setOpenaiApiKey(e.target.value)}
+                                                placeholder="Optional"
+                                                className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                            />
                                         </div>
                                     </div>
                                 </div>
                             )}
 
-                            {/* Voice Selection */}
+                            {voiceProvider === 'edge-tts' && (
+                                <div className="py-1.5 space-y-2">
+                                    <p className="typography-meta text-muted-foreground">Server-side Edge TTS works without an API key and returns word timestamps.</p>
+                                    <div className="flex flex-wrap gap-2">
+                                        <div className="min-w-[11rem]">
+                                            <span className="typography-ui-label text-foreground">Locale</span>
+                                            <div className="mt-1.5">
+                                                <Select value={ttsVoiceLocale} onValueChange={setTtsVoiceLocale}>
+                                                    <SelectTrigger>
+                                                        <SelectValue placeholder="Select locale" />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        <SelectItem value="en-US">en-US</SelectItem>
+                                                        {edgeLocaleOptions.filter((locale) => locale !== 'en-US').map((locale) => (
+                                                            <SelectItem key={locale} value={locale}>{locale}</SelectItem>
+                                                        ))}
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        </div>
+                                        <div className="min-w-[11rem]">
+                                            <span className="typography-ui-label text-foreground">Gender</span>
+                                            <div className="mt-1.5">
+                                                <Select value={edgeVoiceGender} onValueChange={(value) => setEdgeVoiceGender(value as 'all' | 'female' | 'male')}>
+                                                    <SelectTrigger>
+                                                        <SelectValue placeholder="Select gender" />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        <SelectItem value="all">All</SelectItem>
+                                                        <SelectItem value="female">Female</SelectItem>
+                                                        <SelectItem value="male">Male</SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
                             <div className="flex items-center gap-8 py-1.5">
                                 <span className="typography-ui-label text-foreground sm:w-56 shrink-0">{t('settings.voice.page.field.voice')}</span>
                                 <div className="flex items-center gap-2 w-fit">
-                                    {voiceProvider === 'openai' && isOpenAIAvailable && (
+                                    {voiceProvider === 'speech-sdk' && speechSdkProvider === 'openai' && (
                                         <>
                                             <Select value={openaiVoice} onValueChange={setOpenaiVoice}>
                                                 <SelectTrigger className="w-fit">
                                                     <SelectValue placeholder={t('settings.voice.page.field.selectVoicePlaceholder')} />
                                                 </SelectTrigger>
                                                 <SelectContent>
-                                                    {OPENAI_VOICE_OPTIONS.map((v) => (
+                                                    {OPENAI_TTS_VOICE_OPTIONS.map((v) => (
                                                         <SelectItem key={v.value} value={v.value}>{v.label}</SelectItem>
                                                     ))}
                                                 </SelectContent>
                                             </Select>
-                                            <Button size="xs" variant="ghost" onClick={previewOpenAIVoice} title={t('settings.voice.page.actions.preview')}>
-                                                {isOpenAIPreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
+                                            <Button size="xs" variant="ghost" onClick={previewServerProviderVoice} title={t('settings.voice.page.actions.preview')}>
+                                                {isServerPreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
+                                            </Button>
+                                        </>
+                                    )}
+
+                                    {voiceProvider === 'speech-sdk' && speechSdkProvider !== 'openai' && (
+                                        <>
+                                            <div className="relative max-w-xs">
+                                                <input
+                                                    type="text"
+                                                    value={openaiVoice}
+                                                    onChange={(e) => setOpenaiVoice(e.target.value)}
+                                                    placeholder={speechSdkDefaults.defaultVoice}
+                                                    className="w-full h-7 rounded-lg border border-input bg-transparent px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary/70"
+                                                />
+                                            </div>
+                                            <Button size="xs" variant="ghost" onClick={previewServerProviderVoice} title={t('settings.voice.page.actions.preview')}>
+                                                {isServerPreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
+                                            </Button>
+                                        </>
+                                    )}
+
+                                    {voiceProvider === 'edge-tts' && (
+                                        <>
+                                            <Select value={openaiVoice} onValueChange={setOpenaiVoice} disabled={isEdgeVoiceLoading}>
+                                                <SelectTrigger className="w-fit max-w-[280px]">
+                                                    <SelectValue placeholder={isEdgeVoiceLoading ? 'Loading voices…' : 'Select voice'} />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    {visibleEdgeVoices.map((voice) => (
+                                                        <SelectItem key={voice.id} value={voice.id}>{voice.label}</SelectItem>
+                                                    ))}
+                                                </SelectContent>
+                                            </Select>
+                                            <Button size="xs" variant="ghost" onClick={previewServerProviderVoice} title={t('settings.voice.page.actions.preview')} disabled={!isServerPreviewAvailable}>
+                                                {isServerPreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
                                             </Button>
                                         </>
                                     )}
 
                                     {voiceProvider === 'openai-compatible' && (
-                                        <span className="typography-meta text-muted-foreground">{t('settings.voice.page.field.configuredAbove')}</span>
+                                        <>
+                                            <span className="typography-meta text-muted-foreground">{t('settings.voice.page.field.configuredAbove')}</span>
+                                            <Button size="xs" variant="ghost" onClick={previewServerProviderVoice} title={t('settings.voice.page.actions.preview')} disabled={!openaiCompatibleUrl.trim()}>
+                                                {isServerPreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
+                                            </Button>
+                                        </>
                                     )}
 
                                     {voiceProvider === 'say' && isSayAvailable && sayVoices.length > 0 && (
@@ -720,7 +758,7 @@ export const VoiceSettings: React.FC = () => {
                                                 </SelectContent>
                                             </Select>
                                             <Button size="xs" variant="ghost" onClick={previewVoice} title={t('settings.voice.page.actions.preview')}>
-                                                {isPreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
+                                                {isSayPreviewPlaying ? <Icon name="stop" className="w-3.5 h-3.5" /> : <Icon name="play" className="w-3.5 h-3.5" />}
                                             </Button>
                                         </>
                                     )}

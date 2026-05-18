@@ -11,7 +11,6 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useBrowserVoice } from '@/hooks/useBrowserVoice';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { browserVoiceService } from '@/lib/voice/browserVoiceService';
 import { isVSCodeRuntime } from '@/lib/desktop';
@@ -26,6 +25,7 @@ import { VoiceStatusIndicator } from './VoiceStatusIndicator';
 import { toast } from '@/components/ui/toast';
 import { Icon } from "@/components/icon/Icon";
 import { useI18n } from '@/lib/i18n';
+import { useBrowserVoiceRuntime } from '@/hooks/useBrowserVoiceRuntime';
 
 // Status text for accessibility and labels
 const statusLabels: Record<string, string> = {
@@ -82,7 +82,7 @@ export function BrowserVoiceButton() {
         conversationMode,
         toggleConversationMode,
         isMobile,
-    } = useBrowserVoice();
+    } = useBrowserVoiceRuntime();
     
     const [isPressing, setIsPressing] = useState(false);
     const isVSCode = isVSCodeRuntime();

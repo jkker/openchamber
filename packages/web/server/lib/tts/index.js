@@ -7,7 +7,9 @@
 export {
   ttsService,
   TTSService,
+  TTSServiceError,
   TTS_VOICES,
+  resolveTtsRequest,
 } from './service.js';
 
 export {

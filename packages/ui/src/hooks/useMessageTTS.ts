@@ -11,6 +11,7 @@ import { useServerTTS } from './useServerTTS';
 import { useSayTTS } from './useSayTTS';
 import { browserVoiceService } from '@/lib/voice/browserVoiceService';
 import { summarizeText, shouldSummarize, sanitizeForTTS } from '@/lib/voice/summarize';
+import { isServerTtsProvider } from '@/lib/voice/ttsConfig';
 
 export interface UseMessageTTSReturn {
     /** Whether TTS is currently playing for this message */
@@ -24,27 +25,32 @@ export interface UseMessageTTSReturn {
 export function useMessageTTS(): UseMessageTTSReturn {
     const [isPlaying, setIsPlaying] = useState(false);
     
-    const voiceProvider = useConfigStore((state) => state.voiceProvider);
+    const ttsProvider = useConfigStore((state) => state.ttsProvider);
+    const ttsSpeechSdkProvider = useConfigStore((state) => state.ttsSpeechSdkProvider);
+    const ttsModel = useConfigStore((state) => state.ttsModel);
+    const ttsVoice = useConfigStore((state) => state.ttsVoice);
+    const ttsBaseURL = useConfigStore((state) => state.ttsBaseURL);
+    const ttsApiKeyMode = useConfigStore((state) => state.ttsApiKeyMode);
+    const ttsTimestampsEnabled = useConfigStore((state) => state.ttsTimestampsEnabled);
+    const ttsRate = useConfigStore((state) => state.ttsRate);
+    const ttsPitch = useConfigStore((state) => state.ttsPitch);
+    const ttsVolume = useConfigStore((state) => state.ttsVolume);
     const speechRate = useConfigStore((state) => state.speechRate);
     const speechPitch = useConfigStore((state) => state.speechPitch);
     const speechVolume = useConfigStore((state) => state.speechVolume);
     const sayVoice = useConfigStore((state) => state.sayVoice);
     const browserVoice = useConfigStore((state) => state.browserVoice);
-    const openaiVoice = useConfigStore((state) => state.openaiVoice);
-    const openaiCompatibleVoice = useConfigStore((state) => state.openaiCompatibleVoice);
-    const openaiCompatibleUrl = useConfigStore((state) => state.openaiCompatibleUrl);
-    const openaiCompatibleTtsModel = useConfigStore((state) => state.openaiCompatibleTtsModel);
     const summarizeMessageTTS = useConfigStore((state) => state.summarizeMessageTTS);
     const summarizeCharacterThreshold = useConfigStore((state) => state.summarizeCharacterThreshold);
     const showMessageTTSButtons = useConfigStore((state) => state.showMessageTTSButtons);
 
-    const isServerProvider = voiceProvider === 'openai' || voiceProvider === 'openai-compatible';
+    const isServerProvider = isServerTtsProvider(ttsProvider);
     const shouldCheckOpenAIAvailability = showMessageTTSButtons && isServerProvider;
-    const shouldCheckSayAvailability = showMessageTTSButtons && voiceProvider === 'say';
+    const shouldCheckSayAvailability = showMessageTTSButtons && ttsProvider === 'say';
 
     const { speak: speakServerTTS, stop: stopServerTTS, isAvailable: isServerTTSAvailable } = useServerTTS({
         enabled: shouldCheckOpenAIAvailability,
-        availabilityMode: voiceProvider === 'openai-compatible' ? 'openai-compatible' : 'openai',
+        availabilityMode: isServerTtsProvider(ttsProvider) ? ttsProvider : 'auto',
     });
     const { speak: speakSayTTS, stop: stopSayTTS, isAvailable: isSayTTSAvailable } = useSayTTS({
         enabled: shouldCheckSayAvailability,
@@ -78,21 +84,22 @@ export function useMessageTTS(): UseMessageTTSReturn {
             }
             
             if (isServerProvider && isServerTTSAvailable) {
-                const voice = voiceProvider === 'openai-compatible' ? openaiCompatibleVoice : openaiVoice;
-                const baseURL = voiceProvider === 'openai-compatible' ? openaiCompatibleUrl : undefined;
-                const model = voiceProvider === 'openai-compatible' ? openaiCompatibleTtsModel : undefined;
                 await speakServerTTS(textToSpeak, {
-                    voice,
-                    model,
-                    speed: speechRate,
-                    pitch: speechPitch,
-                    volume: speechVolume,
+                    provider: ttsProvider,
+                    speechSdkProvider: ttsSpeechSdkProvider,
+                    voice: ttsVoice,
+                    model: ttsModel,
+                    speed: ttsRate || speechRate,
+                    pitch: ttsPitch || speechPitch,
+                    volume: ttsVolume || speechVolume,
                     summarize: false, // We already summarized client-side
-                    baseURL,
+                    baseURL: ttsBaseURL || undefined,
+                    apiKeyMode: ttsApiKeyMode,
+                    timestamps: ttsTimestampsEnabled,
                     onEnd: () => setIsPlaying(false),
                     onError: () => setIsPlaying(false),
                 });
-            } else if (voiceProvider === 'say' && isSayTTSAvailable) {
+            } else if (ttsProvider === 'say' && isSayTTSAvailable) {
                 const wordsPerMinute = Math.round(100 + (speechRate - 0.5) * 200);
                 await speakSayTTS(textToSpeak, {
                     voice: sayVoice,
@@ -121,17 +128,22 @@ export function useMessageTTS(): UseMessageTTSReturn {
             setIsPlaying(false);
         }
     }, [
-        voiceProvider,
+        ttsProvider,
+        ttsSpeechSdkProvider,
+        ttsModel,
+        ttsVoice,
+        ttsBaseURL,
+        ttsApiKeyMode,
+        ttsTimestampsEnabled,
+        ttsRate,
+        ttsPitch,
+        ttsVolume,
         isServerProvider,
         speechRate,
         speechPitch,
         speechVolume,
         sayVoice,
         browserVoice,
-        openaiVoice,
-        openaiCompatibleVoice,
-        openaiCompatibleUrl,
-        openaiCompatibleTtsModel,
         summarizeMessageTTS,
         summarizeCharacterThreshold,
         isServerTTSAvailable,

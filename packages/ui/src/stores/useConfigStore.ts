@@ -14,6 +14,7 @@ import { updateDesktopSettings } from "@/lib/persistence";
 import { useDirectoryStore } from "@/stores/useDirectoryStore";
 import { streamDebugEnabled } from "@/stores/utils/streamDebug";
 import { parseModelIdentifier } from "@/lib/modelIdentifier";
+import { getSpeechSdkProviderDefaults, type SpeechSdkProviderId, type TtsApiKeyMode, type TtsProviderId } from "@/lib/voice/ttsConfig";
 
 const MODELS_DEV_API_URL = "https://models.dev/api.json";
 const MODELS_DEV_PROXY_URL = "/api/openchamber/models-metadata";
@@ -496,6 +497,142 @@ const resolveInitialDirectoryKey = (): string => {
     return toDirectoryKey(directory);
 };
 
+const readLocalStorageString = (key: string): string | undefined => {
+    if (typeof window === 'undefined') {
+        return undefined;
+    }
+    const value = localStorage.getItem(key);
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+};
+
+const readLocalStorageNumber = (key: string): number | undefined => {
+    const value = readLocalStorageString(key);
+    if (!value) {
+        return undefined;
+    }
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const removeLocalStorageKey = (key: string) => {
+    if (typeof window === 'undefined') {
+        return;
+    }
+    localStorage.removeItem(key);
+};
+
+const getLegacyVoiceProvider = (): 'browser' | 'openai' | 'openai-compatible' | 'say' => {
+    const saved = readLocalStorageString('voiceProvider');
+    if (saved === 'openai' || saved === 'openai-compatible' || saved === 'say' || saved === 'browser') {
+        return saved;
+    }
+    return 'browser';
+};
+
+const getInitialTtsProvider = (): TtsProviderId => {
+    const saved = readLocalStorageString('ttsProvider');
+    if (saved === 'browser' || saved === 'edge-tts' || saved === 'speech-sdk' || saved === 'openai-compatible' || saved === 'say') {
+        return saved;
+    }
+
+    const legacy = getLegacyVoiceProvider();
+    if (legacy === 'openai') {
+        return 'speech-sdk';
+    }
+    return legacy;
+};
+
+const getInitialSpeechSdkProvider = (): SpeechSdkProviderId => {
+    const saved = readLocalStorageString('ttsSpeechSdkProvider');
+    if (saved) {
+        return getSpeechSdkProviderDefaults(saved).id;
+    }
+
+    return getLegacyVoiceProvider() === 'openai' ? 'openai' : getSpeechSdkProviderDefaults(undefined).id;
+};
+
+const getInitialTtsApiKey = (): string => {
+    const next = readLocalStorageString('ttsApiKey') ?? readLocalStorageString('openaiApiKey') ?? '';
+    // Legacy TTS keys used to be persisted in localStorage. Read them once during
+    // migration, immediately clear them, and then keep all new client-supplied keys
+    // in memory for the current session only.
+    removeLocalStorageKey('ttsApiKey');
+    removeLocalStorageKey('openaiApiKey');
+    return next;
+};
+
+const getInitialTtsApiKeyMode = (): TtsApiKeyMode => {
+    const saved = readLocalStorageString('ttsApiKeyMode');
+    return saved === 'client' || saved === 'gateway' || saved === 'server' ? saved : 'server';
+};
+
+const getInitialTtsRate = () => {
+    const saved = readLocalStorageNumber('ttsRate') ?? readLocalStorageNumber('speechRate');
+    return typeof saved === 'number' && saved >= 0.5 && saved <= 2 ? saved : 1;
+};
+
+const getInitialTtsPitch = () => {
+    const saved = readLocalStorageNumber('ttsPitch') ?? readLocalStorageNumber('speechPitch');
+    return typeof saved === 'number' && saved >= 0.5 && saved <= 2 ? saved : 1;
+};
+
+const getInitialTtsVolume = () => {
+    const saved = readLocalStorageNumber('ttsVolume') ?? readLocalStorageNumber('speechVolume');
+    return typeof saved === 'number' && saved >= 0 && saved <= 1 ? saved : 1;
+};
+
+const getInitialTtsBaseURL = () => readLocalStorageString('ttsBaseURL') ?? readLocalStorageString('openaiCompatibleUrl') ?? '';
+
+const getInitialTtsModel = () => {
+    const saved = readLocalStorageString('ttsModel');
+    if (saved) {
+        return saved;
+    }
+    const legacyProvider = getLegacyVoiceProvider();
+    if (legacyProvider === 'openai-compatible') {
+        return readLocalStorageString('openaiCompatibleTtsModel') ?? 'kokoro';
+    }
+    return getSpeechSdkProviderDefaults(getInitialSpeechSdkProvider()).defaultModel;
+};
+
+const getInitialTtsVoice = () => {
+    const saved = readLocalStorageString('ttsVoice');
+    if (saved) {
+        return saved;
+    }
+    const provider = getInitialTtsProvider();
+    if (provider === 'openai-compatible') {
+        return readLocalStorageString('openaiCompatibleVoice') ?? 'af_sky';
+    }
+    if (provider === 'speech-sdk') {
+        return readLocalStorageString('openaiVoice') ?? getSpeechSdkProviderDefaults(getInitialSpeechSdkProvider()).defaultVoice;
+    }
+    if (provider === 'edge-tts') {
+        return 'en-US-AvaNeural';
+    }
+    return '';
+};
+
+const getInitialTtsVoiceLocale = () => readLocalStorageString('ttsVoiceLocale') ?? 'en-US';
+
+const getInitialTtsTimestampsEnabled = () => {
+    const saved = readLocalStorageString('ttsTimestampsEnabled');
+    return saved === 'true';
+};
+
+const INITIAL_TTS_PROVIDER = getInitialTtsProvider();
+const INITIAL_TTS_SPEECH_SDK_PROVIDER = getInitialSpeechSdkProvider();
+const INITIAL_TTS_MODEL = getInitialTtsModel();
+const INITIAL_TTS_VOICE = getInitialTtsVoice();
+const INITIAL_TTS_VOICE_LOCALE = getInitialTtsVoiceLocale();
+const INITIAL_TTS_API_KEY = getInitialTtsApiKey();
+const INITIAL_TTS_API_KEY_MODE = getInitialTtsApiKeyMode();
+const INITIAL_TTS_BASE_URL = getInitialTtsBaseURL();
+const INITIAL_TTS_TIMESTAMPS_ENABLED = getInitialTtsTimestampsEnabled();
+const INITIAL_TTS_RATE = getInitialTtsRate();
+const INITIAL_TTS_PITCH = getInitialTtsPitch();
+const INITIAL_TTS_VOLUME = getInitialTtsVolume();
+
 interface DirectoryScopedConfig {
 
     providers: ProviderWithModelList[];
@@ -538,9 +675,35 @@ interface ConfigStore {
     settingsDefaultFileViewerPreview: boolean;
     settingsZenModel: string | undefined;
     settingsMessageStreamTransport: 'auto' | 'ws' | 'sse';
-    // Voice provider preference ('browser', 'openai', 'openai-compatible', or 'say' for macOS)
+    // Legacy voice provider preference kept for compatibility with older settings migrations.
     voiceProvider: 'browser' | 'openai' | 'openai-compatible' | 'say';
     setVoiceProvider: (provider: 'browser' | 'openai' | 'openai-compatible' | 'say') => void;
+    ttsProvider: TtsProviderId;
+    ttsSpeechSdkProvider: SpeechSdkProviderId;
+    ttsModel: string;
+    ttsVoice: string;
+    ttsVoiceLocale: string;
+    ttsApiKey: string;
+    ttsApiKeyMode: TtsApiKeyMode;
+    ttsBaseURL: string;
+    ttsTimestampsEnabled: boolean;
+    ttsRate: number;
+    ttsPitch: number;
+    ttsVolume: number;
+    ttsProviderOptions: Record<string, unknown>;
+    setTtsProvider: (provider: TtsProviderId) => void;
+    setTtsSpeechSdkProvider: (provider: SpeechSdkProviderId) => void;
+    setTtsModel: (model: string) => void;
+    setTtsVoice: (voice: string) => void;
+    setTtsVoiceLocale: (locale: string) => void;
+    setTtsApiKey: (apiKey: string) => void;
+    setTtsApiKeyMode: (mode: TtsApiKeyMode) => void;
+    setTtsBaseURL: (url: string) => void;
+    setTtsTimestampsEnabled: (enabled: boolean) => void;
+    setTtsRate: (rate: number) => void;
+    setTtsPitch: (pitch: number) => void;
+    setTtsVolume: (volume: number) => void;
+    setTtsProviderOptions: (options: Record<string, unknown>) => void;
     // TTS settings
     speechRate: number;
     speechPitch: number;
@@ -669,45 +832,32 @@ export const useConfigStore = create<ConfigStore>()(
                 settingsDefaultFileViewerPreview: false,
                 settingsZenModel: undefined,
                 settingsMessageStreamTransport: 'auto',
-                // Voice provider preference - load from localStorage or default to 'browser'
                 voiceProvider: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('voiceProvider');
-                        if (saved === 'openai' || saved === 'browser' || saved === 'say' || saved === 'openai-compatible') return saved;
+                    const provider = INITIAL_TTS_PROVIDER;
+                    if (provider === 'speech-sdk') {
+                        return 'openai';
+                    }
+                    if (provider === 'openai-compatible' || provider === 'say') {
+                        return provider;
                     }
                     return 'browser';
                 })(),
-                // TTS settings - load from localStorage with defaults
-                speechRate: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('speechRate');
-                        if (saved) {
-                            const parsed = parseFloat(saved);
-                            if (!isNaN(parsed) && parsed >= 0.5 && parsed <= 2) return parsed;
-                        }
-                    }
-                    return 1;
-                })(),
-                speechPitch: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('speechPitch');
-                        if (saved) {
-                            const parsed = parseFloat(saved);
-                            if (!isNaN(parsed) && parsed >= 0.5 && parsed <= 2) return parsed;
-                        }
-                    }
-                    return 1;
-                })(),
-                speechVolume: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('speechVolume');
-                        if (saved) {
-                            const parsed = parseFloat(saved);
-                            if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) return parsed;
-                        }
-                    }
-                    return 1;
-                })(),
+                ttsProvider: INITIAL_TTS_PROVIDER,
+                ttsSpeechSdkProvider: INITIAL_TTS_SPEECH_SDK_PROVIDER,
+                ttsModel: INITIAL_TTS_MODEL,
+                ttsVoice: INITIAL_TTS_VOICE,
+                ttsVoiceLocale: INITIAL_TTS_VOICE_LOCALE,
+                ttsApiKey: INITIAL_TTS_API_KEY,
+                ttsApiKeyMode: INITIAL_TTS_API_KEY_MODE,
+                ttsBaseURL: INITIAL_TTS_BASE_URL,
+                ttsTimestampsEnabled: INITIAL_TTS_TIMESTAMPS_ENABLED,
+                ttsRate: INITIAL_TTS_RATE,
+                ttsPitch: INITIAL_TTS_PITCH,
+                ttsVolume: INITIAL_TTS_VOLUME,
+                ttsProviderOptions: {},
+                speechRate: INITIAL_TTS_RATE,
+                speechPitch: INITIAL_TTS_PITCH,
+                speechVolume: INITIAL_TTS_VOLUME,
                 // macOS Say voice - load from localStorage or default to 'Samantha'
                 sayVoice: (() => {
                     if (typeof window !== 'undefined') {
@@ -724,46 +874,17 @@ export const useConfigStore = create<ConfigStore>()(
                     }
                     return '';
                 })(),
-                // OpenAI voice - load from localStorage or default to 'nova'
-                openaiVoice: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('openaiVoice');
-                        if (saved) return saved;
-                    }
-                    return 'nova';
-                })(),
-                // OpenAI API key for TTS - load from localStorage or default to empty
-                openaiApiKey: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('openaiApiKey');
-                        if (saved) return saved;
-                    }
-                    return '';
-                })(),
-                // OpenAI-compatible custom server URL
-                openaiCompatibleUrl: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('openaiCompatibleUrl');
-                        if (saved) return saved;
-                    }
-                    return '';
-                })(),
-                // OpenAI-compatible custom server voice
-                openaiCompatibleVoice: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('openaiCompatibleVoice');
-                        if (saved) return saved;
-                    }
-                    return 'af_sky';
-                })(),
-                // OpenAI-compatible custom server TTS model
-                openaiCompatibleTtsModel: (() => {
-                    if (typeof window !== 'undefined') {
-                        const saved = localStorage.getItem('openaiCompatibleTtsModel');
-                        if (saved && saved !== 'speaches-ai/Kokoro-82M-v1.0-ONNX') return saved;
-                    }
-                    return 'kokoro';
-                })(),
+                openaiVoice: INITIAL_TTS_PROVIDER === 'speech-sdk'
+                    ? INITIAL_TTS_VOICE
+                    : readLocalStorageString('openaiVoice') ?? 'coral',
+                openaiApiKey: INITIAL_TTS_API_KEY,
+                openaiCompatibleUrl: INITIAL_TTS_BASE_URL,
+                openaiCompatibleVoice: INITIAL_TTS_PROVIDER === 'openai-compatible'
+                    ? INITIAL_TTS_VOICE
+                    : readLocalStorageString('openaiCompatibleVoice') ?? 'af_sky',
+                openaiCompatibleTtsModel: INITIAL_TTS_PROVIDER === 'openai-compatible'
+                    ? INITIAL_TTS_MODEL
+                    : readLocalStorageString('openaiCompatibleTtsModel') ?? 'kokoro',
                 // STT provider: 'browser' (Web Speech API), 'server' (OpenAI-compat), 'wasm' (local Whisper)
                 sttProvider: (() => {
                     if (typeof window !== 'undefined') {
@@ -1821,33 +1942,185 @@ export const useConfigStore = create<ConfigStore>()(
                 },
 
                 setVoiceProvider: (provider: 'browser' | 'openai' | 'openai-compatible' | 'say') => {
-                    set({ voiceProvider: provider });
+                    const nextTtsProvider: TtsProviderId = provider === 'openai' ? 'speech-sdk' : provider;
+                    const nextSpeechSdkProvider = provider === 'openai'
+                        ? 'openai'
+                        : get().ttsSpeechSdkProvider;
+                    const nextDefaults = getSpeechSdkProviderDefaults(nextSpeechSdkProvider);
+                    set({
+                        voiceProvider: provider,
+                        ttsProvider: nextTtsProvider,
+                        ttsSpeechSdkProvider: nextSpeechSdkProvider,
+                        ...(provider === 'openai'
+                            ? {
+                                ttsModel: get().ttsModel || nextDefaults.defaultModel,
+                                ttsVoice: get().ttsVoice || nextDefaults.defaultVoice,
+                            }
+                            : {}),
+                    });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('voiceProvider', provider);
+                        localStorage.setItem('ttsProvider', nextTtsProvider);
+                        if (provider === 'openai') {
+                            localStorage.setItem('ttsSpeechSdkProvider', nextSpeechSdkProvider);
+                        }
                     }
+                },
+
+                setTtsProvider: (provider: TtsProviderId) => {
+                    const state = get();
+                    const legacyProvider = provider === 'speech-sdk'
+                        ? 'openai'
+                        : provider === 'openai-compatible' || provider === 'say'
+                            ? provider
+                            : 'browser';
+                    const speechDefaults = getSpeechSdkProviderDefaults(state.ttsSpeechSdkProvider);
+                    set({
+                        ttsProvider: provider,
+                        voiceProvider: legacyProvider,
+                        ...(provider === 'speech-sdk'
+                            ? {
+                                ttsModel: state.ttsModel || speechDefaults.defaultModel,
+                                ttsVoice: state.ttsVoice || speechDefaults.defaultVoice,
+                            }
+                            : {}),
+                    });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsProvider', provider);
+                        localStorage.setItem('voiceProvider', legacyProvider);
+                    }
+                },
+
+                setTtsSpeechSdkProvider: (provider: SpeechSdkProviderId) => {
+                    const defaults = getSpeechSdkProviderDefaults(provider);
+                    set({
+                        ttsSpeechSdkProvider: provider,
+                        ttsModel: defaults.defaultModel,
+                        ttsVoice: defaults.defaultVoice,
+                        ...(get().ttsProvider === 'speech-sdk' ? { openaiVoice: defaults.defaultVoice } : {}),
+                    });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsSpeechSdkProvider', provider);
+                        localStorage.setItem('ttsModel', defaults.defaultModel);
+                        localStorage.setItem('ttsVoice', defaults.defaultVoice);
+                    }
+                },
+
+                setTtsModel: (model: string) => {
+                    set({ ttsModel: model });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsModel', model);
+                    }
+                },
+
+                setTtsVoice: (voice: string) => {
+                    const state = get();
+                    set({
+                        ttsVoice: voice,
+                        ...(state.ttsProvider === 'speech-sdk' && state.ttsSpeechSdkProvider === 'openai' ? { openaiVoice: voice } : {}),
+                        ...(state.ttsProvider === 'openai-compatible' ? { openaiCompatibleVoice: voice } : {}),
+                    });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsVoice', voice);
+                    }
+                },
+
+                setTtsVoiceLocale: (locale: string) => {
+                    set({ ttsVoiceLocale: locale });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsVoiceLocale', locale);
+                    }
+                },
+
+                setTtsApiKey: (apiKey: string) => {
+                    set({
+                        ttsApiKey: apiKey,
+                        openaiApiKey: apiKey,
+                    });
+                    removeLocalStorageKey('ttsApiKey');
+                    removeLocalStorageKey('openaiApiKey');
+                },
+
+                setTtsApiKeyMode: (mode: TtsApiKeyMode) => {
+                    set({ ttsApiKeyMode: mode });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsApiKeyMode', mode);
+                    }
+                },
+
+                setTtsBaseURL: (url: string) => {
+                    set({
+                        ttsBaseURL: url,
+                        openaiCompatibleUrl: url,
+                    });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsBaseURL', url);
+                        localStorage.setItem('openaiCompatibleUrl', url);
+                    }
+                },
+
+                setTtsTimestampsEnabled: (enabled: boolean) => {
+                    set({ ttsTimestampsEnabled: enabled });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsTimestampsEnabled', String(enabled));
+                    }
+                },
+
+                setTtsRate: (rate: number) => {
+                    const clampedRate = Math.max(0.5, Math.min(2, rate));
+                    set({ ttsRate: clampedRate, speechRate: clampedRate });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsRate', String(clampedRate));
+                        localStorage.setItem('speechRate', String(clampedRate));
+                    }
+                },
+
+                setTtsPitch: (pitch: number) => {
+                    const clampedPitch = Math.max(0.5, Math.min(2, pitch));
+                    set({ ttsPitch: clampedPitch, speechPitch: clampedPitch });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsPitch', String(clampedPitch));
+                        localStorage.setItem('speechPitch', String(clampedPitch));
+                    }
+                },
+
+                setTtsVolume: (volume: number) => {
+                    const clampedVolume = Math.max(0, Math.min(1, volume));
+                    set({ ttsVolume: clampedVolume, speechVolume: clampedVolume });
+                    if (typeof window !== 'undefined') {
+                        localStorage.setItem('ttsVolume', String(clampedVolume));
+                        localStorage.setItem('speechVolume', String(clampedVolume));
+                    }
+                },
+
+                setTtsProviderOptions: (options: Record<string, unknown>) => {
+                    set({ ttsProviderOptions: options });
                 },
 
                 setSpeechRate: (rate: number) => {
                     const clampedRate = Math.max(0.5, Math.min(2, rate));
-                    set({ speechRate: clampedRate });
+                    set({ speechRate: clampedRate, ttsRate: clampedRate });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('speechRate', String(clampedRate));
+                        localStorage.setItem('ttsRate', String(clampedRate));
                     }
                 },
 
                 setSpeechPitch: (pitch: number) => {
                     const clampedPitch = Math.max(0.5, Math.min(2, pitch));
-                    set({ speechPitch: clampedPitch });
+                    set({ speechPitch: clampedPitch, ttsPitch: clampedPitch });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('speechPitch', String(clampedPitch));
+                        localStorage.setItem('ttsPitch', String(clampedPitch));
                     }
                 },
 
                 setSpeechVolume: (volume: number) => {
                     const clampedVolume = Math.max(0, Math.min(1, volume));
-                    set({ speechVolume: clampedVolume });
+                    set({ speechVolume: clampedVolume, ttsVolume: clampedVolume });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('speechVolume', String(clampedVolume));
+                        localStorage.setItem('ttsVolume', String(clampedVolume));
                     }
                 },
 
@@ -1866,37 +2139,45 @@ export const useConfigStore = create<ConfigStore>()(
                 },
 
                 setOpenaiVoice: (voice: string) => {
-                    set({ openaiVoice: voice });
+                    const state = get();
+                    set({
+                        openaiVoice: voice,
+                        ...(state.ttsProvider === 'speech-sdk' && state.ttsSpeechSdkProvider === 'openai' ? { ttsVoice: voice } : {}),
+                    });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('openaiVoice', voice);
+                        if (state.ttsProvider === 'speech-sdk' && state.ttsSpeechSdkProvider === 'openai') {
+                            localStorage.setItem('ttsVoice', voice);
+                        }
                     }
                 },
 
                 setOpenaiApiKey: (apiKey: string) => {
-                    set({ openaiApiKey: apiKey });
-                    if (typeof window !== 'undefined') {
-                        localStorage.setItem('openaiApiKey', apiKey);
-                    }
+                    set({ openaiApiKey: apiKey, ttsApiKey: apiKey });
+                    removeLocalStorageKey('openaiApiKey');
                 },
 
                 setOpenaiCompatibleUrl: (url: string) => {
-                    set({ openaiCompatibleUrl: url });
+                    set({ openaiCompatibleUrl: url, ttsBaseURL: url });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('openaiCompatibleUrl', url);
+                        localStorage.setItem('ttsBaseURL', url);
                     }
                 },
 
                 setOpenaiCompatibleVoice: (voice: string) => {
-                    set({ openaiCompatibleVoice: voice });
+                    set({ openaiCompatibleVoice: voice, ttsVoice: voice });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('openaiCompatibleVoice', voice);
+                        localStorage.setItem('ttsVoice', voice);
                     }
                 },
 
                 setOpenaiCompatibleTtsModel: (model: string) => {
-                    set({ openaiCompatibleTtsModel: model });
+                    set({ openaiCompatibleTtsModel: model, ttsModel: model });
                     if (typeof window !== 'undefined') {
                         localStorage.setItem('openaiCompatibleTtsModel', model);
+                        localStorage.setItem('ttsModel', model);
                     }
                 },
 
