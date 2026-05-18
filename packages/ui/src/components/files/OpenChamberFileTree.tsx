@@ -535,8 +535,11 @@ export const OpenChamberFileTree: React.FC<OpenChamberFileTreeProps> = ({
       return;
     }
 
+    // Trees does not expose custom drag payload hooks yet, so this bridges onto
+    // the current shadow-DOM row attributes (`data-item-path`, `data-item-type`)
+    // to preserve OpenChamber's chat attachment drag payload contract.
     const applyDraggable = () => {
-      shadowRoot.querySelectorAll<HTMLElement>('[data-item-path][data-item-type="file"]').forEach((element) => {
+      shadowRoot.querySelectorAll<HTMLElement>('[data-item-path][data-item-type="file"]:not([draggable="true"])').forEach((element) => {
         element.setAttribute('draggable', 'true');
       });
     };
@@ -570,7 +573,40 @@ export const OpenChamberFileTree: React.FC<OpenChamberFileTreeProps> = ({
       observer.disconnect();
       shadowRoot.removeEventListener('dragstart', handleDragStart);
     };
-  }, [normalizedRoot, searchResults.length]);
+  }, [normalizedRoot]);
+
+  const renderContextMenu = React.useCallback((item: ContextMenuItem, context: ContextMenuOpenContext) => (
+    <TreeContextMenu
+      canCopyRelativePath={openMode === 'files-editor'}
+      canCreateFile={canCreateFile}
+      canCreateFolder={canCreateFolder}
+      canDelete={canDelete}
+      canRename={canRename}
+      canReveal={canReveal}
+      context={{
+        anchorRect: context.anchorRect as DOMRect,
+        close: context.close,
+      }}
+      downloadFile={files.downloadFile}
+      item={{ kind: item.kind, name: item.name, path: fromTreePath(normalizedRoot, item.path) }}
+      onOpenDialog={handleOpenDialog}
+      onRevealPath={handleRevealPath}
+      root={normalizedRoot}
+      t={t}
+    />
+  ), [
+    canCreateFile,
+    canCreateFolder,
+    canDelete,
+    canRename,
+    canReveal,
+    files.downloadFile,
+    handleOpenDialog,
+    handleRevealPath,
+    normalizedRoot,
+    openMode,
+    t,
+  ]);
 
   return (
     <section className={cn(
@@ -685,26 +721,7 @@ export const OpenChamberFileTree: React.FC<OpenChamberFileTreeProps> = ({
         ) : hasTree ? (
           <FileTree
             model={model}
-            renderContextMenu={(item: ContextMenuItem, context: ContextMenuOpenContext) => (
-              <TreeContextMenu
-                canCopyRelativePath={openMode === 'files-editor'}
-                canCreateFile={canCreateFile}
-                canCreateFolder={canCreateFolder}
-                canDelete={canDelete}
-                canRename={canRename}
-                canReveal={canReveal}
-                context={{
-                  anchorRect: context.anchorRect as DOMRect,
-                  close: context.close,
-                }}
-                downloadFile={files.downloadFile}
-                item={{ kind: item.kind, name: item.name, path: fromTreePath(normalizedRoot, item.path) }}
-                onOpenDialog={handleOpenDialog}
-                onRevealPath={handleRevealPath}
-                root={normalizedRoot}
-                t={t}
-              />
-            )}
+            renderContextMenu={renderContextMenu}
             className="h-full w-full"
             style={treeStyles}
           />

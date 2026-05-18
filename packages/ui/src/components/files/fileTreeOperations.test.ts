@@ -25,6 +25,7 @@ describe('fileTreeOperations', () => {
     expect(isPathWithinRoot('/repo/src/index.ts', '/repo')).toBe(true);
     expect(isPathWithinRoot('/repo-two/src/index.ts', '/repo')).toBe(false);
     expect(isPathWithinRoot('C:/Repo/src/index.ts', 'c:/repo')).toBe(true);
+    expect(isPathWithinRoot('//server/share/folder/file.txt', '//server/share')).toBe(true);
   });
 
   test('maps directory entries to filtered file tree nodes', () => {
@@ -116,5 +117,7 @@ describe('fileTreeOperations', () => {
       .toEqual(['/repo/source', '/repo/source/lib', '/repo/docs']);
     expect(rebaseExpandedPaths(['/repo/src', '/repo/src/lib', '/repo/docs'], '/repo/src', null))
       .toEqual(['/repo/docs']);
+    expect(rebaseExpandedPaths(['C:/Repo/src'], 'c:/repo', 'C:/Source'))
+      .toEqual(['C:/Source/src']);
   });
 });

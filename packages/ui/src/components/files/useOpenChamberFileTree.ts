@@ -52,6 +52,7 @@ type UseOpenChamberFileTreeResult = {
 };
 
 const TREE_ICONS: FileTreeIcons = { colored: true, set: 'complete' };
+const DIRECTORY_LOAD_BATCH_SIZE = 3;
 
 export const useOpenChamberFileTree = ({
   expandedPaths,
@@ -98,6 +99,9 @@ export const useOpenChamberFileTree = ({
   const previousExpandedTreePathsRef = React.useRef<Set<string>>(new Set());
 
   const renderRowDecoration = React.useCallback(({ item }: { item: { path: string } }) => {
+    // Keep this callback stable because Trees mounts one long-lived model. Refs
+    // are used instead of dependencies so row decorations reflect current state
+    // without recreating the callback on every render.
     const rootPath = rootRef.current;
     if (!rootPath) {
       return null;
@@ -112,6 +116,9 @@ export const useOpenChamberFileTree = ({
   }, []);
 
   const handleSelectionChange = React.useCallback((selectedPaths: readonly string[]) => {
+    // OpenChamber drives single-file selection here. Trees can represent
+    // multi-selection, but this integration intentionally acts on the latest
+    // selected path only.
     const selectedTreePath = selectedPaths[selectedPaths.length - 1] ?? null;
     const rootPath = rootRef.current;
     if (!selectedTreePath || !rootPath) {
@@ -321,8 +328,12 @@ export const useOpenChamberFileTree = ({
 
     let cancelled = false;
     void (async () => {
-      for (let index = 0; index < toLoad.length && !cancelled; index += 3) {
-        await Promise.all(toLoad.slice(index, index + 3).map((path) => loadDirectory(path)));
+      for (let index = 0; index < toLoad.length && !cancelled; index += DIRECTORY_LOAD_BATCH_SIZE) {
+        await Promise.all(
+          toLoad
+            .slice(index, index + DIRECTORY_LOAD_BATCH_SIZE)
+            .map((path) => loadDirectory(path)),
+        );
       }
     })();
 

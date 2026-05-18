@@ -111,7 +111,7 @@ export const getAncestorPaths = (filePath: string, root: string): string[] => {
   let current = normalizedRoot;
 
   for (let index = 0; index < parts.length - 1; index += 1) {
-    current = current ? `${current}/${parts[index]}` : parts[index] ?? current;
+    current = normalizePath(`${current === '/' ? '' : current}/${parts[index]}`);
     ancestors.push(current);
   }
 
@@ -231,6 +231,11 @@ export const buildPreparedTreeInput = (
 };
 
 const toTreeGitStatus = (file: GitStatus['files'][number]): GitStatusEntry['status'] | null => {
+  // Preserve a stable precedence so combined porcelain states still collapse to
+  // one Trees status. Added/deleted/renamed take priority over modified.
+  // Git reports staged additions as index === 'A'; working_dir === 'A' is not
+  // used by this codebase's git status contract, so only the staged marker
+  // maps to Trees' added state here.
   if (file.index === 'R' || file.working_dir === 'R') return 'renamed';
   if (file.index === 'D' || file.working_dir === 'D') return 'deleted';
   if (file.index === 'A') return 'added';
@@ -293,32 +298,37 @@ export const getMutationRefreshTargets = ({
     targets.add(normalizePath(parentPath));
   }
 
-  if (type === 'create' && newPath) {
-    const normalizedNewPath = normalizePath(newPath);
-    if (collectExpandedDescendants(expandedPaths, normalizedNewPath).length > 0) {
-      targets.add(normalizedNewPath);
+  switch (type) {
+    case 'create': {
+      if (newPath) {
+        const normalizedNewPath = normalizePath(newPath);
+        if (collectExpandedDescendants(expandedPaths, normalizedNewPath).length > 0) {
+          targets.add(normalizedNewPath);
+        }
+      }
+      return Array.from(targets).filter(Boolean);
     }
-    return Array.from(targets);
-  }
-
-  if (type === 'delete' && oldPath) {
-    for (const path of collectExpandedDescendants(expandedPaths, oldPath)) {
-      targets.add(path);
+    case 'delete': {
+      if (oldPath) {
+        for (const path of collectExpandedDescendants(expandedPaths, oldPath)) {
+          targets.add(path);
+        }
+      }
+      return Array.from(targets).filter(Boolean);
     }
-    return Array.from(targets);
-  }
-
-  if (type === 'rename' && oldPath && newPath) {
-    const normalizedOldPath = normalizePath(oldPath);
-    const normalizedNewPath = normalizePath(newPath);
-    for (const path of collectExpandedDescendants(expandedPaths, normalizedOldPath)) {
-      const suffix = path.slice(normalizedOldPath.length);
-      targets.add(normalizePath(`${normalizedNewPath}${suffix}`));
+    case 'rename': {
+      if (oldPath && newPath) {
+        const normalizedOldPath = normalizePath(oldPath);
+        const normalizedNewPath = normalizePath(newPath);
+        for (const path of collectExpandedDescendants(expandedPaths, normalizedOldPath)) {
+          const suffix = path.slice(normalizedOldPath.length);
+          targets.add(normalizePath(`${normalizedNewPath}${suffix}`));
+        }
+        targets.add(getParentDirectoryPath(normalizedNewPath));
+      }
+      return Array.from(targets).filter(Boolean);
     }
-    targets.add(getParentDirectoryPath(normalizedNewPath));
   }
-
-  return Array.from(targets).filter(Boolean);
 };
 
 export const rebaseExpandedPaths = (

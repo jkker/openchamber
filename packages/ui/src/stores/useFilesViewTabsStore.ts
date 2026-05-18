@@ -158,6 +158,15 @@ const touchRoot = (prev: RootTabsState | undefined): RootTabsState => {
   return { openPaths: [], selectedPath: null, expandedPaths: [], touchedAt: Date.now() };
 };
 
+const haveEqualPathSets = (left: readonly string[], right: readonly string[]): boolean => {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const rightSet = new Set(right);
+  return left.every((path) => rightSet.has(path));
+};
+
 export const useFilesViewTabsStore = create<FilesViewTabsStore>()(
   devtools(
     persist(
@@ -426,8 +435,7 @@ export const useFilesViewTabsStore = create<FilesViewTabsStore>()(
             const current = touchRoot(prev);
             if (
               prev
-              && prev.expandedPaths.length === normalizedPaths.length
-              && prev.expandedPaths.every((path, index) => path === normalizedPaths[index])
+              && haveEqualPathSets(prev.expandedPaths, normalizedPaths)
             ) {
               return state;
             }
